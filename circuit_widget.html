@@ -178,7 +178,7 @@ function createCircuit() {
   const ioComponents = new Map();
   const wires = new Map();
 
-  function addComponent(kind, x, y) {
+  function addComponent(kind, x, y, label = "none") {
     const def = GATE_DEFS[kind];
     const id = 'c'+(nextId++);
     const ioId = kind==='INPUT' || kind==='OUTPUT' ? 'io'+(nextIoId++) : '' 
@@ -189,7 +189,7 @@ function createCircuit() {
            : kind==='DFF'   ? {q:0, lastClk:0} : {},
       inputVals:  new Array(def.inputs).fill(0),
       outputVals: new Array(def.outputs).fill(0),
-      label: String.fromCharCode(Number(ioId.slice(2)) + 64),
+      label: label == "none" ? String.fromCharCode(Number(ioId.slice(2)) + 64) : label,
       lastChange: 0,
     };
     components.set(id, comp);
@@ -815,6 +815,10 @@ function App(){
   const[saveName,setSaveName]=useState('');
   const[showLoad,setShowLoad]=useState(false);
   const[showEquation, setShowEquation]=useState(false);
+  const[showLoadEquation, setShowLoadEquation]=useState(false);
+  const[equation,setEquation]=useState('');
+
+
 
   window.__delayMs=delayMs;
   window.__particleDensity=4;
@@ -901,6 +905,92 @@ function App(){
     }
   }
 
+  const loadEquation=()=>{
+    const eqs = equation.trim();
+
+    const outputLabel = eqs[0];
+    const inputLabels = eqs.slice(4).split("").filter(c => c != "'" && c != " ");
+
+    circuit.components.clear(); circuit.ioComponents.clear(); circuit.wires.clear(); 
+    
+    let maxIoId = -1;
+    const labelsToComps = new Map();
+    for (let i = 0; i < inputLabels.length; i++) {
+      circuit.nextIoId = inputLabels[i].charCodeAt(0);
+      if (circuit.nextIoId > maxIoId) {
+        maxIoId = circuit.nextIoId;
+      }
+      const comp = circuit.addComponent("INPUT", 0, i * 50, inputLabels[i]);
+      labelsToComps.set(circuit.nextId - 1, comp);
+    }
+
+    circuit.nextIoId = outputLabel.charCodeAt(0);
+    if (circuit.nextIoId > maxIoId) {
+      maxIoId = circuit.nextIoId;
+    }
+    const comp = circuit.addComponent("OUTPUT", 400, 0, outputLabel);
+    labelsToComps.set(circuit.nextId - 1, comp);
+    
+    let orInputs = eqs.slice(4).split(" + ");
+    let numOrs = 0;
+    let numAnds = 0;
+    let numNots = 0;
+    for (let i = 0; i < orInputs.length; i++) {
+      let result = createAndComp(orInputs[i], labelsToComps, numAnds, numNots);
+      orInputs[i] = result[comp];
+      numAnds += result[numAnds];
+      numNots += result[numNots];
+    }
+    let orComps = [];
+    for (let i = 0; i < orInputs.length - 1; i++) {
+      let orComp = circuit.addComponent("OR", 300, 100 * numOrs);
+      numOrs++;
+      circuit.addWire(orInputs[i], orComp);
+      circuit.addWire(orInputs[i + 1], orComp);
+      orInputs[i + 1] = orComp;
+      orComps.push(orComps);
+    }
+
+    circuit.addWire(orComps.pop(), comp);
+
+    setShowLoadEquation(false);
+  }
+
+  function createAndComp(string, labelsToComps, numAnds, numNots) {
+    let andInputs = string.split("");
+    let i = 0;
+    while (i < andInputs.length) {
+      if (i < andInputs.length - 1 && andInputs[i + 1] == "'") {
+        let result = createNotComp(andInputs[i], labelsToComps, numNots);
+        andInputs[i] = result[comp];
+        numNots += result[numNots];
+        andInputs.splice(i + 1, 1);
+      }
+      else {
+        andInputs[i] = labelsToComps.get(andInputs[i]);
+      }
+      i++;
+    }
+    let andComps = [];
+    for (let i = 0; i < andInputs.length - 1; i++) {
+      let andComp = circuit.addComponent("AND", 200, 100 * numAnds);
+      numAnds++;
+      circuit.addWire(andInputs[i], andComp);
+      circuit.addWire(andInputs[i + 1], andComp);
+      andInputs[i + 1] = andComp;
+      andComps.push(andComp)
+    }
+    return {comp: andComps.pop(), numAnds, numNots};
+  }
+
+  function createNotComp(label, labelsToComps, numNots) {
+    const input = labelsToComps.get(label);
+    const comp = circuit.addComponent("NOT", 100, numNots * 50);
+    numNots++;
+    circuit.addWire(input, comp);
+    return {comp, numNots};
+  }
+
   const n=circuit.components.size;
 
   return <div className="app">
@@ -912,6 +1002,7 @@ function App(){
       <button className="btn ghost" style={{height:26,fontSize:12}} onClick={()=>setShowLoad(true)}>Load</button>
       <button className="btn ghost" style={{height:26,fontSize:12,color:'var(--ink-3)'}} onClick={doClear} disabled={n===0}>Clear</button>
       <button className="btn ghost" style={{height:26,fontSize:12}} onClick={()=>setShowEquation(true)}>Generate Equation</button>
+      <button className="btn ghost" style={{height:26,fontSize:12}} onClick={()=>setShowLoadEquation(true)}>Load Equation</button>
       {/* Propagation delay */}
       <div className="tb-delay">
         <span>Delay</span>
@@ -969,6 +1060,16 @@ function App(){
       <div className="dialog-actions">
         <button className="btn ghost" onClick={()=>generateEquation()}>Generate</button>
         <button className="btn ghost" onClick={()=>setShowEquation(false)}>Exit</button>
+      </div>
+    </Dialog>}
+
+    {showLoadEquation&&<Dialog title="Load Equation" onClose={()=>setShowLoadEquation(false)}>
+      <input className="text-input" placeholder="A = B" value={equation} autoFocus
+             onChange={e=>setEquation(e.target.value)}
+             onKeyDown={e=>e.key==='Enter'&&loadEquation()}/>
+      <div className="dialog-actions">
+        <button className="btn ghost" onClick={()=>setShowLoadEquation(false)}>Cancel</button>
+        <button className="btn primary" onClick={loadEquation}>Load</button>
       </div>
     </Dialog>}
 
