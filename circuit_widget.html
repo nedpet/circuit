@@ -906,89 +906,76 @@ function App(){
   }
 
   const loadEquation=()=>{
-    const eqs = equation.trim();
+    const eq = equation.trim();
+    const match = /^([A-Za-z])\s*=\s*(.+)$/.exec(eq);
+    if (!match) {
+      alert('Enter an equation like A = B + C\'');
+      return;
+    }
 
-    const outputLabel = eqs[0];
-    const inputLabels = eqs.slice(4).split("").filter(c => c != "'" && c != " ");
+    const outputLabel = match[1];
+    const rhs = match[2];
+    const literalLabels = [...new Set((rhs.match(/[A-Za-z]/g) || []))].filter(l => l !== outputLabel);
 
-    circuit.components.clear(); circuit.ioComponents.clear(); circuit.wires.clear(); 
-    
-    let maxIoId = -1;
+    circuit.components.clear(); circuit.ioComponents.clear(); circuit.wires.clear();
+
     const labelsToComps = new Map();
-    for (let i = 0; i < inputLabels.length; i++) {
-      circuit.nextIoId = inputLabels[i].charCodeAt(0);
-      if (circuit.nextIoId > maxIoId) {
-        maxIoId = circuit.nextIoId;
-      }
-      const comp = circuit.addComponent("INPUT", 0, i * 50, inputLabels[i]);
-      labelsToComps.set(circuit.nextId - 1, comp);
-    }
+    literalLabels.forEach((label, idx) => {
+      const comp = circuit.addComponent("INPUT", 0, idx * 60, label);
+      labelsToComps.set(label, comp);
+    });
 
-    circuit.nextIoId = outputLabel.charCodeAt(0);
-    if (circuit.nextIoId > maxIoId) {
-      maxIoId = circuit.nextIoId;
-    }
-    const comp = circuit.addComponent("OUTPUT", 400, 0, outputLabel);
-    labelsToComps.set(circuit.nextId - 1, comp);
-    
-    let orInputs = eqs.slice(4).split(" + ");
-    let numOrs = 0;
+    const outputComp = circuit.addComponent("OUTPUT", 400, 0, outputLabel);
+
     let numAnds = 0;
     let numNots = 0;
-    for (let i = 0; i < orInputs.length; i++) {
-      let result = createAndComp(orInputs[i], labelsToComps, numAnds, numNots);
-      orInputs[i] = result[comp];
-      numAnds += result[numAnds];
-      numNots += result[numNots];
-    }
-    let orComps = [];
-    for (let i = 0; i < orInputs.length - 1; i++) {
-      let orComp = circuit.addComponent("OR", 300, 100 * numOrs);
-      numOrs++;
-      circuit.addWire(orInputs[i], orComp);
-      circuit.addWire(orInputs[i + 1], orComp);
-      orInputs[i + 1] = orComp;
-      orComps.push(orComps);
+
+    const wireFrom = (comp, pin=0) => ({compId: comp.id, pin});
+    const parseLiteral = (literal) => {
+      const label = literal[0];
+      const comp = labelsToComps.get(label);
+      if (!comp) throw new Error(`Unknown input label ${label}`);
+      if (literal.endsWith("'")) {
+        const notComp = circuit.addComponent("NOT", 100, numNots * 70);
+        numNots++;
+        circuit.addWire(wireFrom(comp), wireFrom(notComp));
+        return wireFrom(notComp);
+      }
+      return wireFrom(comp);
+    };
+
+    const createAndTerm = (term) => {
+      const literals = term.match(/[A-Za-z]'?/g) || [];
+      if (literals.length === 0) return null;
+      let current = parseLiteral(literals[0]);
+      for (let i = 1; i < literals.length; i++) {
+        const next = parseLiteral(literals[i]);
+        const andComp = circuit.addComponent("AND", 200, numAnds * 70);
+        numAnds++;
+        circuit.addWire(current, {compId: andComp.id, pin: 0});
+        circuit.addWire(next, {compId: andComp.id, pin: 1});
+        current = {compId: andComp.id, pin: 0};
+      }
+      return current;
+    };
+
+    const orTerms = rhs.split('+').map(t => t.trim()).filter(Boolean);
+    if (orTerms.length === 0) {
+      alert('No terms found in the equation');
+      return;
     }
 
-    circuit.addWire(orComps.pop(), comp);
+    let outputSource = createAndTerm(orTerms[0]);
+    for (let i = 1; i < orTerms.length; i++) {
+      const nextTerm = createAndTerm(orTerms[i]);
+      const orComp = circuit.addComponent("OR", 300, i * 70);
+      circuit.addWire(outputSource, {compId: orComp.id, pin: 0});
+      circuit.addWire(nextTerm, {compId: orComp.id, pin: 1});
+      outputSource = {compId: orComp.id, pin: 0};
+    }
 
+    circuit.addWire(outputSource, {compId: outputComp.id, pin: 0});
     setShowLoadEquation(false);
-  }
-
-  function createAndComp(string, labelsToComps, numAnds, numNots) {
-    let andInputs = string.split("");
-    let i = 0;
-    while (i < andInputs.length) {
-      if (i < andInputs.length - 1 && andInputs[i + 1] == "'") {
-        let result = createNotComp(andInputs[i], labelsToComps, numNots);
-        andInputs[i] = result[comp];
-        numNots += result[numNots];
-        andInputs.splice(i + 1, 1);
-      }
-      else {
-        andInputs[i] = labelsToComps.get(andInputs[i]);
-      }
-      i++;
-    }
-    let andComps = [];
-    for (let i = 0; i < andInputs.length - 1; i++) {
-      let andComp = circuit.addComponent("AND", 200, 100 * numAnds);
-      numAnds++;
-      circuit.addWire(andInputs[i], andComp);
-      circuit.addWire(andInputs[i + 1], andComp);
-      andInputs[i + 1] = andComp;
-      andComps.push(andComp)
-    }
-    return {comp: andComps.pop(), numAnds, numNots};
-  }
-
-  function createNotComp(label, labelsToComps, numNots) {
-    const input = labelsToComps.get(label);
-    const comp = circuit.addComponent("NOT", 100, numNots * 50);
-    numNots++;
-    circuit.addWire(input, comp);
-    return {comp, numNots};
   }
 
   const n=circuit.components.size;
