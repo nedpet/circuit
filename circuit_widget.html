@@ -28,7 +28,10 @@
 }
 *,*::before,*::after { box-sizing: border-box; }
 html,body,#root { height:100%; margin:0; }
-body { font-family:var(--ui); color:var(--ink); background:var(--bg); overflow:hidden; font-size:13px; }
+body { font-family:var(--ui); color:var(--ink); background:var(--bg); overflow:hidden; font-size:13px;
+  -webkit-user-select:none; -moz-user-select:none; -ms-user-select:none; user-select:none;
+}
+input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-select:text; user-select:text; }
 
 .app  { height:100%; display:flex; flex-direction:column; }
 .main { flex:1; display:flex; min-height:0; }
@@ -137,6 +140,8 @@ body { font-family:var(--ui); color:var(--ink); background:var(--bg); overflow:h
 <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" crossorigin></script>
 <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" crossorigin></script>
 
+<script src="quine_mccluskey.js"></script>
+
 <script type="text/babel">
 /* ═══ ENGINE ═══════════════════════════════════════════════════════════════ */
 (function () {
@@ -168,27 +173,40 @@ const GATE_DEFS = {
 
 function createCircuit() {
   let nextId = 1;
+  let nextIoId = 1;
   const components = new Map();
+  const ioComponents = new Map();
   const wires = new Map();
 
   function addComponent(kind, x, y) {
     const def = GATE_DEFS[kind];
     const id = 'c'+(nextId++);
+    const ioId = kind==='INPUT' || kind==='OUTPUT' ? 'io'+(nextIoId++) : '' 
     const comp = {
-      id, kind, x, y,
+      id, ioId, kind, x, y,
       state: kind==='INPUT' ? {value:0}
            : kind==='CLOCK' ? {value:0, period:1000, lastTick:0, paused:false}
            : kind==='DFF'   ? {q:0, lastClk:0} : {},
       inputVals:  new Array(def.inputs).fill(0),
       outputVals: new Array(def.outputs).fill(0),
+      label: String.fromCharCode(Number(ioId.slice(2)) + 64),
       lastChange: 0,
     };
     components.set(id, comp);
+    if (ioId != '') {
+      ioComponents.set(ioId, comp);
+    }
     return comp;
   }
 
   function removeComponent(id) {
+    
+    const component = components.get(id);
     components.delete(id);
+
+    if (component.ioId != ''){
+      ioComponents.delete(component.ioId);
+    }
     for (const [wid,w] of wires) { if (w.from.compId===id||w.to.compId===id) wires.delete(wid); }
   }
 
@@ -239,27 +257,28 @@ function createCircuit() {
 
   function serialize() {
     return {
-      components: [...components.values()].map(c=>({id:c.id,kind:c.kind,x:c.x,y:c.y,
+      components: [...components.values()].map(c=>({id:c.id,ioId:c.ioId,kind:c.kind,x:c.x,y:c.y,
         state:c.kind==='INPUT'?{value:c.state.value}:c.kind==='CLOCK'?{period:c.state.period,paused:c.state.paused}:{}})),
       wires: [...wires.values()].map(w=>({id:w.id,from:w.from,to:w.to,points:w.points||[]})),
-      nextId,
+      nextId, nextIoId,
     };
   }
 
   function load(data) {
-    components.clear(); wires.clear(); if(!data) return;
+    components.clear(); ioComponents.clear(); wires.clear(); if(!data) return;
     for (const cd of data.components||[]) {
-      const c=addComponent(cd.kind,cd.x,cd.y); components.delete(c.id); c.id=cd.id;
-      if(cd.state) Object.assign(c.state,cd.state); components.set(c.id,c);
+      const c=addComponent(cd.kind,cd.x,cd.y); components.delete(c.id); ioComponents.delete(c.ioId); c.id=cd.id; c.ioId=cd.ioId;
+      if(cd.state) Object.assign(c.state,cd.state); components.set(c.id,c); ioComponents.set(c.ioId, c);
     }
     for (const wd of data.wires||[]) {
       const w=addWire(wd.from,wd.to); if(w){wires.delete(w.id);w.id=wd.id;w.points=wd.points||[];wires.set(w.id,w);}
     }
     nextId=Math.max(data.nextId||1,nextId);
+    nextIoId=Math.max(data.nextIoId||1,nextIoId);
   }
 
   return {
-    components, wires,
+    components, wires, ioComponents,
     addComponent, removeComponent, addWire, removeWire, step, serialize, load,
     toggleInput(id){const c=components.get(id);if(c&&c.kind==='INPUT')c.state.value=c.state.value?0:1;},
     toggleClock(id){const c=components.get(id);if(c&&c.kind==='CLOCK'){c.state.paused=!c.state.paused;if(!c.state.paused)c.state.lastTick=performance.now();}},
@@ -310,6 +329,7 @@ VIS.INPUT = { w:60,h:40, inputs:[], outputs:[{x:60,y:20}],
       <rect x="4" y="4" width="52" height="32" rx="16" fill={on?'#fef3c7':'#f3f3f1'} stroke="var(--ink)" strokeWidth="2"/>
       <circle cx={on?40:20} cy="20" r="11" fill="white" stroke="var(--ink)" strokeWidth="1.5"/>
       <text x={on?18:38} y="24" fontFamily="var(--mono)" fontSize="11" fontWeight="600" textAnchor="middle" fill="var(--ink)" opacity="0.45">{on?'1':'0'}</text>
+      <text x="-15" y="26" fontFamily="var(--mono)" fontSize="16" fontWeight="600" textAnchor="middle" fill="var(--ink)" opacity="0.8">{comp.label}</text>
     </g>;
   }
 };
@@ -336,6 +356,7 @@ VIS.OUTPUT = { w:40,h:40, inputs:[{x:0,y:20}], outputs:[],
       {on?<circle cx="22" cy="20" r="20" fill="#fef3c7" opacity="0.55"/>:null}
       <circle cx="22" cy="20" r="13" fill={on?'#fde68a':'#f3f3f1'} stroke="var(--ink)" strokeWidth="2"/>
       <path d="M 17 26 L 17 30 L 27 30 L 27 26" fill="none" stroke="var(--ink)" strokeWidth="1.5" strokeLinecap="round"/>
+      <text x="55" y="26" fontFamily="var(--mono)" fontSize="16" fontWeight="600" textAnchor="middle" fill="var(--ink)" opacity="0.8">{comp.label}</text>
       {on?<g stroke="#d97706" strokeWidth="1.5" strokeLinecap="round">
         <line x1="22" y1="3"  x2="22" y2="6"/><line x1="37" y1="20" x2="40" y2="20"/>
         <line x1="4"  y1="20" x2="7"  y2="20"/><line x1="33" y1="9"  x2="35" y2="7"/>
@@ -793,6 +814,7 @@ function App(){
   const[showSave,setShowSave]=useState(false);
   const[saveName,setSaveName]=useState('');
   const[showLoad,setShowLoad]=useState(false);
+  const[showEquation, setShowEquation]=useState(false);
 
   window.__delayMs=delayMs;
   window.__particleDensity=4;
@@ -838,6 +860,46 @@ function App(){
   const doLoad=(s)=>{circuit.load(s.data);setShowLoad(false);refresh();};
   const delSaved=(name)=>{const n=saved.filter(s=>s.name!==name);setSaved(n);localStorage.setItem('dss_v2',JSON.stringify(n));};
   const doClear=()=>{if(!confirm('Clear canvas?'))return;[...circuit.components.keys()].forEach(id=>circuit.removeComponent(id));refresh();};
+  const generateEquation=()=>{
+    const inputs = Array.from(circuit.ioComponents.values()).
+      filter(c=>c.kind==='INPUT').
+      sort((a,b)=>a.ioId.localeCompare(b.ioId));
+    const outputs = Array.from(circuit.ioComponents.values()).
+      filter(c=>c.kind==='OUTPUT').
+      sort((a,b)=>a.ioId.localeCompare(b.ioId));
+
+    const outputMinterms = new Map(outputs.map(o=>[o, []]));
+    const originalInputValues = inputs.map(inp=>inp.state.value);
+
+    const combinations = 1 << inputs.length;
+    for (let mask = 0; mask < combinations; mask++) {
+      inputs.forEach((inp, idx)=>{ inp.state.value = (mask >> idx) & 1; });
+      settleCircuit(circuit, 10);
+
+      for (const output of outputs) {
+        if (output.inputVals[0] === 1) {
+          outputMinterms.get(output).push(mask);
+        }
+      }
+    }
+
+    inputs.forEach((inp, idx)=>{ inp.state.value = originalInputValues[idx]; });
+    settleCircuit(circuit, 10);
+
+    const equations = outputs.map(output=>{
+      const terms = outputMinterms.get(output);
+      const rhs = terms.length ? quineMcCluskey(terms, inputs.length, inputs.map((item) => (item.label))).expression : '0';
+      return `${output.label} = ${rhs}`;
+    });
+
+    document.querySelector('#bigequation').innerHTML = equations.join('<br>');
+  };
+
+  function settleCircuit(circuit, maxSteps = 10) {
+    for (let i = 0; i < maxSteps; i++) {
+      circuit.step(performance.now(), 0);
+    }
+  }
 
   const n=circuit.components.size;
 
@@ -849,6 +911,7 @@ function App(){
       <button className="btn ghost" style={{height:26,fontSize:12}} onClick={()=>setShowSave(true)} disabled={n===0}>Save</button>
       <button className="btn ghost" style={{height:26,fontSize:12}} onClick={()=>setShowLoad(true)}>Load</button>
       <button className="btn ghost" style={{height:26,fontSize:12,color:'var(--ink-3)'}} onClick={doClear} disabled={n===0}>Clear</button>
+      <button className="btn ghost" style={{height:26,fontSize:12}} onClick={()=>setShowEquation(true)}>Generate Equation</button>
       {/* Propagation delay */}
       <div className="tb-delay">
         <span>Delay</span>
@@ -900,6 +963,15 @@ function App(){
             </div>
           </div>)}</div>}
     </Dialog>}
+
+    {showEquation&&<Dialog title="Boolean Equation" onClose={()=>setShowEquation(false)}>
+      <p id="bigequation">No equation generated.</p>
+      <div className="dialog-actions">
+        <button className="btn ghost" onClick={()=>generateEquation()}>Generate</button>
+        <button className="btn ghost" onClick={()=>setShowEquation(false)}>Exit</button>
+      </div>
+    </Dialog>}
+
   </div>;
 }
 
