@@ -145,250 +145,263 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
 <script type="text/babel">
 /* ═══ ENGINE ═══════════════════════════════════════════════════════════════ */
 (function () {
-'use strict';
+  'use strict';
 
-const GATE_DEFS = {
-  INPUT:  { kind:'INPUT',  label:'IN',    inputs:0, outputs:1, family:'io',
-            compute:(i,s) => [s.value?1:0] },
-  OUTPUT: { kind:'OUTPUT', label:'OUT',   inputs:1, outputs:0, family:'io',
-            compute:()=>[] },
-  CLOCK:  { kind:'CLOCK',  label:'CLK',   inputs:0, outputs:1, family:'io',
-            compute:(i,s) => [s.value?1:0] },
-  AND:    { kind:'AND',  label:'AND',   inputs:2, outputs:1, family:'and',  compute:([a,b])=>[(a&b)&1] },
-  OR:     { kind:'OR',   label:'OR',    inputs:2, outputs:1, family:'or',   compute:([a,b])=>[(a|b)&1] },
-  NOT:    { kind:'NOT',  label:'NOT',   inputs:1, outputs:1, family:'not',  compute:([a])=>[a?0:1] },
-  NAND:   { kind:'NAND', label:'NAND',  inputs:2, outputs:1, family:'and',  compute:([a,b])=>[(a&b)?0:1] },
-  NOR:    { kind:'NOR',  label:'NOR',   inputs:2, outputs:1, family:'or',   compute:([a,b])=>[(a|b)?0:1] },
-  XOR:    { kind:'XOR',  label:'XOR',   inputs:2, outputs:1, family:'xor',  compute:([a,b])=>[(a^b)&1] },
-  XNOR:   { kind:'XNOR', label:'XNOR',  inputs:2, outputs:1, family:'xor',  compute:([a,b])=>[(a^b)?0:1] },
-  DFF:    { kind:'DFF',  label:'D-FF',  inputs:2, outputs:1, family:'seq',
-            compute:([d,clk],s)=>{ const r=clk&&!s.lastClk; s.lastClk=clk; if(r)s.q=d?1:0; return[s.q||0]; } },
-  TFF:    { kind:'TFF',  label:'T-FF',  inputs:2, outputs:1, family:'seq',
-            compute:([t,clk],s)=>{ const r=clk&&!s.lastClk; s.lastClk=clk; if(r&&t)s.q=s.q?0:1; return[s.q||0]; } },
-  JKFF:   { kind:'JKFF', label:'JK-FF', inputs:3, outputs:1, family:'seq',
-            compute:([j,k,clk],s)=>{ const r=clk&&!s.lastClk; s.lastClk=clk; if(r){if(j&&k)s.q=s.q?0:1; else if(j)s.q=1; else if(k)s.q=0;} return[s.q||0]; } },
-  SRFF:   { kind:'SRFF', label:'SR-FF', inputs:2, outputs:1, family:'seq',
-            compute:([s2,r],s)=>{ if(s2&&!r)s.q=1; else if(r&&!s2)s.q=0; return[s.q||0]; } },
-};
+  const GATE_DEFS = {
+    INPUT:  { kind:'INPUT',  label:'IN',    inputs:0, outputs:1, family:'io',
+              compute:(i,s) => [s.value?1:0] },
+    OUTPUT: { kind:'OUTPUT', label:'OUT',   inputs:1, outputs:0, family:'io',
+              compute:()=>[] },
+    CLOCK:  { kind:'CLOCK',  label:'CLK',   inputs:0, outputs:1, family:'io',
+              compute:(i,s) => [s.value?1:0] },
+    AND:    { kind:'AND',  label:'AND',   inputs:2, outputs:1, family:'and',  compute:([a,b])=>[(a&b)&1] },
+    OR:     { kind:'OR',   label:'OR',    inputs:2, outputs:1, family:'or',   compute:([a,b])=>[(a|b)&1] },
+    NOT:    { kind:'NOT',  label:'NOT',   inputs:1, outputs:1, family:'not',  compute:([a])=>[a?0:1] },
+    NAND:   { kind:'NAND', label:'NAND',  inputs:2, outputs:1, family:'and',  compute:([a,b])=>[(a&b)?0:1] },
+    NOR:    { kind:'NOR',  label:'NOR',   inputs:2, outputs:1, family:'or',   compute:([a,b])=>[(a|b)?0:1] },
+    XOR:    { kind:'XOR',  label:'XOR',   inputs:2, outputs:1, family:'xor',  compute:([a,b])=>[(a^b)&1] },
+    XNOR:   { kind:'XNOR', label:'XNOR',  inputs:2, outputs:1, family:'xor',  compute:([a,b])=>[(a^b)?0:1] },
+    DFF:    { kind:'DFF',  label:'D-FF',  inputs:2, outputs:1, family:'seq',
+              compute:([d,clk],s)=>{ const r=clk&&!s.lastClk; s.lastClk=clk; if(r)s.q=d?1:0; return[s.q||0]; } },
+    TFF:    { kind:'TFF',  label:'T-FF',  inputs:2, outputs:1, family:'seq',
+              compute:([t,clk],s)=>{ const r=clk&&!s.lastClk; s.lastClk=clk; if(r&&t)s.q=s.q?0:1; return[s.q||0]; } },
+    JKFF:   { kind:'JKFF', label:'JK-FF', inputs:3, outputs:1, family:'seq',
+              compute:([j,k,clk],s)=>{ const r=clk&&!s.lastClk; s.lastClk=clk; if(r){if(j&&k)s.q=s.q?0:1; else if(j)s.q=1; else if(k)s.q=0;} return[s.q||0]; } },
+    SRFF:   { kind:'SRFF', label:'SR-FF', inputs:2, outputs:1, family:'seq',
+              compute:([s2,r],s)=>{ if(s2&&!r)s.q=1; else if(r&&!s2)s.q=0; return[s.q||0]; } },
+  };
 
-function createCircuit() {
-  let nextId = 1;
-  let nextIoId = 1;
-  const components = new Map();
-  const ioComponents = new Map();
-  const wires = new Map();
+  function createCircuit() {
+    let nextId = 1;
+    let nextIoId = 1;
+    const components = new Map();
+    const ioComponents = new Map();
+    const wires = new Map();
 
-  function addComponent(kind, x, y, label = "none") {
-    const def = GATE_DEFS[kind];
-    const id = 'c'+(nextId++);
-    const ioId = kind==='INPUT' || kind==='OUTPUT' ? 'io'+(nextIoId++) : '' 
-    const comp = {
-      id, ioId, kind, x, y,
-      state: kind==='INPUT' ? {value:0}
-           : kind==='CLOCK' ? {value:0, period:1000, lastTick:0, paused:false}
-           : kind==='DFF'   ? {q:0, lastClk:0} : {},
-      inputVals:  new Array(def.inputs).fill(0),
-      outputVals: new Array(def.outputs).fill(0),
-      label: label == "none" ? String.fromCharCode(Number(ioId.slice(2)) + 64) : label,
-      lastChange: 0,
-    };
-    components.set(id, comp);
-    if (ioId != '') {
-      ioComponents.set(ioId, comp);
+    function addComponent(kind, x, y, label = "none") {
+      const def = GATE_DEFS[kind];
+      const id = 'c'+(nextId++);
+      const ioId = kind==='INPUT' || kind==='OUTPUT' ? 'io'+(nextIoId++) : '' 
+      const comp = {
+        id, ioId, kind, x, y,
+        state: kind==='INPUT' ? {value:0}
+            : kind==='CLOCK' ? {value:0, period:1000, lastTick:0, paused:false}
+            : kind==='DFF'   ? {q:0, lastClk:0} : {},
+        inputVals:  new Array(def.inputs).fill(0),
+        outputVals: new Array(def.outputs).fill(0),
+        label: label == "none" ? String.fromCharCode(Number(ioId.slice(2)) + 64) : label,
+        lastChange: 0,
+      };
+      components.set(id, comp);
+      if (ioId != '') {
+        ioComponents.set(ioId, comp);
+      }
+      return comp;
     }
-    return comp;
-  }
 
-  function removeComponent(id) {
-    
-    const component = components.get(id);
-    components.delete(id);
+    function removeComponent(id) {
+      
+      const component = components.get(id);
+      components.delete(id);
 
-    if (component.ioId != ''){
-      ioComponents.delete(component.ioId);
+      if (component.ioId != ''){
+        ioComponents.delete(component.ioId);
+      }
+      for (const [wid,w] of wires) { if (w.from.compId===id||w.to.compId===id) wires.delete(wid); }
     }
-    for (const [wid,w] of wires) { if (w.from.compId===id||w.to.compId===id) wires.delete(wid); }
-  }
 
-  function addWire(from, to) {
-    for (const w of wires.values()) { if (w.to.compId===to.compId&&w.to.pin===to.pin) return null; }
-    const id = 'w'+(nextId++);
-    const wire = {id, from, to, value:0, lastChange:0, points:[]};
-    wires.set(id, wire);
-    return wire;
-  }
+    function addWire(from, to) {
+      for (const w of wires.values()) { if (w.to.compId===to.compId&&w.to.pin===to.pin) return null; }
+      const id = 'w'+(nextId++);
+      const wire = {id, from, to, value:0, lastChange:0, points:[]};
+      wires.set(id, wire);
+      return wire;
+    }
 
-  function removeWire(id) { wires.delete(id); }
+    function removeWire(id) { wires.delete(id); }
 
-  function step(now, delayMs) {
-    // Tick clocks
-    for (const c of components.values()) {
-      if (c.kind==='CLOCK' && !c.state.paused) {
-        if (now - c.state.lastTick >= c.state.period/2) {
-          c.state.value = c.state.value ? 0 : 1;
-          c.state.lastTick = now;
+    function step(now, delayMs) {
+      // Tick clocks
+      for (const c of components.values()) {
+        if (c.kind==='CLOCK' && !c.state.paused) {
+          if (now - c.state.lastTick >= c.state.period/2) {
+            c.state.value = c.state.value ? 0 : 1;
+            c.state.lastTick = now;
+          }
         }
       }
-    }
-    // Compute outputs
-    for (const c of components.values()) {
-      const def = GATE_DEFS[c.kind];
-      const outs = def.compute(c.inputVals, c.state)||[];
-      for (let i=0;i<outs.length;i++) { if(c.outputVals[i]!==outs[i]){c.outputVals[i]=outs[i];c.lastChange=now;} }
-    }
-    // Propagate with delay
-    for (const w of wires.values()) {
-      const src = components.get(w.from.compId); if(!src) continue;
-      const srcVal = src.outputVals[w.from.pin]||0;
-      if (srcVal!==w.pendingValue && srcVal!==w.value) { w.pendingValue=srcVal; w.pendingStart=now; }
-      if (typeof w.pendingValue!=='undefined' && now-(w.pendingStart||0)>=delayMs) {
-        if(w.value!==w.pendingValue){w.value=w.pendingValue;w.lastChange=now;}
-        w.pendingValue=undefined; w.pendingStart=undefined;
+      // Compute outputs
+      for (const c of components.values()) {
+        const def = GATE_DEFS[c.kind];
+        const outs = def.compute(c.inputVals, c.state)||[];
+        for (let i=0;i<outs.length;i++) { if(c.outputVals[i]!==outs[i]){c.outputVals[i]=outs[i];c.lastChange=now;} }
       }
-      const dst = components.get(w.to.compId);
-      if (dst) dst.inputVals[w.to.pin]=w.value;
+      // Propagate with delay
+      for (const w of wires.values()) {
+        const src = components.get(w.from.compId); if(!src) continue;
+        const srcVal = src.outputVals[w.from.pin]||0;
+        if (srcVal!==w.pendingValue && srcVal!==w.value) { w.pendingValue=srcVal; w.pendingStart=now; }
+        if (typeof w.pendingValue!=='undefined' && now-(w.pendingStart||0)>=delayMs) {
+          if(w.value!==w.pendingValue){w.value=w.pendingValue;w.lastChange=now;}
+          w.pendingValue=undefined; w.pendingStart=undefined;
+        }
+        const dst = components.get(w.to.compId);
+        if (dst) dst.inputVals[w.to.pin]=w.value;
+      }
+      // Reset inputs from wires
+      const acc = new Map();
+      for (const c of components.values()) acc.set(c.id, new Array(GATE_DEFS[c.kind].inputs).fill(0));
+      for (const w of wires.values()) { const a=acc.get(w.to.compId); if(a) a[w.to.pin]=w.value; }
+      for (const c of components.values()) c.inputVals=acc.get(c.id);
     }
-    // Reset inputs from wires
-    const acc = new Map();
-    for (const c of components.values()) acc.set(c.id, new Array(GATE_DEFS[c.kind].inputs).fill(0));
-    for (const w of wires.values()) { const a=acc.get(w.to.compId); if(a) a[w.to.pin]=w.value; }
-    for (const c of components.values()) c.inputVals=acc.get(c.id);
-  }
 
-  function serialize() {
+    function serialize() {
+      return {
+        components: [...components.values()].map(c=>({id:c.id,ioId:c.ioId,kind:c.kind,x:c.x,y:c.y,
+          state:c.kind==='INPUT'?{value:c.state.value}:c.kind==='CLOCK'?{period:c.state.period,paused:c.state.paused}:{}})),
+        wires: [...wires.values()].map(w=>({id:w.id,from:w.from,to:w.to,points:w.points||[]})),
+        nextId, nextIoId,
+      };
+    }
+
+    function load(data) {
+      components.clear(); ioComponents.clear(); wires.clear(); if(!data) return;
+      for (const cd of data.components||[]) {
+        const c=addComponent(cd.kind,cd.x,cd.y); components.delete(c.id); ioComponents.delete(c.ioId); c.id=cd.id; c.ioId=cd.ioId;
+        if(cd.state) Object.assign(c.state,cd.state); components.set(c.id,c); ioComponents.set(c.ioId, c);
+      }
+      for (const wd of data.wires||[]) {
+        const w=addWire(wd.from,wd.to); if(w){wires.delete(w.id);w.id=wd.id;w.points=wd.points||[];wires.set(w.id,w);}
+      }
+      nextId=Math.max(data.nextId||1,nextId);
+      nextIoId=Math.max(data.nextIoId||1,nextIoId);
+    }
+
     return {
-      components: [...components.values()].map(c=>({id:c.id,ioId:c.ioId,kind:c.kind,x:c.x,y:c.y,
-        state:c.kind==='INPUT'?{value:c.state.value}:c.kind==='CLOCK'?{period:c.state.period,paused:c.state.paused}:{}})),
-      wires: [...wires.values()].map(w=>({id:w.id,from:w.from,to:w.to,points:w.points||[]})),
-      nextId, nextIoId,
+      components, wires, ioComponents,
+      addComponent, removeComponent, addWire, removeWire, step, serialize, load,
+      toggleInput(id){const c=components.get(id);if(c&&c.kind==='INPUT')c.state.value=c.state.value?0:1;},
+      toggleClock(id){const c=components.get(id);if(c&&c.kind==='CLOCK'){c.state.paused=!c.state.paused;if(!c.state.paused)c.state.lastTick=performance.now();}},
+      setClockPeriod(id,p){const c=components.get(id);if(c&&c.kind==='CLOCK')c.state.period=p;},
     };
   }
 
-  function load(data) {
-    components.clear(); ioComponents.clear(); wires.clear(); if(!data) return;
-    for (const cd of data.components||[]) {
-      const c=addComponent(cd.kind,cd.x,cd.y); components.delete(c.id); ioComponents.delete(c.ioId); c.id=cd.id; c.ioId=cd.ioId;
-      if(cd.state) Object.assign(c.state,cd.state); components.set(c.id,c); ioComponents.set(c.ioId, c);
-    }
-    for (const wd of data.wires||[]) {
-      const w=addWire(wd.from,wd.to); if(w){wires.delete(w.id);w.id=wd.id;w.points=wd.points||[];wires.set(w.id,w);}
-    }
-    nextId=Math.max(data.nextId||1,nextId);
-    nextIoId=Math.max(data.nextIoId||1,nextIoId);
-  }
-
-  return {
-    components, wires, ioComponents,
-    addComponent, removeComponent, addWire, removeWire, step, serialize, load,
-    toggleInput(id){const c=components.get(id);if(c&&c.kind==='INPUT')c.state.value=c.state.value?0:1;},
-    toggleClock(id){const c=components.get(id);if(c&&c.kind==='CLOCK'){c.state.paused=!c.state.paused;if(!c.state.paused)c.state.lastTick=performance.now();}},
-    setClockPeriod(id,p){const c=components.get(id);if(c&&c.kind==='CLOCK')c.state.period=p;},
-  };
-}
-
-window.GATE_DEFS = GATE_DEFS;
-window.createCircuit = createCircuit;
+  window.GATE_DEFS = GATE_DEFS;
+  window.createCircuit = createCircuit;
 })();
 
 
 /* ═══ GATES ════════════════════════════════════════════════════════════════ */
 (function () {
-'use strict';
-const { GATE_DEFS } = window;
+  'use strict';
+  const { GATE_DEFS } = window;
 
-const FAMILY_FILL = { and:'#fef3e2', or:'#e8f5ee', not:'#ede8f7', xor:'#e4eef8', seq:'#fce8ee', io:'#fefce8' };
-const VIS = {};
-const W=80,H=80,BX=12,YT=20,YB=60,YO=40,BT=6,BB=74;
+  const FAMILY_FILL = { and:'#fef3e2', or:'#e8f5ee', not:'#ede8f7', xor:'#e4eef8', seq:'#fce8ee', io:'#fefce8' };
+  const VIS = {};
+  const W=80,H=80,BX=12,YT=20,YB=60,YO=40,BT=6,BB=74;
 
-VIS.AND  = { w:W,h:H, inputs:[{x:0,y:YT},{x:0,y:YB}], outputs:[{x:W,y:YO}],
-  body:(f)=><g><path d={`M ${BX} ${BT} H ${W*.5} a ${(BB-BT)/2} ${(BB-BT)/2} 0 0 1 0 ${BB-BT} H ${BX} Z`} fill={f} stroke="var(--ink)" strokeWidth="2" strokeLinejoin="round"/></g> };
-VIS.OR   = { w:W,h:H, inputs:[{x:0,y:YT},{x:0,y:YB}], outputs:[{x:W,y:YO}],
-  body:(f)=><g><path d={`M ${BX} ${BT} Q ${BX+14} ${YO}, ${BX} ${BB} Q ${W*.5} ${BB}, ${W-2} ${YO} Q ${W*.5} ${BT}, ${BX} ${BT} Z`} fill={f} stroke="var(--ink)" strokeWidth="2" strokeLinejoin="round"/></g> };
-VIS.NOT  = { w:80,h:40, inputs:[{x:0,y:20}], outputs:[{x:80,y:20}],
-  body:(f)=><g><path d="M 12 6 L 60 20 L 12 34 Z" fill={f} stroke="var(--ink)" strokeWidth="2" strokeLinejoin="round"/><circle cx="66" cy="20" r="5" fill={f} stroke="var(--ink)" strokeWidth="2"/></g> };
-VIS.NAND = { w:W,h:H, inputs:[{x:0,y:YT},{x:0,y:YB}], outputs:[{x:W,y:YO}],
-  body:(f)=><g><path d={`M ${BX} ${BT} H ${W*.45} a ${(BB-BT)/2} ${(BB-BT)/2} 0 0 1 0 ${BB-BT} H ${BX} Z`} fill={f} stroke="var(--ink)" strokeWidth="2" strokeLinejoin="round"/><circle cx={W-7} cy={YO} r="5" fill={f} stroke="var(--ink)" strokeWidth="2"/></g> };
-VIS.NOR  = { w:W,h:H, inputs:[{x:0,y:YT},{x:0,y:YB}], outputs:[{x:W,y:YO}],
-  body:(f)=><g><path d={`M ${BX} ${BT} Q ${BX+14} ${YO}, ${BX} ${BB} Q ${W*.45} ${BB}, ${W-12} ${YO} Q ${W*.45} ${BT}, ${BX} ${BT} Z`} fill={f} stroke="var(--ink)" strokeWidth="2" strokeLinejoin="round"/><circle cx={W-7} cy={YO} r="5" fill={f} stroke="var(--ink)" strokeWidth="2"/></g> };
-VIS.XOR  = { w:W,h:H, inputs:[{x:0,y:YT},{x:0,y:YB}], outputs:[{x:W,y:YO}],
-  body:(f)=><g>
-    <path d={`M ${BX-6} ${BT} Q ${BX+8} ${YO}, ${BX-6} ${BB}`} fill="none" stroke="var(--ink)" strokeWidth="2"/>
-    <path d={`M ${BX} ${BT} Q ${BX+14} ${YO}, ${BX} ${BB} Q ${W*.5} ${BB}, ${W-2} ${YO} Q ${W*.5} ${BT}, ${BX} ${BT} Z`} fill={f} stroke="var(--ink)" strokeWidth="2" strokeLinejoin="round"/>
-  </g> };
-VIS.XNOR = { w:W,h:H, inputs:[{x:0,y:YT},{x:0,y:YB}], outputs:[{x:W,y:YO}],
-  body:(f)=><g>
-    <path d={`M ${BX-6} ${BT} Q ${BX+8} ${YO}, ${BX-6} ${BB}`} fill="none" stroke="var(--ink)" strokeWidth="2"/>
-    <path d={`M ${BX} ${BT} Q ${BX+14} ${YO}, ${BX} ${BB} Q ${W*.45} ${BB}, ${W-12} ${YO} Q ${W*.45} ${BT}, ${BX} ${BT} Z`} fill={f} stroke="var(--ink)" strokeWidth="2" strokeLinejoin="round"/>
-    <circle cx={W-7} cy={YO} r="5" fill={f} stroke="var(--ink)" strokeWidth="2"/>
-  </g> };
+  VIS.AND  = { w:W,h:H, inputs:[{x:0,y:YT},{x:0,y:YB}], outputs:[{x:W,y:YO}],
+    body:(f)=><g>
+      <path d={`M ${BX} ${BT} H ${W*.5} a ${(BB-BT)/2} ${(BB-BT)/2} 0 0 1 0 ${BB-BT} H ${BX} Z`} fill={f} stroke="var(--ink)" strokeWidth="2" strokeLinejoin="round"/>
+    </g> };
+  VIS.OR   = { w:W,h:H, inputs:[{x:0,y:YT},{x:0,y:YB}], outputs:[{x:W,y:YO}],
+    body:(f)=><g>
+      <path d={`M ${BX} ${BT} Q ${BX+14} ${YO}, ${BX} ${BB} Q ${W*.5} ${BB}, ${W-2} ${YO} Q ${W*.5} ${BT}, ${BX} ${BT} Z`} fill={f} stroke="var(--ink)" strokeWidth="2" strokeLinejoin="round"/>
+    </g> };
+  VIS.NOT  = { w:80,h:40, inputs:[{x:0,y:20}], outputs:[{x:80,y:20}],
+    body:(f)=><g>
+      <path d="M 12 6 L 60 20 L 12 34 Z" fill={f} stroke="var(--ink)" strokeWidth="2" strokeLinejoin="round"/>
+      <circle cx="66" cy="20" r="5" fill={f} stroke="var(--ink)" strokeWidth="2"/>
+    </g> };
+  VIS.NAND = { w:W,h:H, inputs:[{x:0,y:YT},{x:0,y:YB}], outputs:[{x:W,y:YO}],
+    body:(f)=><g>
+      <path d={`M ${BX} ${BT} H ${W*.45} a ${(BB-BT)/2} ${(BB-BT)/2} 0 0 1 0 ${BB-BT} H ${BX} Z`} fill={f} stroke="var(--ink)" strokeWidth="2" strokeLinejoin="round"/>
+      <circle cx={W-7} cy={YO} r="5" fill={f} stroke="var(--ink)" strokeWidth="2"/>
+    </g> };
+  VIS.NOR  = { w:W,h:H, inputs:[{x:0,y:YT},{x:0,y:YB}], outputs:[{x:W,y:YO}],
+    body:(f)=><g>
+      <path d={`M ${BX} ${BT} Q ${BX+14} ${YO}, ${BX} ${BB} Q ${W*.45} ${BB}, ${W-12} ${YO} Q ${W*.45} ${BT}, ${BX} ${BT} Z`} fill={f} stroke="var(--ink)" strokeWidth="2" strokeLinejoin="round"/>
+      <circle cx={W-7} cy={YO} r="5" fill={f} stroke="var(--ink)" strokeWidth="2"/>
+    </g> };
+  VIS.XOR  = { w:W,h:H, inputs:[{x:0,y:YT},{x:0,y:YB}], outputs:[{x:W,y:YO}],
+    body:(f)=><g>
+      <path d={`M ${BX-6} ${BT} Q ${BX+8} ${YO}, ${BX-6} ${BB}`} fill="none" stroke="var(--ink)" strokeWidth="2"/>
+      <path d={`M ${BX} ${BT} Q ${BX+14} ${YO}, ${BX} ${BB} Q ${W*.5} ${BB}, ${W-2} ${YO} Q ${W*.5} ${BT}, ${BX} ${BT} Z`} fill={f} stroke="var(--ink)" strokeWidth="2" strokeLinejoin="round"/>
+    </g> };
+  VIS.XNOR = { w:W,h:H, inputs:[{x:0,y:YT},{x:0,y:YB}], outputs:[{x:W,y:YO}],
+    body:(f)=><g>
+      <path d={`M ${BX-6} ${BT} Q ${BX+8} ${YO}, ${BX-6} ${BB}`} fill="none" stroke="var(--ink)" strokeWidth="2"/>
+      <path d={`M ${BX} ${BT} Q ${BX+14} ${YO}, ${BX} ${BB} Q ${W*.45} ${BB}, ${W-12} ${YO} Q ${W*.45} ${BT}, ${BX} ${BT} Z`} fill={f} stroke="var(--ink)" strokeWidth="2" strokeLinejoin="round"/>
+      <circle cx={W-7} cy={YO} r="5" fill={f} stroke="var(--ink)" strokeWidth="2"/>
+    </g> };
 
-VIS.INPUT = { w:60,h:40, inputs:[], outputs:[{x:60,y:20}],
-  body:(f,comp)=>{
-    const on=comp.state.value;
+  VIS.INPUT = { w:60,h:40, inputs:[], outputs:[{x:60,y:20}],
+    body:(f,comp)=>{
+      const on=comp.state.value;
+      return <g>
+        <rect x="4" y="4" width="52" height="32" rx="16" fill={on?'#fef3c7':'#f3f3f1'} stroke="var(--ink)" strokeWidth="2"/>
+        <circle cx={on?40:20} cy="20" r="11" fill="white" stroke="var(--ink)" strokeWidth="1.5"/>
+        <text x={on?18:38} y="24" fontFamily="var(--mono)" fontSize="11" fontWeight="600" textAnchor="middle" fill="var(--ink)" opacity="0.45">{on?'1':'0'}</text>
+        <text x="-15" y="26" fontFamily="var(--mono)" fontSize="16" fontWeight="600" textAnchor="middle" fill="var(--ink)" opacity="0.8">{comp.label}</text>
+      </g>;
+    }
+  };
+
+  VIS.CLOCK = { w:60,h:40, inputs:[], outputs:[{x:60,y:20}],
+    body:(f,comp)=>{
+      const on=comp.state.value, paused=comp.state.paused;
+      return <g>
+        <rect x="4" y="4" width="52" height="32" rx="8" fill={paused?'#f3f3f1':'#fefce8'} stroke="var(--ink)" strokeWidth="2"/>
+        {paused ? <>
+          <rect x="20" y="13" width="6" height="14" rx="2" fill="var(--ink)" opacity="0.3"/>
+          <rect x="30" y="13" width="6" height="14" rx="2" fill="var(--ink)" opacity="0.3"/>
+        </> : <path d="M 12 28 L 18 28 L 18 14 L 28 14 L 28 28 L 38 28 L 38 14 L 44 14"
+              fill="none" stroke={on?'var(--high)':'var(--ink)'}
+              strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>}
+      </g>;
+    }
+  };
+
+  VIS.OUTPUT = { w:40,h:40, inputs:[{x:0,y:20}], outputs:[],
+    body:(f,comp)=>{
+      const on=comp.inputVals[0];
+      return <g>
+        {on?<circle cx="22" cy="20" r="20" fill="#fef3c7" opacity="0.55"/>:null}
+        <circle cx="22" cy="20" r="13" fill={on?'#fde68a':'#f3f3f1'} stroke="var(--ink)" strokeWidth="2"/>
+        <path d="M 17 26 L 17 30 L 27 30 L 27 26" fill="none" stroke="var(--ink)" strokeWidth="1.5" strokeLinecap="round"/>
+        <text x="55" y="26" fontFamily="var(--mono)" fontSize="16" fontWeight="600" textAnchor="middle" fill="var(--ink)" opacity="0.8">{comp.label}</text>
+        {on?<g stroke="#d97706" strokeWidth="1.5" strokeLinecap="round">
+          <line x1="22" y1="3"  x2="22" y2="6"/><line x1="37" y1="20" x2="40" y2="20"/>
+          <line x1="4"  y1="20" x2="7"  y2="20"/><line x1="33" y1="9"  x2="35" y2="7"/>
+          <line x1="11" y1="9"  x2="9"  y2="7"/>
+        </g>:null}
+      </g>;
+    }
+  };
+
+  function ffRect(f,h){return<rect x="6" y="6" width="68" height={h-12} rx="7" fill={f} stroke="var(--ink)" strokeWidth="2"/>;}
+  const ffTxt=(x,y,t)=><text x={x} y={y} fontFamily="var(--mono)" fontSize="12" fill="var(--ink)">{t}</text>;
+  const ffSub=(t)=><text x="40" y="74" fontFamily="var(--ui)" fontSize="9" textAnchor="middle" fill="var(--ink)" opacity="0.38">{t}</text>;
+
+  VIS.DFF  = {w:80,h:80,  inputs:[{x:0,y:20},{x:0,y:60}],            outputs:[{x:80,y:40}], body:(f)=><g>{ffRect(f,80)}{ffTxt(14,24,'D')}{ffTxt(14,64,'▷')}{ffTxt(66,44,'Q')}{ffSub('D')}</g>};
+  VIS.TFF  = {w:80,h:80,  inputs:[{x:0,y:20},{x:0,y:60}],            outputs:[{x:80,y:40}], body:(f)=><g>{ffRect(f,80)}{ffTxt(14,24,'T')}{ffTxt(14,64,'▷')}{ffTxt(66,44,'Q')}{ffSub('T')}</g>};
+  VIS.SRFF = {w:80,h:80,  inputs:[{x:0,y:20},{x:0,y:60}],            outputs:[{x:80,y:40}], body:(f)=><g>{ffRect(f,80)}{ffTxt(14,24,'S')}{ffTxt(14,64,'R')}{ffTxt(66,44,'Q')}{ffSub('SR')}</g>};
+  VIS.JKFF = {w:80,h:120, inputs:[{x:0,y:20},{x:0,y:60},{x:0,y:100}],outputs:[{x:80,y:40}], body:(f)=><g>{ffRect(f,120)}{ffTxt(14,24,'J')}{ffTxt(14,64,'K')}{ffTxt(14,104,'▷')}{ffTxt(66,44,'Q')}<text x="40" y="114" fontFamily="var(--ui)" fontSize="9" textAnchor="middle" fill="var(--ink)" opacity="0.38">JK</text></g>};
+
+  function GateBody({ comp }) {
+    const def=GATE_DEFS[comp.kind], vis=VIS[comp.kind];
+    if (!vis) return null;
+    const fill=FAMILY_FILL[def.family]||'#fff';
     return <g>
-      <rect x="4" y="4" width="52" height="32" rx="16" fill={on?'#fef3c7':'#f3f3f1'} stroke="var(--ink)" strokeWidth="2"/>
-      <circle cx={on?40:20} cy="20" r="11" fill="white" stroke="var(--ink)" strokeWidth="1.5"/>
-      <text x={on?18:38} y="24" fontFamily="var(--mono)" fontSize="11" fontWeight="600" textAnchor="middle" fill="var(--ink)" opacity="0.45">{on?'1':'0'}</text>
-      <text x="-15" y="26" fontFamily="var(--mono)" fontSize="16" fontWeight="600" textAnchor="middle" fill="var(--ink)" opacity="0.8">{comp.label}</text>
+      {vis.inputs.map((p,i)=><line key={'i'+i} x1={p.x} y1={p.y} x2={p.x+12} y2={p.y} stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>)}
+      {vis.outputs.map((p,i)=><line key={'o'+i} x1={p.x-12} y1={p.y} x2={p.x} y2={p.y} stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>)}
+      {vis.body(fill,comp)}
+      {['AND','OR','NAND','NOR','XOR','XNOR'].includes(comp.kind)&&
+        <text x={vis.w/2+2} y={vis.h/2+4} textAnchor="middle" fontFamily="var(--mono)" fontSize="10" fontWeight="600" fill="var(--ink)" opacity="0.35" pointerEvents="none">{def.label}</text>}
     </g>;
   }
-};
 
-VIS.CLOCK = { w:60,h:40, inputs:[], outputs:[{x:60,y:20}],
-  body:(f,comp)=>{
-    const on=comp.state.value, paused=comp.state.paused;
-    return <g>
-      <rect x="4" y="4" width="52" height="32" rx="8" fill={paused?'#f3f3f1':'#fefce8'} stroke="var(--ink)" strokeWidth="2"/>
-      {paused ? <>
-        <rect x="20" y="13" width="6" height="14" rx="2" fill="var(--ink)" opacity="0.3"/>
-        <rect x="30" y="13" width="6" height="14" rx="2" fill="var(--ink)" opacity="0.3"/>
-      </> : <path d="M 12 28 L 18 28 L 18 14 L 28 14 L 28 28 L 38 28 L 38 14 L 44 14"
-             fill="none" stroke={on?'var(--high)':'var(--ink)'}
-             strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>}
-    </g>;
-  }
-};
-
-VIS.OUTPUT = { w:40,h:40, inputs:[{x:0,y:20}], outputs:[],
-  body:(f,comp)=>{
-    const on=comp.inputVals[0];
-    return <g>
-      {on?<circle cx="22" cy="20" r="20" fill="#fef3c7" opacity="0.55"/>:null}
-      <circle cx="22" cy="20" r="13" fill={on?'#fde68a':'#f3f3f1'} stroke="var(--ink)" strokeWidth="2"/>
-      <path d="M 17 26 L 17 30 L 27 30 L 27 26" fill="none" stroke="var(--ink)" strokeWidth="1.5" strokeLinecap="round"/>
-      <text x="55" y="26" fontFamily="var(--mono)" fontSize="16" fontWeight="600" textAnchor="middle" fill="var(--ink)" opacity="0.8">{comp.label}</text>
-      {on?<g stroke="#d97706" strokeWidth="1.5" strokeLinecap="round">
-        <line x1="22" y1="3"  x2="22" y2="6"/><line x1="37" y1="20" x2="40" y2="20"/>
-        <line x1="4"  y1="20" x2="7"  y2="20"/><line x1="33" y1="9"  x2="35" y2="7"/>
-        <line x1="11" y1="9"  x2="9"  y2="7"/>
-      </g>:null}
-    </g>;
-  }
-};
-
-function ffRect(f,h){return<rect x="6" y="6" width="68" height={h-12} rx="7" fill={f} stroke="var(--ink)" strokeWidth="2"/>;}
-const ffTxt=(x,y,t)=><text x={x} y={y} fontFamily="var(--mono)" fontSize="12" fill="var(--ink)">{t}</text>;
-const ffSub=(t)=><text x="40" y="74" fontFamily="var(--ui)" fontSize="9" textAnchor="middle" fill="var(--ink)" opacity="0.38">{t}</text>;
-
-VIS.DFF  = {w:80,h:80,  inputs:[{x:0,y:20},{x:0,y:60}],            outputs:[{x:80,y:40}], body:(f)=><g>{ffRect(f,80)}{ffTxt(14,24,'D')}{ffTxt(14,64,'▷')}{ffTxt(66,44,'Q')}{ffSub('D')}</g>};
-VIS.TFF  = {w:80,h:80,  inputs:[{x:0,y:20},{x:0,y:60}],            outputs:[{x:80,y:40}], body:(f)=><g>{ffRect(f,80)}{ffTxt(14,24,'T')}{ffTxt(14,64,'▷')}{ffTxt(66,44,'Q')}{ffSub('T')}</g>};
-VIS.SRFF = {w:80,h:80,  inputs:[{x:0,y:20},{x:0,y:60}],            outputs:[{x:80,y:40}], body:(f)=><g>{ffRect(f,80)}{ffTxt(14,24,'S')}{ffTxt(14,64,'R')}{ffTxt(66,44,'Q')}{ffSub('SR')}</g>};
-VIS.JKFF = {w:80,h:120, inputs:[{x:0,y:20},{x:0,y:60},{x:0,y:100}],outputs:[{x:80,y:40}], body:(f)=><g>{ffRect(f,120)}{ffTxt(14,24,'J')}{ffTxt(14,64,'K')}{ffTxt(14,104,'▷')}{ffTxt(66,44,'Q')}<text x="40" y="114" fontFamily="var(--ui)" fontSize="9" textAnchor="middle" fill="var(--ink)" opacity="0.38">JK</text></g>};
-
-function GateBody({ comp }) {
-  const def=GATE_DEFS[comp.kind], vis=VIS[comp.kind];
-  if (!vis) return null;
-  const fill=FAMILY_FILL[def.family]||'#fff';
-  return <g>
-    {vis.inputs.map((p,i)=><line key={'i'+i} x1={p.x} y1={p.y} x2={p.x+12} y2={p.y} stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>)}
-    {vis.outputs.map((p,i)=><line key={'o'+i} x1={p.x-12} y1={p.y} x2={p.x} y2={p.y} stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>)}
-    {vis.body(fill,comp)}
-    {['AND','OR','NAND','NOR','XOR','XNOR'].includes(comp.kind)&&
-      <text x={vis.w/2+2} y={vis.h/2+4} textAnchor="middle" fontFamily="var(--mono)" fontSize="10" fontWeight="600" fill="var(--ink)" opacity="0.35" pointerEvents="none">{def.label}</text>}
-  </g>;
-}
-
-window.GATE_VIS=VIS; window.FAMILY_FILL=FAMILY_FILL; window.GateBody=GateBody;
+  window.GATE_VIS=VIS; window.FAMILY_FILL=FAMILY_FILL; window.GateBody=GateBody;
 })();
 
 
@@ -815,9 +828,8 @@ function App(){
   const[saveName,setSaveName]=useState('');
   const[showLoad,setShowLoad]=useState(false);
   const[showEquation, setShowEquation]=useState(false);
-  const[showLoadEquation, setShowLoadEquation]=useState(false);
   const[equation,setEquation]=useState('');
-
+  const[equationToLoad,setEquationToLoad]=useState('');
 
 
   window.__delayMs=delayMs;
@@ -865,12 +877,18 @@ function App(){
   const delSaved=(name)=>{const n=saved.filter(s=>s.name!==name);setSaved(n);localStorage.setItem('dss_v2',JSON.stringify(n));};
   const doClear=()=>{if(!confirm('Clear canvas?'))return;[...circuit.components.keys()].forEach(id=>circuit.removeComponent(id));refresh();};
   const generateEquation=()=>{
+
     const inputs = Array.from(circuit.ioComponents.values()).
       filter(c=>c.kind==='INPUT').
       sort((a,b)=>a.ioId.localeCompare(b.ioId));
     const outputs = Array.from(circuit.ioComponents.values()).
       filter(c=>c.kind==='OUTPUT').
       sort((a,b)=>a.ioId.localeCompare(b.ioId));
+
+    if (inputs.length == 0) {
+      alert('Your circuit has no inputs.');
+      return;
+    }
 
     const outputMinterms = new Map(outputs.map(o=>[o, []]));
     const originalInputValues = inputs.map(inp=>inp.state.value);
@@ -896,7 +914,7 @@ function App(){
       return `${output.label} = ${rhs}`;
     });
 
-    document.querySelector('#bigequation').innerHTML = equations.join('<br>');
+    setEquation(equations.join('<br>'));
   };
 
   function settleCircuit(circuit, maxSteps = 10) {
@@ -906,7 +924,7 @@ function App(){
   }
 
   const loadEquation=()=>{
-    const eq = equation.trim();
+    const eq = equationToLoad.trim();
     const match = /^([A-Za-z])\s*=\s*(.+)$/.exec(eq);
     if (!match) {
       alert('Enter an equation like A = B + C\'');
@@ -975,7 +993,7 @@ function App(){
     }
 
     circuit.addWire(outputSource, {compId: outputComp.id, pin: 0});
-    setShowLoadEquation(false);
+    setShowLoad(false);
   }
 
   const n=circuit.components.size;
@@ -988,8 +1006,7 @@ function App(){
       <button className="btn ghost" style={{height:26,fontSize:12}} onClick={()=>setShowSave(true)} disabled={n===0}>Save</button>
       <button className="btn ghost" style={{height:26,fontSize:12}} onClick={()=>setShowLoad(true)}>Load</button>
       <button className="btn ghost" style={{height:26,fontSize:12,color:'var(--ink-3)'}} onClick={doClear} disabled={n===0}>Clear</button>
-      <button className="btn ghost" style={{height:26,fontSize:12}} onClick={()=>setShowEquation(true)}>Generate Equation</button>
-      <button className="btn ghost" style={{height:26,fontSize:12}} onClick={()=>setShowLoadEquation(true)}>Load Equation</button>
+      <button className="btn ghost" style={{height:26,fontSize:12}} onClick={()=>setShowEquation(true)}>Boolean Equation</button>
       {/* Propagation delay */}
       <div className="tb-delay">
         <span>Delay</span>
@@ -1040,23 +1057,22 @@ function App(){
               <button className="btn primary" onClick={()=>doLoad(s)}>Load</button>
             </div>
           </div>)}</div>}
-    </Dialog>}
-
-    {showEquation&&<Dialog title="Boolean Equation" onClose={()=>setShowEquation(false)}>
-      <p id="bigequation">No equation generated.</p>
+      <br/>
+      <div className="modal-title">Load from Equation</div>
+      <input className="text-input" placeholder="A = B" value={equationToLoad} autoFocus
+             onChange={e=>setEquationToLoad(e.target.value)}
+             onKeyDown={e=>e.key==='Enter'&&loadEquation()}/>
       <div className="dialog-actions">
-        <button className="btn ghost" onClick={()=>generateEquation()}>Generate</button>
-        <button className="btn ghost" onClick={()=>setShowEquation(false)}>Exit</button>
+        <button className="btn ghost" onClick={()=>setShowLoad(false)}>Cancel</button>
+        <button className="btn primary" onClick={loadEquation}>Load</button>
       </div>
     </Dialog>}
 
-    {showLoadEquation&&<Dialog title="Load Equation" onClose={()=>setShowLoadEquation(false)}>
-      <input className="text-input" placeholder="A = B" value={equation} autoFocus
-             onChange={e=>setEquation(e.target.value)}
-             onKeyDown={e=>e.key==='Enter'&&loadEquation()}/>
+    {showEquation&&<Dialog title="Generate Boolean Equation" onClose={()=>setShowEquation(false)}>
+      <p>{equation === '' ? "No equation generated." : equation}</p>
       <div className="dialog-actions">
-        <button className="btn ghost" onClick={()=>setShowLoadEquation(false)}>Cancel</button>
-        <button className="btn primary" onClick={loadEquation}>Load</button>
+        <button className="btn ghost" onClick={()=>generateEquation()}>{equation === '' ? "Generate" : "Regenerate"}</button>
+        <button className="btn ghost" onClick={()=>setShowEquation(false)}>Exit</button>
       </div>
     </Dialog>}
 
