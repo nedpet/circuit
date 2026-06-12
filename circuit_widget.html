@@ -141,7 +141,7 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
   font-size:11.5px; min-width:148px;
 }
 .prop-title { font-weight: 600; font-size: 14px; margin-bottom: 7px;}
-.prop-option  { display: flex; justify-content: space-between; align-items: center; margin-bottom: 7px;}
+.prop-option  { display: flex; justify-content: space-between; align-items: center; margin-top: 7px;}
 .prop-label { font-weight: 600; font-size: 12px; margin-right: 7px;}
 .prop-input { width:100%; padding:8px 10px; border-radius:var(--r); border:1px solid var(--border); font:inherit; font-size:12px; background:var(--bg); color:var(--ink); outline:none; }
 
@@ -175,6 +175,7 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
     NOR:    { kind:'NOR',  label:'NOR',   inputs:2, outputs:1, family:'or',   compute:([a,b])=>[(a|b)?0:1] },
     XOR:    { kind:'XOR',  label:'XOR',   inputs:2, outputs:1, family:'xor',  compute:([a,b])=>[(a^b)&1] },
     XNOR:   { kind:'XNOR', label:'XNOR',  inputs:2, outputs:1, family:'xor',  compute:([a,b])=>[(a^b)?0:1] },
+    MUX:    { kind:'MUX',  label:'MUX',   inputs:3, outputs:1, family:'mux',  compute:([a,b,c])=>[c?b:a] },
     DFF:    { kind:'DFF',  label:'D-FF',  inputs:2, outputs:1, family:'seq',
               compute:([d,clk],s)=>{ const r=clk&&!s.lastClk; s.lastClk=clk; if(r)s.q=d?1:0; return[s.q||0]; } },
     TFF:    { kind:'TFF',  label:'T-FF',  inputs:2, outputs:1, family:'seq',
@@ -311,7 +312,7 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
   'use strict';
   const { GATE_DEFS } = window;
 
-  const FAMILY_FILL = { and:'#fef3e2', or:'#e8f5ee', not:'#ede8f7', xor:'#e4eef8', seq:'#fce8ee', io:'#fefce8' };
+  const FAMILY_FILL = { and:'#fffae3', or:'#e8f5ee', not:'#ede8f7', xor:'#e4eef8', mux: '#fff1e3', seq:'#fce8ee', io:'#fefce8' };
   const VIS = {};
   const W=80,H=80,BX=12,YT=20,YB=60,YO=40,BT=6,BB=74;
 
@@ -349,6 +350,11 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
       <path d={`M ${BX} ${BT} Q ${BX+14} ${YO}, ${BX} ${BB} Q ${W*.45} ${BB}, ${W-12} ${YO} Q ${W*.45} ${BT}, ${BX} ${BT} Z`} fill={f} stroke="var(--ink)" strokeWidth="2" strokeLinejoin="round"/>
       <circle cx={W-7} cy={YO} r="5" fill={f} stroke="var(--ink)" strokeWidth="2"/>
     </g> };
+  VIS.MUX  = { w:W,h:H, inputs:[{x:0,y:YT},{x:0,y:YB},{x:W*.5,y:YT}],outputs:[{x:W,y:YO}],
+    body:(f)=><g>
+      <path d={`M ${BX} ${BT} L ${W-BX} ${BT + BB*.25} V ${BB*.75} L ${BX} ${BB} Z`} fill={f} stroke="var(--ink)" strokeWidth="2" strokeLinejoin="round"/>
+    </g>}
+
 
   VIS.INPUT = { w:60,h:40, inputs:[], outputs:[{x:60,y:20}],
     body:(f,comp)=>{
@@ -411,7 +417,7 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
       {vis.inputs.map((p,i)=><line key={'i'+i} x1={p.x} y1={p.y} x2={p.x+12} y2={p.y} stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>)}
       {vis.outputs.map((p,i)=><line key={'o'+i} x1={p.x-12} y1={p.y} x2={p.x} y2={p.y} stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>)}
       {vis.body(fill,comp)}
-      {['AND','OR','NAND','NOR','XOR','XNOR'].includes(comp.kind)&&
+      {['AND','OR','NAND','NOR','XOR','XNOR','MUX'].includes(comp.kind)&&
         <text x={vis.w/2+2} y={vis.h/2+4} textAnchor="middle" fontFamily="var(--mono)" fontSize="10" fontWeight="600" fill="var(--ink)" opacity="0.35" pointerEvents="none">{def.label}</text>}
     </g>;
   }
@@ -817,7 +823,7 @@ const{GATE_VIS,GATE_DEFS,GateBody}=window;
 const GROUPS=[
   {title:'Sources',   kinds:['INPUT','CLOCK']},
   {title:'Sinks',     kinds:['OUTPUT']},
-  {title:'Logic',     kinds:['AND','OR','NOT','NAND','NOR','XOR','XNOR']},
+  {title:'Logic',     kinds:['AND','OR','NOT','NAND','NOR','XOR','XNOR','MUX']},
   {title:'Flip-flops',kinds:['DFF','TFF','JKFF','SRFF']},
 ];
 function Thumb({kind}){
