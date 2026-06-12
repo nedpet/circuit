@@ -131,6 +131,20 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
 .saved-item { display:flex; justify-content:space-between; align-items:center; padding:9px 10px; background:var(--panel); border-radius:var(--r); border:1px solid var(--border); }
 .saved-name { font-weight:600; font-size:13px; }
 .saved-meta { font-size:11px; color:var(--ink-2); font-family:var(--mono); margin-top:2px; }
+
+/* properties overlay */
+.prop-panel { 
+  position:fixed; right: 10px; bottom: 10px; width:200px; height:100px; 
+  background:var(--bg); border: 1px solid var(--border); 
+  border-radius: 8px; padding: 10px 12px 8px;
+  box-shadow: var(--shadow); z-index: 20;
+  font-size:11.5px; min-width:148px;
+}
+.prop-title { font-weight: 600; font-size: 14px; margin-bottom: 7px;}
+.prop-option  { display: flex; justify-content: space-between; align-items: center; margin-bottom: 7px;}
+.prop-label { font-weight: 600; font-size: 12px; margin-right: 7px;}
+.prop-input { width:100%; padding:8px 10px; border-radius:var(--r); border:1px solid var(--border); font:inherit; font-size:12px; background:var(--bg); color:var(--ink); outline:none; }
+
 </style>
 </head>
 <body>
@@ -283,6 +297,7 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
       toggleInput(id){const c=components.get(id);if(c&&c.kind==='INPUT')c.state.value=c.state.value?0:1;},
       toggleClock(id){const c=components.get(id);if(c&&c.kind==='CLOCK'){c.state.paused=!c.state.paused;if(!c.state.paused)c.state.lastTick=performance.now();}},
       setClockPeriod(id,p){const c=components.get(id);if(c&&c.kind==='CLOCK')c.state.period=p;},
+      setIOLabel(id,l){const c=components.get(id);c.label=l;},
     };
   }
 
@@ -342,7 +357,7 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
         <rect x="4" y="4" width="52" height="32" rx="16" fill={on?'#fef3c7':'#f3f3f1'} stroke="var(--ink)" strokeWidth="2"/>
         <circle cx={on?40:20} cy="20" r="11" fill="white" stroke="var(--ink)" strokeWidth="1.5"/>
         <text x={on?18:38} y="24" fontFamily="var(--mono)" fontSize="11" fontWeight="600" textAnchor="middle" fill="var(--ink)" opacity="0.45">{on?'1':'0'}</text>
-        <text x="-15" y="26" fontFamily="var(--mono)" fontSize="16" fontWeight="600" textAnchor="middle" fill="var(--ink)" opacity="0.8">{comp.label}</text>
+        <text x="-15" y="26" fontFamily="var(--mono)" fontSize="16" fontWeight="600" textAnchor="end" fill="var(--ink)" opacity="0.8">{comp.label}</text>
       </g>;
     }
   };
@@ -369,7 +384,7 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
         {on?<circle cx="22" cy="20" r="20" fill="#fef3c7" opacity="0.55"/>:null}
         <circle cx="22" cy="20" r="13" fill={on?'#fde68a':'#f3f3f1'} stroke="var(--ink)" strokeWidth="2"/>
         <path d="M 17 26 L 17 30 L 27 30 L 27 26" fill="none" stroke="var(--ink)" strokeWidth="1.5" strokeLinecap="round"/>
-        <text x="55" y="26" fontFamily="var(--mono)" fontSize="16" fontWeight="600" textAnchor="middle" fill="var(--ink)" opacity="0.8">{comp.label}</text>
+        <text x="55" y="26" fontFamily="var(--mono)" fontSize="16" fontWeight="600" textAnchor="start" fill="var(--ink)" opacity="0.8">{comp.label}</text>
         {on?<g stroke="#d97706" strokeWidth="1.5" strokeLinecap="round">
           <line x1="22" y1="3"  x2="22" y2="6"/><line x1="37" y1="20" x2="40" y2="20"/>
           <line x1="4"  y1="20" x2="7"  y2="20"/><line x1="33" y1="9"  x2="35" y2="7"/>
@@ -653,6 +668,19 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
       </div>
     );
   })() : null;
+  const ioPanel = selComp?.kind==='INPUT' || selComp?.kind==='OUTPUT' ? (()=>{
+    return (
+      <div className="prop-panel" onMouseDown={e=>e.stopPropagation()}>
+        <div className="prop-title">{selComp.kind} Properties</div>
+        <div className="prop-option">
+          <span className="prop-label">Label</span>
+          <input  className="prop-input" 
+                  value={selComp.label}
+                  onChange={e=>{circuit.setIOLabel(selComp.id,e.target.value);onComponentChanged?.();}}/>  
+        </div>
+      </div>
+    )
+  })() : null;
 
   return <>
     <svg ref={svgRef} className="canvas"
@@ -756,6 +784,7 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
       </g>
     </svg>
     {clockPanel}
+    {ioPanel}
   </>;
 }
 
@@ -890,6 +919,14 @@ function App(){
       return;
     }
 
+    let labels = new Set();
+    for (let ioComp of inputs.concat(outputs)) {
+      if (labels.has(ioComp.label)) {
+        alert('Your circuit has duplicate labels.');
+        break;
+      } else { labels.add(ioComp.label); }
+    }
+
     const outputMinterms = new Map(outputs.map(o=>[o, []]));
     const originalInputValues = inputs.map(inp=>inp.state.value);
 
@@ -910,7 +947,7 @@ function App(){
 
     const equations = outputs.map(output=>{
       const terms = outputMinterms.get(output);
-      const rhs = terms.length ? quineMcCluskey(terms, inputs.length, inputs.map((item) => (item.label))).expression : '0';
+      const rhs = terms.length ? quineMcCluskey(terms, inputs.length, inputs.map((item) => (item.label.length === 1 ? item.label : `(${item.label})`))).expression : '0';
       return `${output.label} = ${rhs}`;
     });
 
