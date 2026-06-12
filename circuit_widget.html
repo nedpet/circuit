@@ -168,6 +168,8 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
               compute:()=>[] },
     CLOCK:  { kind:'CLOCK',  label:'CLK',   inputs:0, outputs:1, family:'io',
               compute:(i,s) => [s.value?1:0] },
+    CONST:  { kind:'CONST', label: 'CONST', inputs:0, outputs:1, family:'io',
+              compute:(i,s) => [s.value==1?1:0] },
     AND:    { kind:'AND',  label:'AND',   inputs:2, outputs:1, family:'and',  compute:([a,b])=>[(a&b)&1] },
     OR:     { kind:'OR',   label:'OR',    inputs:2, outputs:1, family:'or',   compute:([a,b])=>[(a|b)&1] },
     NOT:    { kind:'NOT',  label:'NOT',   inputs:1, outputs:1, family:'not',  compute:([a])=>[a?0:1] },
@@ -199,7 +201,7 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
       const ioId = kind==='INPUT' || kind==='OUTPUT' ? 'io'+(nextIoId++) : '' 
       const comp = {
         id, ioId, kind, x, y,
-        state: kind==='INPUT' ? {value:0}
+        state: kind==='INPUT' || kind==='CONST' ? {value:0}
             : kind==='CLOCK' ? {value:0, period:1000, lastTick:0, paused:false}
             : kind==='DFF'   ? {q:0, lastClk:0} : {},
         inputVals:  new Array(def.inputs).fill(0),
@@ -299,6 +301,7 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
       toggleClock(id){const c=components.get(id);if(c&&c.kind==='CLOCK'){c.state.paused=!c.state.paused;if(!c.state.paused)c.state.lastTick=performance.now();}},
       setClockPeriod(id,p){const c=components.get(id);if(c&&c.kind==='CLOCK')c.state.period=p;},
       setIOLabel(id,l){const c=components.get(id);c.label=l;},
+      setConstValue(id,v){const c=components.get(id);if(v != 0 && v != 1){alert("Value must be 0 or 1");c.state.value=0;}else{c.state.value=v;}},
     };
   }
 
@@ -396,6 +399,16 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
           <line x1="4"  y1="20" x2="7"  y2="20"/><line x1="33" y1="9"  x2="35" y2="7"/>
           <line x1="11" y1="9"  x2="9"  y2="7"/>
         </g>:null}
+      </g>;
+    }
+  };
+
+  VIS.CONST = { w:40,h:40, inputs:[], outputs:[{x:38,y:20}],
+    body:(f,comp)=>{
+      const on=comp.state.value;
+      return <g>
+        <circle cx="18" cy="20" r="13" fill={on==1?'#fde68a':'#f3f3f1'} stroke="var(--ink)" strokeWidth="2"/>
+        <text x="18" y="26" fontFamily="var(--mono)" fontSize="16" fontWeight="600" textAnchor="middle" fill="var(--ink)" opacity="0.8">{comp.state.value}</text>
       </g>;
     }
   };
@@ -687,6 +700,19 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
       </div>
     )
   })() : null;
+  const constPanel = selComp?.kind==='CONST' ? (()=>{
+    return (
+      <div className="prop-panel" onMouseDown={e=>e.stopPropagation()}>
+        <div className="prop-title">Constant Properties</div>
+        <div className="prop-option">
+          <span className="prop-label">Value</span>
+          <input  className="prop-input" 
+                  value={selComp.state.value}
+                  onChange={e=>{circuit.setConstValue(selComp.id,e.target.value);onComponentChanged?.();}}/>  
+        </div>
+      </div>
+    )
+  })() : null;
 
   return <>
     <svg ref={svgRef} className="canvas"
@@ -791,6 +817,7 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
     </svg>
     {clockPanel}
     {ioPanel}
+    {constPanel}
   </>;
 }
 
@@ -821,7 +848,7 @@ window.Canvas=Canvas;
 'use strict';
 const{GATE_VIS,GATE_DEFS,GateBody}=window;
 const GROUPS=[
-  {title:'Sources',   kinds:['INPUT','CLOCK']},
+  {title:'Sources',   kinds:['INPUT','CLOCK', 'CONST']},
   {title:'Sinks',     kinds:['OUTPUT']},
   {title:'Logic',     kinds:['AND','OR','NOT','NAND','NOR','XOR','XNOR','MUX']},
   {title:'Flip-flops',kinds:['DFF','TFF','JKFF','SRFF']},
