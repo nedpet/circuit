@@ -134,7 +134,7 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
 
 /* properties overlay */
 .prop-panel { 
-  position:fixed; right: 10px; bottom: 10px; width:200px; height:100px; 
+  position:fixed; right: 10px; bottom: 10px; width:200px;
   background:var(--bg); border: 1px solid var(--border); 
   border-radius: 8px; padding: 10px 12px 8px;
   box-shadow: var(--shadow); z-index: 20;
@@ -207,6 +207,7 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
         outputVals: new Array(def.outputs).fill(0),
         label: label == "none" ? String.fromCharCode(Number(ioId.slice(2)) + 64) : label,
         lastChange: 0,
+        facing: "right",
       };
       components.set(id, comp);
       if (ioId != '') {
@@ -403,6 +404,7 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
       toggleClock(id){const c=components.get(id);if(c&&c.kind==='CLOCK'){c.state.paused=!c.state.paused;if(!c.state.paused)c.state.lastTick=performance.now();}},
       setClockPeriod(id,p){const c=components.get(id);if(c&&c.kind==='CLOCK')c.state.period=p;},
       setIOLabel(id,l){const c=components.get(id);c.label=l;},
+      setFacing(id,f){const c=components.get(id);c.facing=f;},
     };
   }
 
@@ -517,7 +519,9 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
     const def=GATE_DEFS[comp.kind], vis=VIS[comp.kind];
     if (!vis) return null;
     const fill=FAMILY_FILL[def.family]||'#fff';
-    return <g>
+    return <g transform={comp.facing==='left'
+                          ? `translate(${vis.w} 0) scale(-1 1)`
+                          : `rotate(${comp.facing==='up'?270:comp.facing==='down'?90:0} ${vis.w/2} ${vis.h/2})`}>
       {vis.inputs.map((p,i)=><line key={'i'+i} x1={p.x} y1={p.y} x2={p.x+12} y2={p.y} stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>)}
       {vis.outputs.map((p,i)=><line key={'o'+i} x1={p.x-12} y1={p.y} x2={p.x} y2={p.y} stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>)}
       {vis.body(fill,comp)}
@@ -645,7 +649,17 @@ function routeManhattanPoints(from, to, firstDir) {
 
 function pinAbs(comp,kind,idx){
   const vis=GATE_VIS[comp.kind],p=kind==='in'?vis.inputs[idx]:vis.outputs[idx];
-  return{x:comp.x+p.x,y:comp.y+p.y};
+  const cx=vis.w/2, cy=vis.h/2;
+  if (comp.facing==='left') {
+    // Mirror horizontally: flip x around centre
+    return{x:comp.x+(vis.w-p.x), y:comp.y+p.y};
+  }
+  const angle = comp.facing==='up' ? -90 : comp.facing==='down' ? 90 : 0;
+  const rad = angle * Math.PI / 180;
+  const dx=p.x-cx, dy=p.y-cy;
+  const rx = dx*Math.cos(rad) - dy*Math.sin(rad);
+  const ry = dx*Math.sin(rad) + dy*Math.cos(rad);
+  return{x:comp.x+cx+rx, y:comp.y+cy+ry};
 }
 
 // ── Canvas component ─────────────────────────────────────────────────────────
@@ -950,6 +964,35 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
                   value={selComp.label}
                   onChange={e=>{circuit.setIOLabel(selComp.id,e.target.value);onComponentChanged?.();}}/>  
         </div>
+        <div className="prop-option">
+          <span className="prop-label">Facing</span>
+          <select className="prop-input" 
+                  value={selComp.facing}
+                  onChange={e=>{circuit.setFacing(selComp.id,e.target.value);onComponentChanged?.();}}>
+            <option value="right">Right</option>
+            <option value="left">Left</option>
+            <option value="up">Up</option>
+            <option value="down">Down</option>
+          </select>
+        </div>
+      </div>
+    )
+  })() : null;
+  const gatePanel = ['AND','OR','NAND','NOR','XOR','XNOR','MUX'].includes(selComp?.kind) ? (()=>{
+    return (
+      <div className="prop-panel" onMouseDown={e=>e.stopPropagation()}>
+        <div className="prop-title">{selComp.kind} Properties</div>
+        <div className="prop-option">
+          <span className="prop-label">Facing</span>
+          <select className="prop-input" 
+                  value={selComp.facing}
+                  onChange={e=>{circuit.setFacing(selComp.id,e.target.value);onComponentChanged?.();}}>
+            <option value="right">Right</option>
+            <option value="left">Left</option>
+            <option value="up">Up</option>
+            <option value="down">Down</option>
+          </select>
+        </div>
       </div>
     )
   })() : null;
@@ -1031,24 +1074,29 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
                     style={{cursor:'move'}}>
             {isSel&&<rect x="-6" y="-6" width={vis.w+12} height={vis.h+12} rx="10"
                           fill="none" stroke="var(--ink)" strokeWidth="1.5"
-                          strokeDasharray="4 3" opacity="0.35"/>}
+                          strokeDasharray="4 3" opacity="0.35"
+                          transform={comp.facing==='left'
+                          ? `translate(${vis.w} 0) scale(-1 1)`
+                          : `rotate(${comp.facing==='up'?270:comp.facing==='down'?90:0} ${vis.w/2} ${vis.h/2})`}/>}
             <GateBody comp={comp}/>
-            {vis.inputs.map((p,i)=>(
-              <circle key={'in'+i} cx={p.x} cy={p.y} r="6"
+            {vis.inputs.map((_,i)=>{
+              const abs=pinAbs(comp,'in',i);
+              return <circle key={'in'+i} cx={abs.x-comp.x} cy={abs.y-comp.y} r="6"
                       fill={comp.inputVals[i]?'var(--high)':'var(--bg)'}
                       stroke="var(--border-md)" strokeWidth="1.5"
                       style={{cursor:'crosshair'}}
                       onMouseUp={e=>onInputPinUp(e,comp,i)}
                       onMouseDown={e=>e.stopPropagation()}/>
-            ))}
-            {vis.outputs.map((p,i)=>(
-              <circle key={'out'+i} cx={p.x} cy={p.y} r="6"
+            })}
+            {vis.outputs.map((_,i)=>{
+              const abs=pinAbs(comp,'out',i);
+              return <circle key={'out'+i} cx={abs.x-comp.x} cy={abs.y-comp.y} r="6"
                       fill={comp.outputVals[i]?'var(--high)':'var(--bg)'}
                       stroke="var(--border-md)" strokeWidth="1.5"
                       style={{cursor:'crosshair'}}
                       onMouseDown={e=>onOutputPinDown(e,comp,i)}
                       onMouseUp={e=>onOutputPinUp(e,comp,i)}/>
-            ))}
+            })}
           </g>;
         })}
 
@@ -1070,6 +1118,7 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
     </svg>
     {clockPanel}
     {ioPanel}
+    {gatePanel}
   </>;
 }
 
