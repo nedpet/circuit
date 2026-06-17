@@ -192,6 +192,7 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
     const components = new Map();
     const ioComponents = new Map();
     const wires = new Map();
+    const junctions = new Set(); // {x, y, sourceWireId}
 
     function addComponent(kind, x, y, label = "none") {
       const def = GATE_DEFS[kind];
@@ -244,7 +245,12 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
       return wire;
     }
 
-    function removeWire(id) { wires.delete(id); }
+    function removeWire(id) { 
+      wires.delete(id); 
+      for (const j of junctions) {
+        if (j.sourceWireId === id) junctions.delete(j);
+      }
+    }
 
     function wireSourceValue(wire, circuit, wireValues) {
       if (isWireTerminal(wire.from)) {
@@ -252,25 +258,60 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
         if (!src) return 0;
         return src.outputVals[wire.from.pin]||0;
       }
-      if (typeof wire.from.x==='number' && typeof wire.from.y==='number') {
+      if (typeof wire.from.x === 'number' && typeof wire.from.y === 'number') {
         const px = wire.from.x, py = wire.from.y;
-        const eps = 1e-6;
-        let value = 0;
-        for (const other of circuit.wires.values()) {
-          if (other===wire) continue;
-          const knots = window.wireSegmentPoints(other, circuit);
-          for (let i = 0; i < knots.length - 1; i++) {
-            const a = knots[i], b = knots[i+1];
-            const onSeg = (Math.abs(a.x - b.x) < eps && Math.abs(px - a.x) < eps && py >= Math.min(a.y,b.y)-eps && py <= Math.max(a.y,b.y)+eps) ||
-                          (Math.abs(a.y - b.y) < eps && Math.abs(py - a.y) < eps && px >= Math.min(a.x,b.x)-eps && px <= Math.max(a.x,b.x)+eps);
-            if (onSeg) {
-              value = value || ((wireValues?.get(other.id) ?? other.value) || 0);
-              break;
+        // Look up the explicit junction registry instead of scanning geometry
+        for (const j of circuit.junctions) {
+          if (Math.abs(j.x - px) < 1e-6 && Math.abs(j.y - py) < 1e-6) {
+            const src = circuit.wires.get(j.sourceWireId);
+            if (!src) continue;
+
+            if (typeof src.pendingValue !== 'undefined') {
+              // Find how far along the source wire the junction sits (0..1)
+              const knots = wireSegmentPoints(src, circuit);
+              let totalLen = 0;
+              const lens = [];
+              for (let i = 0; i < knots.length - 1; i++) {
+                const l = Math.hypot(knots[i+1].x - knots[i].x, knots[i+1].y - knots[i].y);
+                lens.push(l); totalLen += l;
+              }
+              let distToJunction = 0;
+              for (let i = 0; i < knots.length - 1; i++) {
+                const a = knots[i], b = knots[i+1];
+                const onSeg =
+                  (Math.abs(a.x - b.x) < 1e-6 && Math.abs(j.x - a.x) < 1e-6 && j.y >= Math.min(a.y,b.y)-1e-6 && j.y <= Math.max(a.y,b.y)+1e-6) ||
+                  (Math.abs(a.y - b.y) < 1e-6 && Math.abs(j.y - a.y) < 1e-6 && j.x >= Math.min(a.x,b.x)-1e-6 && j.x <= Math.max(a.x,b.x)+1e-6);
+                if (onSeg) {
+                  distToJunction += Math.hypot(j.x - a.x, j.y - a.y);
+                  break;
+                }
+                distToJunction += lens[i];
+              }
+
+              const t = totalLen > 0 ? distToJunction / totalLen : 0;
+              // The signal reaches the junction at pendingStart + t * delayMs
+              const REF_LEN = 80;
+              const srcKnots = wireSegmentPoints(src, circuit);
+              let srcTotalLen = 0;
+              for (let i = 0; i < srcKnots.length - 1; i++) {
+                srcTotalLen += Math.hypot(srcKnots[i+1].x - srcKnots[i].x, srcKnots[i+1].y - srcKnots[i].y);
+              }
+              const srcWireDelay = (srcTotalLen / REF_LEN) * (window.__delayMs || 600);
+              const arrivalTime = (src.pendingStart || 0) + t * srcWireDelay;
+              const now = performance.now();
+
+              if (now >= arrivalTime) {
+                return src.pendingValue || 0;
+              } else {
+                // Signal hasn't reached the junction yet
+                return src.value || 0;
+              }
             }
+
+            return src.value || 0;
           }
-          if (value) break;
         }
-        return value;
+        return 0;
       }
       return 0;
     }
@@ -294,11 +335,19 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
       const wireValues = new Map([...wires.values()].map(w=>[w.id,w.value]));
       // Propagate with delay
       for (const w of wires.values()) {
-        const srcVal = wireSourceValue(w, {components, wires, ioComponents}, wireValues);
+        const srcVal = wireSourceValue(w, {components, wires, ioComponents, junctions}, wireValues);
         if (srcVal!==w.pendingValue && srcVal!==w.value) { w.pendingValue=srcVal; w.pendingStart=now; }
       }
       for (const w of wires.values()) {
-        if (typeof w.pendingValue!=='undefined' && now-(w.pendingStart||0)>=delayMs) {
+        const knots = wireSegmentPoints(w, {components, wires, ioComponents});
+        let wireLen = 0;
+        for (let i = 0; i < knots.length - 1; i++) {
+          wireLen += Math.hypot(knots[i+1].x - knots[i].x, knots[i+1].y - knots[i].y);
+        }
+        const REF_LEN = 80; // roughly one gate width — signals travel at delayMs per REF_LEN pixels
+        const wireDelay = (wireLen / REF_LEN) * delayMs;
+
+        if (typeof w.pendingValue !== 'undefined' && now - (w.pendingStart || 0) >= wireDelay) {
           if(w.value!==w.pendingValue){w.value=w.pendingValue;w.lastChange=now;}
           w.pendingValue=undefined; w.pendingStart=undefined;
         }
@@ -326,12 +375,13 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
         components: [...components.values()].map(c=>({id:c.id,ioId:c.ioId,kind:c.kind,x:c.x,y:c.y,
           state:c.kind==='INPUT'?{value:c.state.value}:c.kind==='CLOCK'?{period:c.state.period,paused:c.state.paused}:{}})),
         wires: [...wires.values()].map(w=>({id:w.id,from:w.from,to:w.to,points:w.points||[]})),
+        junctions: [...junctions],
         nextId, nextIoId,
       };
     }
 
     function load(data) {
-      components.clear(); ioComponents.clear(); wires.clear(); if(!data) return;
+      components.clear(); ioComponents.clear(); wires.clear(); junctions.clear(); if(!data) return;
       for (const cd of data.components||[]) {
         const c=addComponent(cd.kind,cd.x,cd.y); components.delete(c.id); ioComponents.delete(c.ioId); c.id=cd.id; c.ioId=cd.ioId;
         if(cd.state) Object.assign(c.state,cd.state); components.set(c.id,c); ioComponents.set(c.ioId, c);
@@ -339,12 +389,15 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
       for (const wd of data.wires||[]) {
         const w=addWire(wd.from,wd.to); if(w){wires.delete(w.id);w.id=wd.id;w.points=wd.points||[];wires.set(w.id,w);}
       }
+      for (const j of data.junctions||[]) {
+        junctions.add(j);
+      }
       nextId=Math.max(data.nextId||1,nextId);
       nextIoId=Math.max(data.nextIoId||1,nextIoId);
     }
 
     return {
-      components, wires, ioComponents,
+      components, wires, ioComponents, junctions,
       addComponent, removeComponent, addWire, removeWire, step, serialize, load,
       toggleInput(id){const c=components.get(id);if(c&&c.kind==='INPUT')c.state.value=c.state.value?0:1;},
       toggleClock(id){const c=components.get(id);if(c&&c.kind==='CLOCK'){c.state.paused=!c.state.paused;if(!c.state.paused)c.state.lastTick=performance.now();}},
@@ -568,15 +621,19 @@ function findNearestWirePoint(wire,x,y,circuit) {
   return best;
 }
 
-function insertBranchPoint(wire,x,y,circuit) {
-  const nearest = findNearestWirePoint(wire,x,y,circuit);
+function insertBranchPoint(wire, x, y, circuit) {
+  const nearest = findNearestWirePoint(wire, x, y, circuit);
   if (!nearest.point) return null;
   const pt = nearest.point;
-  const pts = wire.points||[];
+  const pts = wire.points || [];
   const idx = Math.max(0, nearest.index);
   const newPts = [...pts];
-  newPts.splice(idx,0,{x:pt.x,y:pt.y});
+  newPts.splice(idx, 0, {x: pt.x, y: pt.y});
   wire.points = newPts;
+  // Register this as an explicit junction so wireSourceValue
+  // can find it without geometry scanning, and won't confuse
+  // visual crossings with real connections.
+  circuit.junctions.add({x: pt.x, y: pt.y, sourceWireId: wire.id});
   return pt;
 }
 
@@ -782,7 +839,8 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
       if (wire) {
         wire.to={compId:comp.id,pin:idx,type:'in'};
         wire.points = routeManhattanPoints(terminalCoords(wire.from,circuit), terminalCoords(wire.to,circuit), wf.dir||'h');
-        wiringFromRef.current=null;
+        endpointDragRef.current=null;
+        wiringFromRef.current={...wf, handled:true};
         onComponentChanged?.(); setWiringFrom(null); return;
       }
     }
@@ -791,7 +849,8 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
       if (wire) {
         wire.from={compId:comp.id,pin:idx,type:'out'};
         wire.points = routeManhattanPoints(terminalCoords(wire.from,circuit), terminalCoords(wire.to,circuit), wf.dir||'h');
-        wiringFromRef.current=null;
+        endpointDragRef.current=null;
+        wiringFromRef.current={...wf, handled:true};
         onComponentChanged?.(); setWiringFrom(null); return;
       }
     }
@@ -806,15 +865,16 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
     e.stopPropagation();
     const wf = wiringFromRef.current;
     if (!wf) return;
-    if (wf.type==='endpoint' && wf.side==='from') {
-      const wire=circuit.wires.get(wf.wireId);
-      if (wire) {
-        wire.from={compId:comp.id,pin:idx,type:'out'};
-        wire.points = routeManhattanPoints(terminalCoords(wire.from,circuit), terminalCoords(wire.to,circuit), wf.dir||'h');
-        wiringFromRef.current=null;
-        onComponentChanged?.(); setWiringFrom(null); return;
+      if (wf.type==='endpoint' && wf.side==='from') {
+        const wire=circuit.wires.get(wf.wireId);
+        if (wire) {
+          wire.from={compId:comp.id,pin:idx,type:'out'};
+          wire.points = routeManhattanPoints(terminalCoords(wire.from,circuit), terminalCoords(wire.to,circuit), wf.dir||'h');
+          endpointDragRef.current=null;
+          wiringFromRef.current={...wf, handled:true};
+          onComponentChanged?.(); setWiringFrom(null); return;
+        }
       }
-    }
   };
   const onWireEdgeDown=(e,wire)=>{
     if (e.button!==0) return;
@@ -933,9 +993,17 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
             {/* Particles on HIGH */}
             {high&&<ParticleStream a={a} b={b} pts={pts}/>}
             {/* In-flight pulse */}
-            {typeof w.pendingValue!=='undefined'&&
-              <InflightPulse a={a} b={b} pts={pts} pendingValue={w.pendingValue}
-                             pendingStart={w.pendingStart} delayMs={window.__delayMs||600}/>}
+            {typeof w.pendingValue!=='undefined'&&(()=>{
+              const knots = wireSegmentPoints(w, circuit);
+              let wireLen = 0;
+              for (let i = 0; i < knots.length - 1; i++) {
+                wireLen += Math.hypot(knots[i+1].x - knots[i].x, knots[i+1].y - knots[i].y);
+              }
+              const REF_LEN = 80;
+              const wireDelay = (wireLen / REF_LEN) * (window.__delayMs || 600);
+              return <InflightPulse a={a} b={b} pts={pts} pendingValue={w.pendingValue}
+                                    pendingStart={w.pendingStart} delayMs={wireDelay}/>;
+            })()}
             {/* Free endpoint handles */}
             {!w.from.compId&&<circle cx={a.x} cy={a.y} r="6" fill="white" stroke="var(--border-md)" strokeWidth="1.5"
                       style={{cursor:'move'}}
@@ -1265,7 +1333,7 @@ function App(){
       {/* Propagation delay */}
       <div className="tb-delay">
         <span>Delay</span>
-        <input type="range" min="50" max="2000" step="50" value={delayMs}
+        <input type="range" min="10" max="2000" step="10" value={delayMs}
                onChange={e=>setDelayMs(Number(e.target.value))}/>
         <span className="tb-delay-val">{delayMs}ms</span>
       </div>
