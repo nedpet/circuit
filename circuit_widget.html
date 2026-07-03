@@ -168,8 +168,6 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
               compute:()=>[] },
     CLOCK:  { kind:'CLOCK',  label:'CLK',   inputs:0, outputs:1, family:'io',
               compute:(i,s) => [s.value?1:0] },
-    CONST:  { kind:'CONST', label: 'CONST', inputs:0, outputs:1, family:'io',
-              compute:(i,s) => [s.value==1?1:0] },
     AND:    { kind:'AND',  label:'AND',   inputs:2, outputs:1, family:'and',  compute:([a,b])=>[(a&b)&1] },
     OR:     { kind:'OR',   label:'OR',    inputs:2, outputs:1, family:'or',   compute:([a,b])=>[(a|b)&1] },
     NOT:    { kind:'NOT',  label:'NOT',   inputs:1, outputs:1, family:'not',  compute:([a])=>[a?0:1] },
@@ -188,6 +186,128 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
               compute:([s2,r],s)=>{ if(s2&&!r)s.q=1; else if(r&&!s2)s.q=0; return[s.q||0]; } },
   };
 
+  // ── Pure wire geometry helpers ──────────────────────────────────────────
+  // Lives here (not in the CANVAS section) because ENGINE's step()/
+  // wireSourceValue() needs these for delay propagation, and CANVAS also
+  // needs them for rendering. Keeping them in ENGINE and exposing them on
+  // `window` for CANVAS to consume avoids a circular dependency where
+  // ENGINE used to reach into CANVAS's exports for its own simulation math.
+
+  function projectOrthogonalPoint(a,b,x,y) {
+    if (a.x===b.x) return {x:a.x,y:Math.max(Math.min(y,Math.max(a.y,b.y)),Math.min(a.y,b.y))};
+    if (a.y===b.y) return {x:Math.max(Math.min(x,Math.max(a.x,b.x)),Math.min(a.x,b.x)),y:a.y};
+    return {x:a.x,y:a.y};
+  }
+
+  function terminalCoords(term, circuit) {
+    if (!term) return {x:0,y:0};
+    if (typeof term.compId==='string') {
+      const comp = circuit.components.get(term.compId);
+      if (!comp) return {x:term.x||0,y:term.y||0};
+      const vis = window.GATE_VIS[comp.kind];
+      const kind = term.type || (typeof term.pin==='number' && term.pin < (vis.inputs.length||0) ? 'in' : 'out');
+      return window.pinAbs(comp, kind, term.pin);
+    }
+    return {x:term.x||0,y:term.y||0};
+  }
+
+  function wireKnots(x1,y1,x2,y2,pts=[]) {
+    return [{x:x1,y:y1},...pts,{x:x2,y:y2}];
+  }
+
+  function resolveWire(x1,y1,x2,y2,pts=[]) {
+    const knots=wireKnots(x1,y1,x2,y2,pts);
+    const out=[knots[0]];
+    for (let i=1;i<knots.length;i++) {
+      const a=out[out.length-1], b=knots[i];
+      if (a.x===b.x || a.y===b.y) {
+        out.push(b);
+      } else {
+        out.push({x:b.x,y:a.y}, b);
+      }
+    }
+    return out;
+  }
+
+  function wirePath(x1,y1,x2,y2,pts=[]) {
+    const p=resolveWire(x1,y1,x2,y2,pts);
+    return p.map((v,i)=>(i?'L ':'M ')+v.x+' '+v.y).join('');
+  }
+
+  function sampleWire(x1,y1,x2,y2,pts=[],t) {
+    const p=resolveWire(x1,y1,x2,y2,pts);
+    let total=0; const lens=[];
+    for (let i=1;i<p.length;i++){const dx=p[i].x-p[i-1].x,dy=p[i].y-p[i-1].y,l=Math.hypot(dx,dy);lens.push(l);total+=l;}
+    let d=t*total;
+    for (let i=0;i<lens.length;i++){
+      if(d<=lens[i]||i===lens.length-1){const f=lens[i]>0?Math.min(1,d/lens[i]):0;return[p[i].x+(p[i+1].x-p[i].x)*f,p[i].y+(p[i+1].y-p[i].y)*f];}
+      d-=lens[i];
+    }
+    return [p[p.length-1].x,p[p.length-1].y];
+  }
+
+  function distToSeg(px,py,ax,ay,bx,by){
+    const dx=bx-ax,dy=by-ay,l2=dx*dx+dy*dy;
+    if(l2===0) return Math.hypot(px-ax,py-ay);
+    const t=Math.max(0,Math.min(1,((px-ax)*dx+(py-ay)*dy)/l2));
+    return Math.hypot(px-(ax+t*dx),py-(ay+t*dy));
+  }
+
+  function wireSegmentPoints(wire, circuit) {
+    const from = terminalCoords(wire.from, circuit);
+    const to = terminalCoords(wire.to, circuit);
+    return wireKnots(from.x,from.y,to.x,to.y,wire.points||[]);
+  }
+
+  function findNearestWirePoint(wire,x,y,circuit) {
+    const knots = wireSegmentPoints(wire, circuit);
+    let best = {d:Infinity, point:null, index:0};
+    for (let i=0;i<knots.length-1;i++) {
+      const a=knots[i], b=knots[i+1];
+      const proj = projectOrthogonalPoint(a,b,x,y);
+      const d = Math.hypot(proj.x-x,proj.y-y);
+      if (d < best.d) best = {d, point:proj, index:i};
+    }
+    return best;
+  }
+
+  function insertBranchPoint(wire, x, y, circuit) {
+    const nearest = findNearestWirePoint(wire, x, y, circuit);
+    if (!nearest.point) return null;
+    const pt = nearest.point;
+    const pts = wire.points || [];
+    const idx = Math.max(0, nearest.index);
+    const newPts = [...pts];
+    newPts.splice(idx, 0, {x: pt.x, y: pt.y});
+    wire.points = newPts;
+    // Register this as an explicit junction so wireSourceValue
+    // can find it without geometry scanning, and won't confuse
+    // visual crossings with real connections.
+    circuit.junctions.add({x: pt.x, y: pt.y, sourceWireId: wire.id});
+    return pt;
+  }
+
+  function routeManhattanPoints(from, to, firstDir) {
+    if (from.x === to.x || from.y === to.y) return [];
+    const corner = firstDir === 'v' ? {x:from.x, y:to.y} : {x:to.x, y:from.y};
+    return [corner];
+  }
+
+  function pinAbs(comp,kind,idx){
+    const vis=window.GATE_VIS[comp.kind],p=kind==='in'?vis.inputs[idx]:vis.outputs[idx];
+    const cx=vis.w/2, cy=vis.h/2;
+    if (comp.facing==='left') {
+      // Mirror horizontally: flip x around centre
+      return{x:comp.x+(vis.w-p.x), y:comp.y+p.y};
+    }
+    const angle = comp.facing==='up' ? -90 : comp.facing==='down' ? 90 : 0;
+    const rad = angle * Math.PI / 180;
+    const dx=p.x-cx, dy=p.y-cy;
+    const rx = dx*Math.cos(rad) - dy*Math.sin(rad);
+    const ry = dx*Math.sin(rad) + dy*Math.cos(rad);
+    return{x:comp.x+cx+rx, y:comp.y+cy+ry};
+  }
+
   function createCircuit() {
     let nextId = 1;
     let nextIoId = 1;
@@ -202,7 +322,7 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
       const ioId = kind==='INPUT' || kind==='OUTPUT' ? 'io'+(nextIoId++) : '' 
       const comp = {
         id, ioId, kind, x, y,
-        state: kind==='INPUT' || kind==='CONST' ? {value:0}
+        state: kind==='INPUT' ? {value:0}
             : kind==='CLOCK' ? {value:0, period:1000, lastTick:0, paused:false}
             : kind==='DFF'   ? {q:0, lastClk:0} : {},
         inputVals:  new Array(def.inputs).fill(0),
@@ -299,7 +419,7 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
               for (let i = 0; i < srcKnots.length - 1; i++) {
                 srcTotalLen += Math.hypot(srcKnots[i+1].x - srcKnots[i].x, srcKnots[i+1].y - srcKnots[i].y);
               }
-              const srcWireDelay = (srcTotalLen / REF_LEN) * (window.__delayMs || 600);
+              const srcWireDelay = (srcTotalLen / REF_LEN) * (window.__widgetState.delayMs);
               const arrivalTime = (src.pendingStart || 0) + t * srcWireDelay;
               const now = performance.now();
 
@@ -407,12 +527,30 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
       setClockPeriod(id,p){const c=components.get(id);if(c&&c.kind==='CLOCK')c.state.period=p;},
       setIOLabel(id,l){const c=components.get(id);c.label=l;},
       setFacing(id,f){const c=components.get(id);c.facing=f;},
-      setConstValue(id,v){const c=components.get(id);if(v != 0 && v != 1){alert("Value must be 0 or 1");c.state.value=0;}else{c.state.value=v;}},
     };
   }
 
+  // Central cross-section state. Anything CANVAS/APP need to read that
+  // originates outside their own scope lives here, instead of being
+  // scattered across individual window.__foo globals.
+  window.__widgetState = { delayMs: 600, particleDensity: 4, circuit: null };
+
   window.GATE_DEFS = GATE_DEFS;
   window.createCircuit = createCircuit;
+
+  // Pure geometry helpers, shared with CANVAS section.
+  window.projectOrthogonalPoint = projectOrthogonalPoint;
+  window.terminalCoords = terminalCoords;
+  window.wireKnots = wireKnots;
+  window.resolveWire = resolveWire;
+  window.wirePath = wirePath;
+  window.sampleWire = sampleWire;
+  window.distToSeg = distToSeg;
+  window.wireSegmentPoints = wireSegmentPoints;
+  window.findNearestWirePoint = findNearestWirePoint;
+  window.insertBranchPoint = insertBranchPoint;
+  window.routeManhattanPoints = routeManhattanPoints;
+  window.pinAbs = pinAbs;
 })();
 
 
@@ -509,16 +647,6 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
     }
   };
 
-  VIS.CONST = { w:40,h:40, inputs:[], outputs:[{x:38,y:20}],
-    body:(f,comp)=>{
-      const on=comp.state.value;
-      return <g>
-        <circle cx="18" cy="20" r="13" fill={on==1?'#fde68a':'#f3f3f1'} stroke="var(--ink)" strokeWidth="2"/>
-        <text x="18" y="26" fontFamily="var(--mono)" fontSize="16" fontWeight="600" textAnchor="middle" fill="var(--ink)" opacity="0.8">{comp.state.value}</text>
-      </g>;
-    }
-  };
-
   function ffRect(f,h){return<rect x="6" y="6" width="68" height={h-12} rx="7" fill={f} stroke="var(--ink)" strokeWidth="2"/>;}
   const ffTxt=(x,y,t)=><text x={x} y={y} fontFamily="var(--mono)" fontSize="12" fill="var(--ink)">{t}</text>;
   const ffSub=(t)=><text x="40" y="74" fontFamily="var(--ui)" fontSize="9" textAnchor="middle" fill="var(--ink)" opacity="0.38">{t}</text>;
@@ -552,130 +680,16 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
 'use strict';
 const { useState, useEffect, useRef, useCallback } = React;
 const { GATE_VIS, GATE_DEFS, GateBody } = window;
+// Pure geometry helpers now live in the ENGINE section (see comment there)
+// and are consumed here via window.* to avoid a circular dependency.
+const {
+  projectOrthogonalPoint, terminalCoords, wireKnots, resolveWire, wirePath,
+  sampleWire, distToSeg, wireSegmentPoints, findNearestWirePoint,
+  insertBranchPoint, routeManhattanPoints, pinAbs,
+} = window;
 
 const GRID = 20;
 const snap = (v, on=true) => on ? Math.round(v/GRID)*GRID : v;
-
-// ── Wire path helpers ────────────────────────────────────────────────────────
-
-// Resolve a wire (with waypoints) into a flat polyline of {x,y} points
-function projectOrthogonalPoint(a,b,x,y) {
-  if (a.x===b.x) return {x:a.x,y:Math.max(Math.min(y,Math.max(a.y,b.y)),Math.min(a.y,b.y))};
-  if (a.y===b.y) return {x:Math.max(Math.min(x,Math.max(a.x,b.x)),Math.min(a.x,b.x)),y:a.y};
-  return {x:a.x,y:a.y};
-}
-
-function terminalCoords(term, circuit) {
-  if (!term) return {x:0,y:0};
-  if (typeof term.compId==='string') {
-    const comp = circuit.components.get(term.compId);
-    if (!comp) return {x:term.x||0,y:term.y||0};
-    const vis = GATE_VIS[comp.kind];
-    const kind = term.type || (typeof term.pin==='number' && term.pin < (vis.inputs.length||0) ? 'in' : 'out');
-    return pinAbs(comp, kind, term.pin);
-  }
-  return {x:term.x||0,y:term.y||0};
-}
-
-function wireKnots(x1,y1,x2,y2,pts=[]) {
-  return [{x:x1,y:y1},...pts,{x:x2,y:y2}];
-}
-
-function resolveWire(x1,y1,x2,y2,pts=[]) {
-  const knots=wireKnots(x1,y1,x2,y2,pts);
-  const out=[knots[0]];
-  for (let i=1;i<knots.length;i++) {
-    const a=out[out.length-1], b=knots[i];
-    if (a.x===b.x || a.y===b.y) {
-      out.push(b);
-    } else {
-      out.push({x:b.x,y:a.y}, b);
-    }
-  }
-  return out;
-}
-
-function wirePath(x1,y1,x2,y2,pts=[]) {
-  const p=resolveWire(x1,y1,x2,y2,pts);
-  return p.map((v,i)=>(i?'L ':'M ')+v.x+' '+v.y).join('');
-}
-
-function sampleWire(x1,y1,x2,y2,pts=[],t) {
-  const p=resolveWire(x1,y1,x2,y2,pts);
-  let total=0; const lens=[];
-  for (let i=1;i<p.length;i++){const dx=p[i].x-p[i-1].x,dy=p[i].y-p[i-1].y,l=Math.hypot(dx,dy);lens.push(l);total+=l;}
-  let d=t*total;
-  for (let i=0;i<lens.length;i++){
-    if(d<=lens[i]||i===lens.length-1){const f=lens[i]>0?Math.min(1,d/lens[i]):0;return[p[i].x+(p[i+1].x-p[i].x)*f,p[i].y+(p[i+1].y-p[i].y)*f];}
-    d-=lens[i];
-  }
-  return [p[p.length-1].x,p[p.length-1].y];
-}
-
-function distToSeg(px,py,ax,ay,bx,by){
-  const dx=bx-ax,dy=by-ay,l2=dx*dx+dy*dy;
-  if(l2===0) return Math.hypot(px-ax,py-ay);
-  const t=Math.max(0,Math.min(1,((px-ax)*dx+(py-ay)*dy)/l2));
-  return Math.hypot(px-(ax+t*dx),py-(ay+t*dy));
-}
-
-function wireSegmentPoints(wire, circuit) {
-  const from = terminalCoords(wire.from, circuit);
-  const to = terminalCoords(wire.to, circuit);
-  return wireKnots(from.x,from.y,to.x,to.y,wire.points||[]);
-}
-window.wireSegmentPoints = wireSegmentPoints;
-
-function findNearestWirePoint(wire,x,y,circuit) {
-  const knots = wireSegmentPoints(wire, circuit);
-  let best = {d:Infinity, point:null, index:0};
-  for (let i=0;i<knots.length-1;i++) {
-    const a=knots[i], b=knots[i+1];
-    const proj = projectOrthogonalPoint(a,b,x,y);
-    const d = Math.hypot(proj.x-x,proj.y-y);
-    if (d < best.d) best = {d, point:proj, index:i};
-  }
-  return best;
-}
-
-function insertBranchPoint(wire, x, y, circuit) {
-  const nearest = findNearestWirePoint(wire, x, y, circuit);
-  if (!nearest.point) return null;
-  const pt = nearest.point;
-  const pts = wire.points || [];
-  const idx = Math.max(0, nearest.index);
-  const newPts = [...pts];
-  newPts.splice(idx, 0, {x: pt.x, y: pt.y});
-  wire.points = newPts;
-  // Register this as an explicit junction so wireSourceValue
-  // can find it without geometry scanning, and won't confuse
-  // visual crossings with real connections.
-  circuit.junctions.add({x: pt.x, y: pt.y, sourceWireId: wire.id});
-  return pt;
-}
-
-function routeManhattanPoints(from, to, firstDir) {
-  if (from.x === to.x || from.y === to.y) return [];
-  const corner = firstDir === 'v' ? {x:from.x, y:to.y} : {x:to.x, y:from.y};
-  return [corner];
-}
-
-function pinAbs(comp,kind,idx){
-  const vis=GATE_VIS[comp.kind],p=kind==='in'?vis.inputs[idx]:vis.outputs[idx];
-  const cx=vis.w/2, cy=vis.h/2;
-  if (comp.facing==='left') {
-    // Mirror horizontally: flip x around centre
-    return{x:comp.x+(vis.w-p.x), y:comp.y+p.y};
-  }
-  const angle = comp.facing==='up' ? -90 : comp.facing==='down' ? 90 : 0;
-  const rad = angle * Math.PI / 180;
-  const dx=p.x-cx, dy=p.y-cy;
-  const rx = dx*Math.cos(rad) - dy*Math.sin(rad);
-  const ry = dx*Math.sin(rad) + dy*Math.cos(rad);
-  return{x:comp.x+cx+rx, y:comp.y+cy+ry};
-}
-
-// ── Canvas component ─────────────────────────────────────────────────────────
 
 function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag, onComponentChanged, snapGrid=true }) {
   const svgRef = useRef(null);
@@ -1009,19 +1023,6 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
       </div>
     )
   })() : null;
-  const constPanel = selComp?.kind==='CONST' ? (()=>{
-    return (
-      <div className="prop-panel" onMouseDown={e=>e.stopPropagation()}>
-        <div className="prop-title">Constant Properties</div>
-        <div className="prop-option">
-          <span className="prop-label">Value</span>
-          <input  className="prop-input" 
-                  value={selComp.state.value}
-                  onChange={e=>{circuit.setConstValue(selComp.id,e.target.value);onComponentChanged?.();}}/>  
-        </div>
-      </div>
-    )
-  })() : null;
 
   return <>
     <svg ref={svgRef} className="canvas"
@@ -1069,7 +1070,7 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
                 wireLen += Math.hypot(knots[i+1].x - knots[i].x, knots[i+1].y - knots[i].y);
               }
               const REF_LEN = 80;
-              const wireDelay = (wireLen / REF_LEN) * (window.__delayMs || 600);
+              const wireDelay = (wireLen / REF_LEN) * (window.__widgetState.delayMs);
               return <InflightPulse a={a} b={b} pts={pts} pendingValue={w.pendingValue}
                                     pendingStart={w.pendingStart} delayMs={wireDelay}/>;
             })()}
@@ -1145,14 +1146,13 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
     {clockPanel}
     {ioPanel}
     {gatePanel}
-    {constPanel}
   </>;
 }
 
 function ParticleStream({a,b,pts=[]}) {
   const [t,setT]=useState(0);
   useEffect(()=>{let r,l=performance.now();const fn=(now)=>{setT(p=>(p+(now-l)*.0006)%1);l=now;r=requestAnimationFrame(fn);};r=requestAnimationFrame(fn);return()=>cancelAnimationFrame(r);},[]);
-  const N=window.__particleDensity??4; if(N===0)return null;
+  const N=window.__widgetState.particleDensity??4; if(N===0)return null;
   return <g pointerEvents="none">{Array.from({length:N},(_,i)=>{
     const tt=(t+i/N)%1,[x,y]=sampleWire(a.x,a.y,b.x,b.y,pts,tt);
     return <circle key={i} cx={x} cy={y} r="2.4" fill="var(--high)" opacity=".8"/>;
@@ -1176,7 +1176,7 @@ window.Canvas=Canvas;
 'use strict';
 const{GATE_VIS,GATE_DEFS,GateBody}=window;
 const GROUPS=[
-  {title:'Sources',   kinds:['INPUT','CLOCK', 'CONST']},
+  {title:'Sources',   kinds:['INPUT','CLOCK']},
   {title:'Sinks',     kinds:['OUTPUT']},
   {title:'Logic',     kinds:['AND','OR','NOT','NAND','NOR','XOR','XNOR','MUX']},
   {title:'Flip-flops',kinds:['DFF','TFF','JKFF','SRFF']},
@@ -1208,7 +1208,7 @@ const{Canvas,Palette,createCircuit,GATE_DEFS}=window;
 
 function App(){
   const[circuit]=useState(()=>createCircuit());
-  window.__circuit = circuit;
+  window.__widgetState.circuit = circuit;
   const[,tick]=useState(0);
   const refresh=useCallback(()=>tick(n=>n+1),[]);
   const[selectedId,setSelectedId]=useState(null);
@@ -1223,8 +1223,8 @@ function App(){
   const[equationToLoad,setEquationToLoad]=useState('');
 
 
-  window.__delayMs=delayMs;
-  window.__particleDensity=4;
+  window.__widgetState.delayMs=delayMs;
+  window.__widgetState.particleDensity=4;
 
   // Sim loop
   useEffect(()=>{
