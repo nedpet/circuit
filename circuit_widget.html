@@ -134,7 +134,7 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
 
 /* properties overlay */
 .prop-panel { 
-  position:fixed; right: 10px; bottom: 10px; width:200px; height:100px; 
+  position:fixed; right: 10px; bottom: 10px; width:200px;
   background:var(--bg); border: 1px solid var(--border); 
   border-radius: 8px; padding: 10px 12px 8px;
   box-shadow: var(--shadow); z-index: 20;
@@ -194,6 +194,7 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
     const components = new Map();
     const ioComponents = new Map();
     const wires = new Map();
+    const junctions = new Set(); // {x, y, sourceWireId}
 
     function addComponent(kind, x, y, label = "none") {
       const def = GATE_DEFS[kind];
@@ -208,6 +209,7 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
         outputVals: new Array(def.outputs).fill(0),
         label: label == "none" ? String.fromCharCode(Number(ioId.slice(2)) + 64) : label,
         lastChange: 0,
+        facing: "right",
       };
       components.set(id, comp);
       if (ioId != '') {
@@ -227,15 +229,95 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
       for (const [wid,w] of wires) { if (w.from.compId===id||w.to.compId===id) wires.delete(wid); }
     }
 
+    function isWireTerminal(target) {
+      return target && typeof target.compId==='string' && typeof target.pin==='number';
+    }
+
     function addWire(from, to) {
-      for (const w of wires.values()) { if (w.to.compId===to.compId&&w.to.pin===to.pin) return null; }
+      if (isWireTerminal(from) && isWireTerminal(to)) {
+        for (const w of wires.values()) {
+          if (w.from.compId===from.compId && w.from.pin===from.pin &&
+              w.to.compId===to.compId && w.to.pin===to.pin) return null;
+        }
+      }
+      if (isWireTerminal(from) && !from.type) from.type='out';
+      if (isWireTerminal(to) && !to.type)   to.type='in';
       const id = 'w'+(nextId++);
       const wire = {id, from, to, value:0, lastChange:0, points:[]};
       wires.set(id, wire);
       return wire;
     }
 
-    function removeWire(id) { wires.delete(id); }
+    function removeWire(id) { 
+      wires.delete(id); 
+      for (const j of junctions) {
+        if (j.sourceWireId === id) junctions.delete(j);
+      }
+    }
+
+    function wireSourceValue(wire, circuit, wireValues) {
+      if (isWireTerminal(wire.from)) {
+        const src = circuit.components.get(wire.from.compId);
+        if (!src) return 0;
+        return src.outputVals[wire.from.pin]||0;
+      }
+      if (typeof wire.from.x === 'number' && typeof wire.from.y === 'number') {
+        const px = wire.from.x, py = wire.from.y;
+        // Look up the explicit junction registry instead of scanning geometry
+        for (const j of circuit.junctions) {
+          if (Math.abs(j.x - px) < 1e-6 && Math.abs(j.y - py) < 1e-6) {
+            const src = circuit.wires.get(j.sourceWireId);
+            if (!src) continue;
+
+            if (typeof src.pendingValue !== 'undefined') {
+              // Find how far along the source wire the junction sits (0..1)
+              const knots = wireSegmentPoints(src, circuit);
+              let totalLen = 0;
+              const lens = [];
+              for (let i = 0; i < knots.length - 1; i++) {
+                const l = Math.hypot(knots[i+1].x - knots[i].x, knots[i+1].y - knots[i].y);
+                lens.push(l); totalLen += l;
+              }
+              let distToJunction = 0;
+              for (let i = 0; i < knots.length - 1; i++) {
+                const a = knots[i], b = knots[i+1];
+                const onSeg =
+                  (Math.abs(a.x - b.x) < 1e-6 && Math.abs(j.x - a.x) < 1e-6 && j.y >= Math.min(a.y,b.y)-1e-6 && j.y <= Math.max(a.y,b.y)+1e-6) ||
+                  (Math.abs(a.y - b.y) < 1e-6 && Math.abs(j.y - a.y) < 1e-6 && j.x >= Math.min(a.x,b.x)-1e-6 && j.x <= Math.max(a.x,b.x)+1e-6);
+                if (onSeg) {
+                  distToJunction += Math.hypot(j.x - a.x, j.y - a.y);
+                  break;
+                }
+                distToJunction += lens[i];
+              }
+
+              const t = totalLen > 0 ? distToJunction / totalLen : 0;
+              // The signal reaches the junction at pendingStart + t * delayMs
+              const REF_LEN = 80;
+              const srcKnots = wireSegmentPoints(src, circuit);
+              let srcTotalLen = 0;
+              for (let i = 0; i < srcKnots.length - 1; i++) {
+                srcTotalLen += Math.hypot(srcKnots[i+1].x - srcKnots[i].x, srcKnots[i+1].y - srcKnots[i].y);
+              }
+              const srcWireDelay = (srcTotalLen / REF_LEN) * (window.__delayMs || 600);
+              const arrivalTime = (src.pendingStart || 0) + t * srcWireDelay;
+              const now = performance.now();
+
+              if (now >= arrivalTime) {
+                return src.pendingValue || 0;
+              } else {
+                // Signal hasn't reached the junction yet
+                return src.value || 0;
+              }
+            }
+
+            return src.value || 0;
+          }
+        }
+        return 0;
+      }
+      return 0;
+    }
 
     function step(now, delayMs) {
       // Tick clocks
@@ -253,22 +335,41 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
         const outs = def.compute(c.inputVals, c.state)||[];
         for (let i=0;i<outs.length;i++) { if(c.outputVals[i]!==outs[i]){c.outputVals[i]=outs[i];c.lastChange=now;} }
       }
+      const wireValues = new Map([...wires.values()].map(w=>[w.id,w.value]));
       // Propagate with delay
       for (const w of wires.values()) {
-        const src = components.get(w.from.compId); if(!src) continue;
-        const srcVal = src.outputVals[w.from.pin]||0;
+        const srcVal = wireSourceValue(w, {components, wires, ioComponents, junctions}, wireValues);
         if (srcVal!==w.pendingValue && srcVal!==w.value) { w.pendingValue=srcVal; w.pendingStart=now; }
-        if (typeof w.pendingValue!=='undefined' && now-(w.pendingStart||0)>=delayMs) {
+      }
+      for (const w of wires.values()) {
+        const knots = wireSegmentPoints(w, {components, wires, ioComponents});
+        let wireLen = 0;
+        for (let i = 0; i < knots.length - 1; i++) {
+          wireLen += Math.hypot(knots[i+1].x - knots[i].x, knots[i+1].y - knots[i].y);
+        }
+        const REF_LEN = 80; // roughly one gate width — signals travel at delayMs per REF_LEN pixels
+        const wireDelay = (wireLen / REF_LEN) * delayMs;
+
+        if (typeof w.pendingValue !== 'undefined' && now - (w.pendingStart || 0) >= wireDelay) {
           if(w.value!==w.pendingValue){w.value=w.pendingValue;w.lastChange=now;}
           w.pendingValue=undefined; w.pendingStart=undefined;
         }
-        const dst = components.get(w.to.compId);
-        if (dst) dst.inputVals[w.to.pin]=w.value;
+        // Do not assign directly to component inputs here — inputs are
+        // recomputed after propagation to avoid transient partial updates
+        // that can cause a one-frame flicker when wires are reattached.
       }
       // Reset inputs from wires
       const acc = new Map();
       for (const c of components.values()) acc.set(c.id, new Array(GATE_DEFS[c.kind].inputs).fill(0));
-      for (const w of wires.values()) { const a=acc.get(w.to.compId); if(a) a[w.to.pin]=w.value; }
+      for (const w of wires.values()) {
+        if (!isWireTerminal(w.to)) continue;
+        const a = acc.get(w.to.compId);
+        if (a) {
+          // If multiple wires drive the same input, combine drivers with OR
+          // so a high on any wire keeps the input high instead of last-writer-wins.
+          a[w.to.pin] = (a[w.to.pin] || 0) || (w.value||0);
+        }
+      }
       for (const c of components.values()) c.inputVals=acc.get(c.id);
     }
 
@@ -277,12 +378,13 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
         components: [...components.values()].map(c=>({id:c.id,ioId:c.ioId,kind:c.kind,x:c.x,y:c.y,
           state:c.kind==='INPUT'?{value:c.state.value}:c.kind==='CLOCK'?{period:c.state.period,paused:c.state.paused}:{}})),
         wires: [...wires.values()].map(w=>({id:w.id,from:w.from,to:w.to,points:w.points||[]})),
+        junctions: [...junctions],
         nextId, nextIoId,
       };
     }
 
     function load(data) {
-      components.clear(); ioComponents.clear(); wires.clear(); if(!data) return;
+      components.clear(); ioComponents.clear(); wires.clear(); junctions.clear(); if(!data) return;
       for (const cd of data.components||[]) {
         const c=addComponent(cd.kind,cd.x,cd.y); components.delete(c.id); ioComponents.delete(c.ioId); c.id=cd.id; c.ioId=cd.ioId;
         if(cd.state) Object.assign(c.state,cd.state); components.set(c.id,c); ioComponents.set(c.ioId, c);
@@ -290,17 +392,21 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
       for (const wd of data.wires||[]) {
         const w=addWire(wd.from,wd.to); if(w){wires.delete(w.id);w.id=wd.id;w.points=wd.points||[];wires.set(w.id,w);}
       }
+      for (const j of data.junctions||[]) {
+        junctions.add(j);
+      }
       nextId=Math.max(data.nextId||1,nextId);
       nextIoId=Math.max(data.nextIoId||1,nextIoId);
     }
 
     return {
-      components, wires, ioComponents,
+      components, wires, ioComponents, junctions,
       addComponent, removeComponent, addWire, removeWire, step, serialize, load,
       toggleInput(id){const c=components.get(id);if(c&&c.kind==='INPUT')c.state.value=c.state.value?0:1;},
       toggleClock(id){const c=components.get(id);if(c&&c.kind==='CLOCK'){c.state.paused=!c.state.paused;if(!c.state.paused)c.state.lastTick=performance.now();}},
       setClockPeriod(id,p){const c=components.get(id);if(c&&c.kind==='CLOCK')c.state.period=p;},
       setIOLabel(id,l){const c=components.get(id);c.label=l;},
+      setFacing(id,f){const c=components.get(id);c.facing=f;},
       setConstValue(id,v){const c=components.get(id);if(v != 0 && v != 1){alert("Value must be 0 or 1");c.state.value=0;}else{c.state.value=v;}},
     };
   }
@@ -426,7 +532,9 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
     const def=GATE_DEFS[comp.kind], vis=VIS[comp.kind];
     if (!vis) return null;
     const fill=FAMILY_FILL[def.family]||'#fff';
-    return <g>
+    return <g transform={comp.facing==='left'
+                          ? `translate(${vis.w} 0) scale(-1 1)`
+                          : `rotate(${comp.facing==='up'?270:comp.facing==='down'?90:0} ${vis.w/2} ${vis.h/2})`}>
       {vis.inputs.map((p,i)=><line key={'i'+i} x1={p.x} y1={p.y} x2={p.x+12} y2={p.y} stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>)}
       {vis.outputs.map((p,i)=><line key={'o'+i} x1={p.x-12} y1={p.y} x2={p.x} y2={p.y} stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>)}
       {vis.body(fill,comp)}
@@ -451,20 +559,45 @@ const snap = (v, on=true) => on ? Math.round(v/GRID)*GRID : v;
 // ── Wire path helpers ────────────────────────────────────────────────────────
 
 // Resolve a wire (with waypoints) into a flat polyline of {x,y} points
+function projectOrthogonalPoint(a,b,x,y) {
+  if (a.x===b.x) return {x:a.x,y:Math.max(Math.min(y,Math.max(a.y,b.y)),Math.min(a.y,b.y))};
+  if (a.y===b.y) return {x:Math.max(Math.min(x,Math.max(a.x,b.x)),Math.min(a.x,b.x)),y:a.y};
+  return {x:a.x,y:a.y};
+}
+
+function terminalCoords(term, circuit) {
+  if (!term) return {x:0,y:0};
+  if (typeof term.compId==='string') {
+    const comp = circuit.components.get(term.compId);
+    if (!comp) return {x:term.x||0,y:term.y||0};
+    const vis = GATE_VIS[comp.kind];
+    const kind = term.type || (typeof term.pin==='number' && term.pin < (vis.inputs.length||0) ? 'in' : 'out');
+    return pinAbs(comp, kind, term.pin);
+  }
+  return {x:term.x||0,y:term.y||0};
+}
+
+function wireKnots(x1,y1,x2,y2,pts=[]) {
+  return [{x:x1,y:y1},...pts,{x:x2,y:y2}];
+}
+
 function resolveWire(x1,y1,x2,y2,pts=[]) {
-  const knots=[{x:x1,y:y1},...pts,{x:x2,y:y2}];
+  const knots=wireKnots(x1,y1,x2,y2,pts);
   const out=[knots[0]];
   for (let i=1;i<knots.length;i++) {
-    const a=knots[i-1],b=knots[i],dx=b.x-a.x;
-    if (Math.abs(dx)<4) { out.push(b); }
-    else { const mx=a.x+Math.max(20,dx/2); out.push({x:mx,y:a.y},{x:mx,y:b.y},b); }
+    const a=out[out.length-1], b=knots[i];
+    if (a.x===b.x || a.y===b.y) {
+      out.push(b);
+    } else {
+      out.push({x:b.x,y:a.y}, b);
+    }
   }
   return out;
 }
 
 function wirePath(x1,y1,x2,y2,pts=[]) {
   const p=resolveWire(x1,y1,x2,y2,pts);
-  return p.map((v,i)=>(i?'L ':' M ')+v.x+' '+v.y).join('');
+  return p.map((v,i)=>(i?'L ':'M ')+v.x+' '+v.y).join('');
 }
 
 function sampleWire(x1,y1,x2,y2,pts=[],t) {
@@ -486,31 +619,60 @@ function distToSeg(px,py,ax,ay,bx,by){
   return Math.hypot(px-(ax+t*dx),py-(ay+t*dy));
 }
 
-// Insert a waypoint into wire.points at the correct position
-function insertWaypoint(wire,wx,wy,a,b) {
-  const pts = wire.points||[];
-  const knots=[{x:a.x,y:a.y},...pts,{x:b.x,y:b.y}];
-  // Build resolved segments, tracking which knot-pair each came from
-  let resolved=[knots[0]], segPair=[];
-  for (let k=1;k<knots.length;k++){
-    const p=knots[k-1],q=knots[k],dx=q.x-p.x;
-    if(Math.abs(dx)<4){resolved.push(q);segPair.push(k-1);}
-    else{const mx=p.x+Math.max(20,dx/2);resolved.push({x:mx,y:p.y},{x:mx,y:q.y},q);segPair.push(k-1,k-1,k-1);}
+function wireSegmentPoints(wire, circuit) {
+  const from = terminalCoords(wire.from, circuit);
+  const to = terminalCoords(wire.to, circuit);
+  return wireKnots(from.x,from.y,to.x,to.y,wire.points||[]);
+}
+window.wireSegmentPoints = wireSegmentPoints;
+
+function findNearestWirePoint(wire,x,y,circuit) {
+  const knots = wireSegmentPoints(wire, circuit);
+  let best = {d:Infinity, point:null, index:0};
+  for (let i=0;i<knots.length-1;i++) {
+    const a=knots[i], b=knots[i+1];
+    const proj = projectOrthogonalPoint(a,b,x,y);
+    const d = Math.hypot(proj.x-x,proj.y-y);
+    if (d < best.d) best = {d, point:proj, index:i};
   }
-  // Find closest segment
-  let minD=Infinity,bestK=0;
-  for(let i=0;i<resolved.length-1;i++){
-    const d=distToSeg(wx,wy,resolved[i].x,resolved[i].y,resolved[i+1].x,resolved[i+1].y);
-    if(d<minD){minD=d;bestK=segPair[i];}
-  }
-  const nw=[...pts];
-  nw.splice(bestK,0,{x:wx,y:wy});
-  wire.points=nw;
+  return best;
+}
+
+function insertBranchPoint(wire, x, y, circuit) {
+  const nearest = findNearestWirePoint(wire, x, y, circuit);
+  if (!nearest.point) return null;
+  const pt = nearest.point;
+  const pts = wire.points || [];
+  const idx = Math.max(0, nearest.index);
+  const newPts = [...pts];
+  newPts.splice(idx, 0, {x: pt.x, y: pt.y});
+  wire.points = newPts;
+  // Register this as an explicit junction so wireSourceValue
+  // can find it without geometry scanning, and won't confuse
+  // visual crossings with real connections.
+  circuit.junctions.add({x: pt.x, y: pt.y, sourceWireId: wire.id});
+  return pt;
+}
+
+function routeManhattanPoints(from, to, firstDir) {
+  if (from.x === to.x || from.y === to.y) return [];
+  const corner = firstDir === 'v' ? {x:from.x, y:to.y} : {x:to.x, y:from.y};
+  return [corner];
 }
 
 function pinAbs(comp,kind,idx){
   const vis=GATE_VIS[comp.kind],p=kind==='in'?vis.inputs[idx]:vis.outputs[idx];
-  return{x:comp.x+p.x,y:comp.y+p.y};
+  const cx=vis.w/2, cy=vis.h/2;
+  if (comp.facing==='left') {
+    // Mirror horizontally: flip x around centre
+    return{x:comp.x+(vis.w-p.x), y:comp.y+p.y};
+  }
+  const angle = comp.facing==='up' ? -90 : comp.facing==='down' ? 90 : 0;
+  const rad = angle * Math.PI / 180;
+  const dx=p.x-cx, dy=p.y-cy;
+  const rx = dx*Math.cos(rad) - dy*Math.sin(rad);
+  const ry = dx*Math.sin(rad) + dy*Math.cos(rad);
+  return{x:comp.x+cx+rx, y:comp.y+cy+ry};
 }
 
 // ── Canvas component ─────────────────────────────────────────────────────────
@@ -523,9 +685,10 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
   const [isPanning, setIsPanning] = useState(false);
 
   // Drag state in refs to avoid stale closures
-  const panRef      = useRef(null); // {sx,sy,vx,vy}
-  const compDragRef = useRef(null); // {id,ox,oy,startSX,startSY,moved}
-  const wpDragRef   = useRef(null); // {wireId,idx,ox,oy}
+  const panRef         = useRef(null); // {sx,sy,vx,vy}
+  const compDragRef    = useRef(null); // {id,ox,oy,startSX,startSY,moved}
+  const wpDragRef      = useRef(null); // {wireId,idx,ox,oy}
+  const endpointDragRef= useRef(null); // {wireId,side,ox,oy}
 
   // Stable refs for values needed in effects
   const viewRef          = useRef(view);
@@ -557,7 +720,14 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
     const onMove=(e)=>{
       const w=screenToWorld(e.clientX,e.clientY);
       setMousePos(w);
-
+      if (wiringFromRef.current && !wiringFromRef.current.dir) {
+        const wf=wiringFromRef.current;
+        const dx=w.x-wf.startX, dy=w.y-wf.startY;
+        if (Math.hypot(dx,dy)>6) {
+          const dir=Math.abs(dx)>Math.abs(dy)?'h':'v';
+          setWiringFrom(prev=>prev?{...prev,dir}:prev);
+        }
+      }
       if (panRef.current) {
         const p=panRef.current;
         setView(v=>({...v, x:p.vx+(e.clientX-p.sx)/v.zoom, y:p.vy+(e.clientY-p.sy)/v.zoom}));
@@ -578,11 +748,49 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
           onChangedRef.current?.();
         }
       }
+      if (endpointDragRef.current) {
+        const d=endpointDragRef.current, wire=circuit.wires.get(d.wireId);
+        if (wire) {
+          const coord={x:snap(w.x+d.ox,snapGridRef.current),y:snap(w.y+d.oy,snapGridRef.current)};
+          wire[d.side]=coord;
+          onChangedRef.current?.();
+        }
+      }
     };
+
     const onUp=(e)=>{
+      const w=screenToWorld(e.clientX,e.clientY);
+      if (wiringFromRef.current) {
+        const wf=wiringFromRef.current;
+        if (wf.handled) {
+          wiringFromRef.current=null;
+          setWiringFrom(null);
+        } else {
+          const dist = wf.startSX!=null && wf.startSY!=null
+            ? Math.hypot(wf.startSX - e.clientX, wf.startSY - e.clientY)
+            : Math.hypot(wf.startX - w.x, wf.startY - w.y);
+          if (wf.type==='branch' && dist>6) {
+            const wire=circuit.wires.get(wf.wireId);
+            if (wire) {
+              const branchPoint = insertBranchPoint(wire,wf.x,wf.y,circuit);
+              const target={x:snap(w.x,snapGridRef.current),y:snap(w.y,snapGridRef.current)};
+              const branch = branchPoint ? circuit.addWire({x:branchPoint.x,y:branchPoint.y},target) : null;
+              if(branch) branch.points = routeManhattanPoints(terminalCoords(branch.from,circuit), terminalCoords(branch.to,circuit), wf.dir||'h');
+              onChangedRef.current?.();
+            }
+          } else if (wf.type==='pin' && dist>6) {
+            const target={x:snap(w.x,snapGridRef.current),y:snap(w.y,snapGridRef.current)};
+            const wire=circuit.addWire({compId:wf.compId,pin:wf.pin,type:'out'},target);
+            if(wire) wire.points=routeManhattanPoints(terminalCoords(wire.from,circuit),terminalCoords(wire.to,circuit),wf.dir||'h');
+            onChangedRef.current?.();
+          }
+          wiringFromRef.current=null;
+          setWiringFrom(null);
+        }
+      }
       // Drop from palette
       if (paletteDragRef.current) {
-        const w=screenToWorld(e.clientX,e.clientY),pd=paletteDragRef.current;
+        const pd=paletteDragRef.current;
         const vis=GATE_VIS[pd.kind];
         circuit.addComponent(pd.kind,snap(w.x-vis.w/2,snapGridRef.current),snap(w.y-vis.h/2,snapGridRef.current));
         onChangedRef.current?.(); onClearPalRef.current?.();
@@ -597,9 +805,10 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
         }
         compDragRef.current=null;
       }
-      panRef.current=null; wpDragRef.current=null;
+      panRef.current=null; wpDragRef.current=null; endpointDragRef.current=null;
       setIsPanning(false);
     };
+
     window.addEventListener('mousemove',onMove);
     window.addEventListener('mouseup',onUp);
     return()=>{window.removeEventListener('mousemove',onMove);window.removeEventListener('mouseup',onUp);};
@@ -618,6 +827,7 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
     if(e.button!==0&&e.button!==1)return;
     if(e.target!==svgRef.current&&!e.target.classList?.contains('canvas-bg'))return;
     panRef.current={sx:e.clientX,sy:e.clientY,vx:view.x,vy:view.y};
+    wiringFromRef.current=null;
     setIsPanning(true); setWiringFrom(null); onSelect(null);
   };
 
@@ -633,21 +843,91 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
   const onOutputPinDown=(e,comp,idx)=>{
     e.stopPropagation();
     const p=pinAbs(comp,'out',idx);
-    setWiringFrom({compId:comp.id,pin:idx,x:p.x,y:p.y});
+    const wf={type:'pin',compId:comp.id,pin:idx,x:p.x,y:p.y,startX:p.x,startY:p.y,startSX:e.clientX,startSY:e.clientY};
+    wiringFromRef.current=wf;
+    setWiringFrom(wf);
   };
   const onInputPinUp=(e,comp,idx)=>{
     e.stopPropagation();
-    if(wiringFrom){circuit.addWire({compId:wiringFrom.compId,pin:wiringFrom.pin},{compId:comp.id,pin:idx});onComponentChanged?.();setWiringFrom(null);}
+    const wf = wiringFromRef.current;
+    if (!wf) return;
+    if (wf.type==='branch') {
+      const wire=circuit.wires.get(wf.wireId);
+      if (wire) {
+        const branchPoint = insertBranchPoint(wire,wf.x,wf.y,circuit);
+        const branch = branchPoint ? circuit.addWire({x:branchPoint.x,y:branchPoint.y}, {compId:comp.id,pin:idx,type:'in'}) : null;
+        if (branch) branch.points=routeManhattanPoints(terminalCoords(branch.from,circuit),terminalCoords(branch.to,circuit),wf.dir||'h');
+        wiringFromRef.current=null;
+        onComponentChanged?.(); setWiringFrom(null); return;
+      }
+    }
+    if (wf.type==='endpoint' && wf.side==='to') {
+      const wire=circuit.wires.get(wf.wireId);
+      if (wire) {
+        wire.to={compId:comp.id,pin:idx,type:'in'};
+        wire.points = routeManhattanPoints(terminalCoords(wire.from,circuit), terminalCoords(wire.to,circuit), wf.dir||'h');
+        endpointDragRef.current=null;
+        wiringFromRef.current={...wf, handled:true};
+        onComponentChanged?.(); setWiringFrom(null); return;
+      }
+    }
+    if (wf.type==='endpoint' && wf.side==='from') {
+      const wire=circuit.wires.get(wf.wireId);
+      if (wire) {
+        wire.from={compId:comp.id,pin:idx,type:'out'};
+        wire.points = routeManhattanPoints(terminalCoords(wire.from,circuit), terminalCoords(wire.to,circuit), wf.dir||'h');
+        endpointDragRef.current=null;
+        wiringFromRef.current={...wf, handled:true};
+        onComponentChanged?.(); setWiringFrom(null); return;
+      }
+    }
+    if (wf.type==='pin') {
+      const wire = circuit.addWire({compId:wf.compId,pin:wf.pin,type:'out'},{compId:comp.id,pin:idx,type:'in'});
+      if (wire) wire.points = routeManhattanPoints(terminalCoords(wire.from,circuit),terminalCoords(wire.to,circuit),wf.dir||'h');
+      wiringFromRef.current=null;
+      onComponentChanged?.(); setWiringFrom(null);
+    }
+  };
+  const onOutputPinUp=(e,comp,idx)=>{
+    e.stopPropagation();
+    const wf = wiringFromRef.current;
+    if (!wf) return;
+      if (wf.type==='endpoint' && wf.side==='from') {
+        const wire=circuit.wires.get(wf.wireId);
+        if (wire) {
+          wire.from={compId:comp.id,pin:idx,type:'out'};
+          wire.points = routeManhattanPoints(terminalCoords(wire.from,circuit), terminalCoords(wire.to,circuit), wf.dir||'h');
+          endpointDragRef.current=null;
+          wiringFromRef.current={...wf, handled:true};
+          onComponentChanged?.(); setWiringFrom(null); return;
+        }
+      }
+  };
+  const onWireEdgeDown=(e,wire)=>{
+    if (e.button!==0) return;
+    e.stopPropagation();
+    const w=screenToWorld(e.clientX,e.clientY);
+    const nearest=findNearestWirePoint(wire,w.x,w.y,circuit);
+    const wf={type:'branch',wireId:wire.id,x:nearest.point.x,y:nearest.point.y,startX:w.x,startY:w.y,startSX:e.clientX,startSY:e.clientY};
+    wiringFromRef.current=wf;
+    setWiringFrom(wf);
+  };
+  const onWireEndpointMouseDown=(e,wire,side,pt)=>{
+    if (e.button!==0) return;
+    e.stopPropagation();
+    const w=screenToWorld(e.clientX,e.clientY);
+    endpointDragRef.current={wireId:wire.id,side,ox:pt.x-w.x,oy:pt.y-w.y};
+    const wf={type:'endpoint',wireId:wire.id,side,x:pt.x,y:pt.y,startX:pt.x,startY:pt.y};
+    wiringFromRef.current=wf;
+    setWiringFrom(wf);
   };
   const onWireClick=(e,wire)=>{
     // Only add waypoint if we're not coming from a pan
     if(isPanning) return;
     e.stopPropagation();
     const w=screenToWorld(e.clientX,e.clientY);
-    const src=circuit.components.get(wire.from.compId),dst=circuit.components.get(wire.to.compId);
-    if(!src||!dst)return;
-    const a=pinAbs(src,'out',wire.from.pin),b=pinAbs(dst,'in',wire.to.pin);
-    insertWaypoint(wire,snap(w.x,snapGrid),snap(w.y,snapGrid),a,b);
+    const a=terminalCoords(wire.from,circuit),b=terminalCoords(wire.to,circuit);
+    insertBranchPoint(wire,snap(w.x,snapGrid),snap(w.y,snapGrid));
     onComponentChanged?.();
   };
   const onWaypointMouseDown=(e,wire,idx,pt)=>{
@@ -697,6 +977,35 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
                   value={selComp.label}
                   onChange={e=>{circuit.setIOLabel(selComp.id,e.target.value);onComponentChanged?.();}}/>  
         </div>
+        <div className="prop-option">
+          <span className="prop-label">Facing</span>
+          <select className="prop-input" 
+                  value={selComp.facing}
+                  onChange={e=>{circuit.setFacing(selComp.id,e.target.value);onComponentChanged?.();}}>
+            <option value="right">Right</option>
+            <option value="left">Left</option>
+            <option value="up">Up</option>
+            <option value="down">Down</option>
+          </select>
+        </div>
+      </div>
+    )
+  })() : null;
+  const gatePanel = ['AND','OR','NAND','NOR','XOR','XNOR','MUX'].includes(selComp?.kind) ? (()=>{
+    return (
+      <div className="prop-panel" onMouseDown={e=>e.stopPropagation()}>
+        <div className="prop-title">{selComp.kind} Properties</div>
+        <div className="prop-option">
+          <span className="prop-label">Facing</span>
+          <select className="prop-input" 
+                  value={selComp.facing}
+                  onChange={e=>{circuit.setFacing(selComp.id,e.target.value);onComponentChanged?.();}}>
+            <option value="right">Right</option>
+            <option value="left">Left</option>
+            <option value="up">Up</option>
+            <option value="down">Down</option>
+          </select>
+        </div>
       </div>
     )
   })() : null;
@@ -718,7 +1027,6 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
     <svg ref={svgRef} className="canvas"
          style={{width:'100%',height:'100%',cursor:isPanning?'grabbing':'default',background:'transparent'}}
          onMouseDown={onMouseDownBg}
-         onMouseUp={()=>setWiringFrom(null)}
          onWheel={onWheel}
          onContextMenu={e=>e.preventDefault()}>
       <defs>
@@ -733,9 +1041,7 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
       <g transform={`translate(${tx},${ty}) scale(${view.zoom})`}>
         {/* Wires */}
         {wires.map(w=>{
-          const src=circuit.components.get(w.from.compId),dst=circuit.components.get(w.to.compId);
-          if(!src||!dst)return null;
-          const a=pinAbs(src,'out',w.from.pin),b=pinAbs(dst,'in',w.to.pin);
+          const a=terminalCoords(w.from,circuit), b=terminalCoords(w.to,circuit);
           const pts=w.points||[];
           const path=wirePath(a.x,a.y,b.x,b.y,pts);
           const high=w.value===1;
@@ -748,17 +1054,32 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
                   stroke={high?'var(--high)':'var(--low)'}
                   strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round"
                   style={{transition:'stroke 100ms ease'}}/>
-            {/* Fat hit target — click to add elbow */}
+            {/* Fat hit target — click to add branch */}
             <path d={path} fill="none" stroke="transparent" strokeWidth="16"
                   style={{cursor:'cell'}}
-                  onClick={e=>onWireClick(e,w)}
+                  onMouseDown={e=>onWireEdgeDown(e,w)}
                   onContextMenu={e=>onWireContext(e,w.id)}/>
             {/* Particles on HIGH */}
             {high&&<ParticleStream a={a} b={b} pts={pts}/>}
             {/* In-flight pulse */}
-            {typeof w.pendingValue!=='undefined'&&
-              <InflightPulse a={a} b={b} pts={pts} pendingValue={w.pendingValue}
-                             pendingStart={w.pendingStart} delayMs={window.__delayMs||600}/>}
+            {typeof w.pendingValue!=='undefined'&&(()=>{
+              const knots = wireSegmentPoints(w, circuit);
+              let wireLen = 0;
+              for (let i = 0; i < knots.length - 1; i++) {
+                wireLen += Math.hypot(knots[i+1].x - knots[i].x, knots[i+1].y - knots[i].y);
+              }
+              const REF_LEN = 80;
+              const wireDelay = (wireLen / REF_LEN) * (window.__delayMs || 600);
+              return <InflightPulse a={a} b={b} pts={pts} pendingValue={w.pendingValue}
+                                    pendingStart={w.pendingStart} delayMs={wireDelay}/>;
+            })()}
+            {/* Free endpoint handles */}
+            {!w.from.compId&&<circle cx={a.x} cy={a.y} r="6" fill="white" stroke="var(--border-md)" strokeWidth="1.5"
+                      style={{cursor:'move'}}
+                      onMouseDown={e=>onWireEndpointMouseDown(e,w,'from',a)}/>}            
+            {!w.to.compId&&<circle cx={b.x} cy={b.y} r="6" fill="white" stroke="var(--border-md)" strokeWidth="1.5"
+                      style={{cursor:'move'}}
+                      onMouseDown={e=>onWireEndpointMouseDown(e,w,'to',b)}/>}            
             {/* Waypoint handles */}
             {pts.map((pt,idx)=>(
               <circle key={'wp'+idx} cx={pt.x} cy={pt.y} r="5"
@@ -779,23 +1100,29 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
                     style={{cursor:'move'}}>
             {isSel&&<rect x="-6" y="-6" width={vis.w+12} height={vis.h+12} rx="10"
                           fill="none" stroke="var(--ink)" strokeWidth="1.5"
-                          strokeDasharray="4 3" opacity="0.35"/>}
+                          strokeDasharray="4 3" opacity="0.35"
+                          transform={comp.facing==='left'
+                          ? `translate(${vis.w} 0) scale(-1 1)`
+                          : `rotate(${comp.facing==='up'?270:comp.facing==='down'?90:0} ${vis.w/2} ${vis.h/2})`}/>}
             <GateBody comp={comp}/>
-            {vis.inputs.map((p,i)=>(
-              <circle key={'in'+i} cx={p.x} cy={p.y} r="6"
+            {vis.inputs.map((_,i)=>{
+              const abs=pinAbs(comp,'in',i);
+              return <circle key={'in'+i} cx={abs.x-comp.x} cy={abs.y-comp.y} r="6"
                       fill={comp.inputVals[i]?'var(--high)':'var(--bg)'}
                       stroke="var(--border-md)" strokeWidth="1.5"
                       style={{cursor:'crosshair'}}
                       onMouseUp={e=>onInputPinUp(e,comp,i)}
                       onMouseDown={e=>e.stopPropagation()}/>
-            ))}
-            {vis.outputs.map((p,i)=>(
-              <circle key={'out'+i} cx={p.x} cy={p.y} r="6"
+            })}
+            {vis.outputs.map((_,i)=>{
+              const abs=pinAbs(comp,'out',i);
+              return <circle key={'out'+i} cx={abs.x-comp.x} cy={abs.y-comp.y} r="6"
                       fill={comp.outputVals[i]?'var(--high)':'var(--bg)'}
                       stroke="var(--border-md)" strokeWidth="1.5"
                       style={{cursor:'crosshair'}}
-                      onMouseDown={e=>onOutputPinDown(e,comp,i)}/>
-            ))}
+                      onMouseDown={e=>onOutputPinDown(e,comp,i)}
+                      onMouseUp={e=>onOutputPinUp(e,comp,i)}/>
+            })}
           </g>;
         })}
 
@@ -817,6 +1144,7 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
     </svg>
     {clockPanel}
     {ioPanel}
+    {gatePanel}
     {constPanel}
   </>;
 }
@@ -880,6 +1208,7 @@ const{Canvas,Palette,createCircuit,GATE_DEFS}=window;
 
 function App(){
   const[circuit]=useState(()=>createCircuit());
+  window.__circuit = circuit;
   const[,tick]=useState(0);
   const refresh=useCallback(()=>tick(n=>n+1),[]);
   const[selectedId,setSelectedId]=useState(null);
@@ -1080,7 +1409,7 @@ function App(){
       {/* Propagation delay */}
       <div className="tb-delay">
         <span>Delay</span>
-        <input type="range" min="50" max="2000" step="50" value={delayMs}
+        <input type="range" min="10" max="2000" step="10" value={delayMs}
                onChange={e=>setDelayMs(Number(e.target.value))}/>
         <span className="tb-delay-val">{delayMs}ms</span>
       </div>
