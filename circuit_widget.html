@@ -168,6 +168,8 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
               compute:()=>[] },
     CLOCK:  { kind:'CLOCK',  label:'CLK',   inputs:0, outputs:1, family:'io',
               compute:(i,s) => [s.value?1:0] },
+    SEVEN:  { kind:'SEVEN',  label:'7SEG',  inputs:7, outputs:0, family:'io',
+              compute:()=>[] },
     AND:    { kind:'AND',  label:'AND',   inputs:2, outputs:1, family:'and',  compute:([a,b])=>[(a&b)&1] },
     OR:     { kind:'OR',   label:'OR',    inputs:2, outputs:1, family:'or',   compute:([a,b])=>[(a|b)&1] },
     NOT:    { kind:'NOT',  label:'NOT',   inputs:1, outputs:1, family:'not',  compute:([a])=>[a?0:1] },
@@ -257,6 +259,17 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
     const from = terminalCoords(wire.from, circuit);
     const to = terminalCoords(wire.to, circuit);
     return wireKnots(from.x,from.y,to.x,to.y,wire.points||[]);
+  }
+
+  const WIRE_REF_LEN = 80; // roughly one gate width — reference length for length-based speed
+
+  function wireDelayForLength(wireLen, delayMs) {
+    // "component" mode: every wire takes exactly `delayMs` to propagate, so
+    // two wires of different lengths off the same output still arrive
+    // together. "length" mode (default): delay scales with wire length, at
+    // delayMs per WIRE_REF_LEN pixels.
+    if (window.__widgetState.propagationMode === 'component') return delayMs;
+    return (wireLen / WIRE_REF_LEN) * delayMs;
   }
 
   function findNearestWirePoint(wire,x,y,circuit) {
@@ -413,15 +426,24 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
               }
 
               const t = totalLen > 0 ? distToJunction / totalLen : 0;
-              // The signal reaches the junction at pendingStart + t * delayMs
-              const REF_LEN = 80;
-              const srcKnots = wireSegmentPoints(src, circuit);
-              let srcTotalLen = 0;
-              for (let i = 0; i < srcKnots.length - 1; i++) {
-                srcTotalLen += Math.hypot(srcKnots[i+1].x - srcKnots[i].x, srcKnots[i+1].y - srcKnots[i].y);
+              // The signal reaches the junction at pendingStart + t * delayMs.
+              // In component mode there's no concept of "partway along the
+              // wire" — the junction sees the new value the instant the
+              // source commits, and the branch pays its own flat delayMs
+              // from there (so a source → branch hop still totals delayMs,
+              // same as a direct wire, instead of double-paying).
+              let arrivalTime;
+              if (window.__widgetState.propagationMode === 'component') {
+                arrivalTime = src.pendingStart || 0;
+              } else {
+                const srcKnots = wireSegmentPoints(src, circuit);
+                let srcTotalLen = 0;
+                for (let i = 0; i < srcKnots.length - 1; i++) {
+                  srcTotalLen += Math.hypot(srcKnots[i+1].x - srcKnots[i].x, srcKnots[i+1].y - srcKnots[i].y);
+                }
+                const srcWireDelay = wireDelayForLength(srcTotalLen, window.__widgetState.delayMs);
+                arrivalTime = (src.pendingStart || 0) + t * srcWireDelay;
               }
-              const srcWireDelay = (srcTotalLen / REF_LEN) * (window.__widgetState.delayMs);
-              const arrivalTime = (src.pendingStart || 0) + t * srcWireDelay;
               const now = performance.now();
 
               if (now >= arrivalTime) {
@@ -481,8 +503,7 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
         for (let i = 0; i < knots.length - 1; i++) {
           wireLen += Math.hypot(knots[i+1].x - knots[i].x, knots[i+1].y - knots[i].y);
         }
-        const REF_LEN = 80; // roughly one gate width — signals travel at delayMs per REF_LEN pixels
-        const wireDelay = (wireLen / REF_LEN) * delayMs;
+        const wireDelay = wireDelayForLength(wireLen, delayMs);
 
         if (typeof w.pendingValue !== 'undefined' && now - (w.pendingStart || 0) >= wireDelay) {
           if(w.value!==w.pendingValue){w.value=w.pendingValue;w.lastChange=now;}
@@ -548,7 +569,7 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
   // Central cross-section state. Anything CANVAS/APP need to read that
   // originates outside their own scope lives here, instead of being
   // scattered across individual window.__foo globals.
-  window.__widgetState = { delayMs: 600, particleDensity: 4, circuit: null };
+  window.__widgetState = { delayMs: 600, particleDensity: 4, circuit: null, propagationMode: 'length' };
 
   window.GATE_DEFS = GATE_DEFS;
   window.createCircuit = createCircuit;
@@ -562,6 +583,7 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
   window.sampleWire = sampleWire;
   window.distToSeg = distToSeg;
   window.wireSegmentPoints = wireSegmentPoints;
+  window.wireDelayForLength = wireDelayForLength;
   window.findNearestWirePoint = findNearestWirePoint;
   window.insertBranchPoint = insertBranchPoint;
   window.routeManhattanPoints = routeManhattanPoints;
@@ -662,6 +684,19 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
     }
   };
 
+  VIS.SEVEN = { w:W, h:H*1.5, inputs:[{x:W*0.2,y:0,dir:'up'}, {x:W*0.4,y:0,dir:'up'}, {x:W*0.6,y:0,dir:'up'}, {x:W*0.8,y:0,dir:'up'}, {x:W*0.2,y:H*1.5,dir:'down'}, {x:W*0.4,y:H*1.5,dir:'down'}, {x:W*0.6,y:H*1.5,dir:'down'}], outputs:[],
+    body:(f,comp)=><g>
+        <rect x="6" y="10" width="68" height="100" rx="7" fill="#f3f3f1" stroke="var(--ink)" strokeWidth="2"/>
+        <rect x="22" y="16" width="36" height="8" fill={comp.inputVals[2]?'#ff3333':'#aeaeae'}/>
+        <rect x="22" y="56" width="36" height="8" fill={comp.inputVals[0]?'#ff3333':'#aeaeae'}/>
+        <rect x="22" y="96" width="36" height="8" fill={comp.inputVals[5]?'#ff3333':'#aeaeae'}/>
+        <rect x="12" y="22" width="8" height="36" fill={comp.inputVals[1]?'#ff3333':'#aeaeae'}/>
+        <rect x="12" y="62" width="8" height="36" fill={comp.inputVals[4]?'#ff3333':'#aeaeae'}/>
+        <rect x="60" y="22" width="8" height="36" fill={comp.inputVals[3]?'#ff3333':'#aeaeae'}/>
+        <rect x="60" y="62" width="8" height="36" fill={comp.inputVals[6]?'#ff3333':'#aeaeae'}/>
+      </g>
+  };
+
   function ffRect(f,h){return<rect x="6" y="6" width="68" height={h-12} rx="7" fill={f} stroke="var(--ink)" strokeWidth="2"/>;}
   const ffTxt=(x,y,t)=><text x={x} y={y} fontFamily="var(--mono)" fontSize="12" fill="var(--ink)">{t}</text>;
   const ffSub=(t)=><text x="40" y="74" fontFamily="var(--ui)" fontSize="9" textAnchor="middle" fill="var(--ink)" opacity="0.38">{t}</text>;
@@ -710,7 +745,7 @@ const { GATE_VIS, GATE_DEFS, GateBody } = window;
 const {
   projectOrthogonalPoint, terminalCoords, wireKnots, resolveWire, wirePath,
   sampleWire, distToSeg, wireSegmentPoints, findNearestWirePoint,
-  insertBranchPoint, routeManhattanPoints, pinAbs,
+  insertBranchPoint, routeManhattanPoints, pinAbs, wireDelayForLength,
 } = window;
 
 const GRID = 20;
@@ -1101,8 +1136,7 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
               for (let i = 0; i < knots.length - 1; i++) {
                 wireLen += Math.hypot(knots[i+1].x - knots[i].x, knots[i+1].y - knots[i].y);
               }
-              const REF_LEN = 80;
-              const wireDelay = (wireLen / REF_LEN) * (window.__widgetState.delayMs);
+              const wireDelay = wireDelayForLength(wireLen, window.__widgetState.delayMs);
               return <InflightPulse a={a} b={b} pts={pts} pendingValue={w.pendingValue}
                                     pendingStart={w.pendingStart} delayMs={wireDelay}/>;
             })()}
@@ -1209,7 +1243,7 @@ window.Canvas=Canvas;
 const{GATE_VIS,GATE_DEFS,GateBody}=window;
 const GROUPS=[
   {title:'Sources',   kinds:['INPUT','CLOCK']},
-  {title:'Sinks',     kinds:['OUTPUT']},
+  {title:'Sinks',     kinds:['OUTPUT', 'SEVEN']},
   {title:'Logic',     kinds:['AND','OR','NOT','NAND','NOR','XOR','XNOR','MUX']},
   {title:'Flip-flops',kinds:['DFF','TFF','JKFF','SRFF']},
 ];
@@ -1258,6 +1292,7 @@ function App(){
 
 
   window.__widgetState.delayMs=delayMs;
+  window.__widgetState.propagationMode=propagationMode;
   window.__widgetState.particleDensity=4;
 
   // Sim loop
