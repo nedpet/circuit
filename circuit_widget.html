@@ -141,8 +141,8 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
   font-size:11.5px; min-width:148px;
 }
 .prop-title { font-weight: 600; font-size: 14px; margin-bottom: 7px;}
-.prop-option  { display: flex; justify-content: space-between; align-items: center; margin-top: 7px;}
-.prop-label { font-weight: 600; font-size: 12px; margin-right: 7px;}
+.prop-option  { display: flex; justify-content: space-between; align-items: center; margin-bottom: 7px;}
+.prop-label { font-weight: 600; font-size: 12px; margin-right: 7px; color: black;}
 .prop-input { width:100%; padding:8px 10px; border-radius:var(--r); border:1px solid var(--border); font:inherit; font-size:12px; background:var(--bg); color:var(--ink); outline:none; }
 
 </style>
@@ -316,7 +316,7 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
     const wires = new Map();
     const junctions = new Set(); // {x, y, sourceWireId}
 
-    function addComponent(kind, x, y, label = "none") {
+    function addComponent(kind, x, y, facing = "right", delay = 0, label = "none") {
       const def = GATE_DEFS[kind];
       const id = 'c'+(nextId++);
       const ioId = kind==='INPUT' || kind==='OUTPUT' ? 'io'+(nextIoId++) : '' 
@@ -329,7 +329,8 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
         outputVals: new Array(def.outputs).fill(0),
         label: label == "none" ? String.fromCharCode(Number(ioId.slice(2)) + 64) : label,
         lastChange: 0,
-        facing: "right",
+        facing,
+        delay,
       };
       components.set(id, comp);
       if (ioId != '') {
@@ -449,11 +450,24 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
           }
         }
       }
-      // Compute outputs
+      // Compute outputs, holding each change for the gate's own `delay` (ms)
+      // before it becomes visible on the output pin — mirrors how wires hold
+      // pendingValue for their travel time below.
       for (const c of components.values()) {
         const def = GATE_DEFS[c.kind];
         const outs = def.compute(c.inputVals, c.state)||[];
-        for (let i=0;i<outs.length;i++) { if(c.outputVals[i]!==outs[i]){c.outputVals[i]=outs[i];c.lastChange=now;} }
+        if (!c.pendingOutputVals) c.pendingOutputVals = [];
+        if (!c.pendingOutputStart) c.pendingOutputStart = [];
+        for (let i=0;i<outs.length;i++) {
+          if (outs[i]!==c.pendingOutputVals[i] && outs[i]!==c.outputVals[i]) {
+            c.pendingOutputVals[i] = outs[i];
+            c.pendingOutputStart[i] = now;
+          }
+          if (typeof c.pendingOutputVals[i] !== 'undefined' && now-(c.pendingOutputStart[i]||0) >= (c.delay||0)) {
+            if (c.outputVals[i]!==c.pendingOutputVals[i]) { c.outputVals[i]=c.pendingOutputVals[i]; c.lastChange=now; }
+            c.pendingOutputVals[i]=undefined; c.pendingOutputStart[i]=undefined;
+          }
+        }
       }
       const wireValues = new Map([...wires.values()].map(w=>[w.id,w.value]));
       // Propagate with delay
@@ -495,7 +509,7 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
 
     function serialize() {
       return {
-        components: [...components.values()].map(c=>({id:c.id,ioId:c.ioId,kind:c.kind,x:c.x,y:c.y,
+        components: [...components.values()].map(c=>({id:c.id,ioId:c.ioId,kind:c.kind,x:c.x,y:c.y,facing:c.facing,delay:c.delay,
           state:c.kind==='INPUT'?{value:c.state.value}:c.kind==='CLOCK'?{period:c.state.period,paused:c.state.paused}:{}})),
         wires: [...wires.values()].map(w=>({id:w.id,from:w.from,to:w.to,points:w.points||[]})),
         junctions: [...junctions],
@@ -506,7 +520,7 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
     function load(data) {
       components.clear(); ioComponents.clear(); wires.clear(); junctions.clear(); if(!data) return;
       for (const cd of data.components||[]) {
-        const c=addComponent(cd.kind,cd.x,cd.y); components.delete(c.id); ioComponents.delete(c.ioId); c.id=cd.id; c.ioId=cd.ioId;
+        const c=addComponent(cd.kind,cd.x,cd.y,cd.facing,cd.delay); components.delete(c.id); ioComponents.delete(c.ioId); c.id=cd.id; c.ioId=cd.ioId;
         if(cd.state) Object.assign(c.state,cd.state); components.set(c.id,c); ioComponents.set(c.ioId, c);
       }
       for (const wd of data.wires||[]) {
@@ -527,6 +541,7 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
       setClockPeriod(id,p){const c=components.get(id);if(c&&c.kind==='CLOCK')c.state.period=p;},
       setIOLabel(id,l){const c=components.get(id);c.label=l;},
       setFacing(id,f){const c=components.get(id);c.facing=f;},
+      setDelay(id,d){const c=components.get(id);c.delay=d;},
     };
   }
 
@@ -597,7 +612,7 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
       <path d={`M ${BX} ${BT} Q ${BX+14} ${YO}, ${BX} ${BB} Q ${W*.45} ${BB}, ${W-12} ${YO} Q ${W*.45} ${BT}, ${BX} ${BT} Z`} fill={f} stroke="var(--ink)" strokeWidth="2" strokeLinejoin="round"/>
       <circle cx={W-7} cy={YO} r="5" fill={f} stroke="var(--ink)" strokeWidth="2"/>
     </g> };
-  VIS.MUX  = { w:W,h:H, inputs:[{x:0,y:YT},{x:0,y:YB},{x:W*.5,y:YT}],outputs:[{x:W,y:YO}],
+  VIS.MUX  = { w:W,h:H, inputs:[{x:0,y:YT},{x:0,y:YB},{x:W*.5,y:YT*0.25,dir:'up'}],outputs:[{x:W,y:YO}],
     body:(f)=><g>
       <path d={`M ${BX} ${BT} L ${W-BX} ${BT + BB*.25} V ${BB*.75} L ${BX} ${BB} Z`} fill={f} stroke="var(--ink)" strokeWidth="2" strokeLinejoin="round"/>
     </g>}
@@ -656,6 +671,16 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
   VIS.SRFF = {w:80,h:80,  inputs:[{x:0,y:20},{x:0,y:60}],            outputs:[{x:80,y:40}], body:(f)=><g>{ffRect(f,80)}{ffTxt(14,24,'S')}{ffTxt(14,64,'R')}{ffTxt(66,44,'Q')}{ffSub('SR')}</g>};
   VIS.JKFF = {w:80,h:120, inputs:[{x:0,y:20},{x:0,y:60},{x:0,y:100}],outputs:[{x:80,y:40}], body:(f)=><g>{ffRect(f,120)}{ffTxt(14,24,'J')}{ffTxt(14,64,'K')}{ffTxt(14,104,'▷')}{ffTxt(66,44,'Q')}<text x="40" y="114" fontFamily="var(--ui)" fontSize="9" textAnchor="middle" fill="var(--ink)" opacity="0.38">JK</text></g>};
 
+  // Per-pin facing: each pin stub normally points 'left' (inputs) or 'right'
+  // (outputs) toward the gate body, but a pin can override this with its own
+  // `dir` ('left'|'right'|'up'|'down') to poke out a different side — e.g. a
+  // mux's select pin facing 'up' — independent of the whole gate's `facing`.
+  const PIN_DIR_VEC = { left:[-1,0], right:[1,0], up:[0,-1], down:[0,1] };
+  function pinStub(p, defaultDir) {
+    const [dx,dy] = PIN_DIR_VEC[p.dir||defaultDir];
+    return { x1:p.x-dx*12, y1:p.y-dy*12, x2:p.x, y2:p.y };
+  }
+
   function GateBody({ comp }) {
     const def=GATE_DEFS[comp.kind], vis=VIS[comp.kind];
     if (!vis) return null;
@@ -663,8 +688,8 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
     return <g transform={comp.facing==='left'
                           ? `translate(${vis.w} 0) scale(-1 1)`
                           : `rotate(${comp.facing==='up'?270:comp.facing==='down'?90:0} ${vis.w/2} ${vis.h/2})`}>
-      {vis.inputs.map((p,i)=><line key={'i'+i} x1={p.x} y1={p.y} x2={p.x+12} y2={p.y} stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>)}
-      {vis.outputs.map((p,i)=><line key={'o'+i} x1={p.x-12} y1={p.y} x2={p.x} y2={p.y} stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>)}
+      {vis.inputs.map((p,i)=>{const s=pinStub(p,'left');return <line key={'i'+i} x1={s.x1} y1={s.y1} x2={s.x2} y2={s.y2} stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>;})}
+      {vis.outputs.map((p,i)=>{const s=pinStub(p,'right');return <line key={'o'+i} x1={s.x1} y1={s.y1} x2={s.x2} y2={s.y2} stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>;})}
       {vis.body(fill,comp)}
       {['AND','OR','NAND','NOR','XOR','XNOR','MUX'].includes(comp.kind)&&
         <text x={vis.w/2+2} y={vis.h/2+4} textAnchor="middle" fontFamily="var(--mono)" fontSize="10" fontWeight="600" fill="var(--ink)" opacity="0.35" pointerEvents="none">{def.label}</text>}
@@ -1005,7 +1030,7 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
       </div>
     )
   })() : null;
-  const gatePanel = ['AND','OR','NAND','NOR','XOR','XNOR','MUX'].includes(selComp?.kind) ? (()=>{
+  const gatePanel = ['NOT', 'AND','OR','NAND','NOR','XOR','XNOR','MUX'].includes(selComp?.kind) ? (()=>{
     return (
       <div className="prop-panel" onMouseDown={e=>e.stopPropagation()}>
         <div className="prop-title">{selComp.kind} Properties</div>
@@ -1019,6 +1044,13 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
             <option value="up">Up</option>
             <option value="down">Down</option>
           </select>
+        </div>
+        <div className="tb-delay">
+          <span className="prop-label">Delay</span>
+          <input type="range" min="0" max="2000" step="100"
+                 value={selComp.delay}
+                 onChange={e=>{circuit.setDelay(selComp.id,Number(e.target.value));onComponentChanged?.();}}/>
+          <span className="tb-delay-val">{selComp.delay}ms</span>
         </div>
       </div>
     )
@@ -1221,6 +1253,8 @@ function App(){
   const[showEquation, setShowEquation]=useState(false);
   const[equation,setEquation]=useState('');
   const[equationToLoad,setEquationToLoad]=useState('');
+  const[showSettings, setShowSettings]=useState(false);
+  const[propagationMode, setPropagationMode]=useState("length");
 
 
   window.__widgetState.delayMs=delayMs;
@@ -1406,6 +1440,7 @@ function App(){
       <button className="btn ghost" style={{height:26,fontSize:12}} onClick={()=>setShowLoad(true)}>Load</button>
       <button className="btn ghost" style={{height:26,fontSize:12,color:'var(--ink-3)'}} onClick={doClear} disabled={n===0}>Clear</button>
       <button className="btn ghost" style={{height:26,fontSize:12}} onClick={()=>setShowEquation(true)}>Boolean Equation</button>
+      <button className="btn ghost" style={{height:26,fontSize:12}} onClick={()=>setShowSettings(true)}>Settings</button>
       {/* Propagation delay */}
       <div className="tb-delay">
         <span>Delay</span>
@@ -1472,6 +1507,21 @@ function App(){
       <div className="dialog-actions">
         <button className="btn ghost" onClick={()=>generateEquation()}>{equation === '' ? "Generate" : "Regenerate"}</button>
         <button className="btn ghost" onClick={()=>setShowEquation(false)}>Exit</button>
+      </div>
+    </Dialog>}
+
+    {showSettings&&<Dialog title="Settings" onClose={()=>setShowSettings(false)}>
+      <div className="prop-option">
+        <span className="prop-label">Propagation Mode</span>
+        <select className="prop-input" 
+                  value={propagationMode}
+                  onChange={e=>{setPropagationMode(e.target.value == "length" ? "length" : "component");onComponentChanged?.();}}>
+            <option value="length">Length-Based Speed</option>
+            <option value="component">Component-Based Speed</option>
+        </select>
+      </div>
+      <div className="dialog-actions">
+        <button className="btn ghost" onClick={()=>setShowSettings(false)}>Exit</button>
       </div>
     </Dialog>}
 
