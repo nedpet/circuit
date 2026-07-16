@@ -389,7 +389,7 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
       }
     }
 
-    function wireSourceValue(wire, circuit, wireValues) {
+    function wireSourceValue(wire, circuit, now, instant) {
       if (isWireTerminal(wire.from)) {
         const src = circuit.components.get(wire.from.compId);
         if (!src) return 0;
@@ -402,6 +402,8 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
           if (Math.abs(j.x - px) < 1e-6 && Math.abs(j.y - py) < 1e-6) {
             const src = circuit.wires.get(j.sourceWireId);
             if (!src) continue;
+
+            if (instant) return src.pendingValue!==undefined ? (src.pendingValue||0) : (src.value||0);
 
             if (typeof src.pendingValue !== 'undefined') {
               // Find how far along the source wire the junction sits (0..1)
@@ -444,7 +446,6 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
                 const srcWireDelay = wireDelayForLength(srcTotalLen, window.__widgetState.delayMs);
                 arrivalTime = (src.pendingStart || 0) + t * srcWireDelay;
               }
-              const now = performance.now();
 
               if (now >= arrivalTime) {
                 return src.pendingValue || 0;
@@ -491,10 +492,9 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
           }
         }
       }
-      const wireValues = new Map([...wires.values()].map(w=>[w.id,w.value]));
       // Propagate with delay
       for (const w of wires.values()) {
-        const srcVal = wireSourceValue(w, {components, wires, ioComponents, junctions}, wireValues);
+        const srcVal = wireSourceValue(w, {components, wires, ioComponents, junctions}, now, instant);
         if (srcVal!==w.pendingValue && srcVal!==w.value) { w.pendingValue=srcVal; w.pendingStart=now; }
       }
       for (const w of wires.values()) {
@@ -530,7 +530,7 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
 
     function serialize() {
       return {
-        components: [...components.values()].map(c=>({id:c.id,ioId:c.ioId,kind:c.kind,x:c.x,y:c.y,facing:c.facing,delay:c.delay,
+        components: [...components.values()].map(c=>({id:c.id,ioId:c.ioId,kind:c.kind,x:c.x,y:c.y,facing:c.facing,delay:c.delay,label:c.label,
           state:c.kind==='INPUT'?{value:c.state.value}:c.kind==='CLOCK'?{period:c.state.period,paused:c.state.paused}:{}})),
         wires: [...wires.values()].map(w=>({id:w.id,from:w.from,to:w.to,points:w.points||[]})),
         junctions: [...junctions],
@@ -540,12 +540,30 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
 
     function load(data) {
       components.clear(); ioComponents.clear(); wires.clear(); junctions.clear(); if(!data) return;
+      // Built in two passes: addComponent()/addWire() assign throwaway
+      // sequential temp ids as a side effect of constructing the object, and
+      // those temp ids can coincide with another entry's *saved* id when the
+      // original circuit has gaps (from earlier deletions). Inserting the
+      // final id into the live map mid-loop let a later temp id silently
+      // clobber an already-restored entry; instead, finish minting every
+      // temp id first, then assign real ids and populate the maps once.
+      const builtComponents = [];
       for (const cd of data.components||[]) {
-        const c=addComponent(cd.kind,cd.x,cd.y,cd.facing,cd.delay); components.delete(c.id); ioComponents.delete(c.ioId); c.id=cd.id; c.ioId=cd.ioId;
-        if(cd.state) Object.assign(c.state,cd.state); components.set(c.id,c); ioComponents.set(c.ioId, c);
+        const c=addComponent(cd.kind,cd.x,cd.y,cd.facing,cd.delay); components.delete(c.id); ioComponents.delete(c.ioId);
+        if(cd.label!==undefined) c.label=cd.label;
+        if(cd.state) Object.assign(c.state,cd.state);
+        builtComponents.push({c,cd});
       }
+      for (const {c,cd} of builtComponents) {
+        c.id=cd.id; c.ioId=cd.ioId;
+        components.set(c.id,c); ioComponents.set(c.ioId, c);
+      }
+      const builtWires = [];
       for (const wd of data.wires||[]) {
-        const w=addWire(wd.from,wd.to); if(w){wires.delete(w.id);w.id=wd.id;w.points=wd.points||[];wires.set(w.id,w);}
+        const w=addWire(wd.from,wd.to); if(w){wires.delete(w.id); builtWires.push({w,wd});}
+      }
+      for (const {w,wd} of builtWires) {
+        w.id=wd.id; w.points=wd.points||[]; wires.set(w.id,w);
       }
       for (const j of data.junctions||[]) {
         junctions.add(j);
@@ -757,6 +775,82 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
         <text x={vis.w/2+2} y={vis.h/2+4} textAnchor="middle" fontFamily="var(--mono)" fontSize="10" fontWeight="600" fill="var(--ink)" opacity="0.35" pointerEvents="none">{def.label}</text>}
     </g>;
   }
+
+  // Registers a saved circuit as a placeable gate: a white rounded box sized
+  // to fit its inputs (left) / outputs (right), simulated as a black box by
+  // running a private nested circuit to settling on every compute() call.
+  const CUSTOM_PIN_MARGIN = 20, CUSTOM_PIN_GAP = 30;
+  function customPinYs(n, h) {
+    if (n <= 1) return [h/2];
+    const usable = h - CUSTOM_PIN_MARGIN*2;
+    return Array.from({length:n}, (_,i)=>CUSTOM_PIN_MARGIN + usable*i/(n-1));
+  }
+  // Greedy word-wrap for the gate-name label, sized for a monospace font at
+  // fontSize 10 (~6px/char); a single word longer than the line is hard-broken
+  // so it can't overflow the box regardless.
+  function wrapLabel(text, maxChars) {
+    const words = String(text).split(/\s+/).filter(Boolean);
+    const lines = [];
+    let cur = '';
+    for (const w of words) {
+      const test = cur ? cur+' '+w : w;
+      if (test.length > maxChars && cur) { lines.push(cur); cur = w; } else { cur = test; }
+    }
+    if (cur) lines.push(cur);
+    return lines.flatMap(line => {
+      if (line.length <= maxChars) return [line];
+      const chunks = [];
+      for (let i=0;i<line.length;i+=maxChars) chunks.push(line.slice(i,i+maxChars));
+      return chunks;
+    });
+  }
+  function registerCustomGate(name, data) {
+    const kindKey = 'CUSTOM:'+name;
+    const tmp = window.createCircuit();
+    tmp.load(data);
+    // Ordered by y so the box's pin stack visually matches how the inputs/
+    // outputs were laid out top-to-bottom in the saved circuit, not by
+    // creation order.
+    const ins  = [...tmp.ioComponents.values()].filter(c=>c.kind==='INPUT').sort((a,b)=>a.y-b.y);
+    const outs = [...tmp.ioComponents.values()].filter(c=>c.kind==='OUTPUT').sort((a,b)=>a.y-b.y);
+    const inIds=ins.map(c=>c.ioId), outIds=outs.map(c=>c.ioId);
+    const inLabels=ins.map(c=>c.label), outLabels=outs.map(c=>c.label);
+
+    const h = Math.max(H, CUSTOM_PIN_MARGIN*2 + (Math.max(inIds.length,outIds.length,1)-1)*CUSTOM_PIN_GAP);
+    const inYs = customPinYs(inIds.length, h), outYs = customPinYs(outIds.length, h);
+
+    const nameLines = wrapLabel(name, Math.max(3, Math.floor((W-16)/6)));
+    const nameLineH = 12;
+    const nameStartY = h/2 - (nameLines.length-1)*nameLineH/2 + 4;
+
+    window.GATE_DEFS[kindKey] = {
+      kind:kindKey, label:name, inputs:inIds.length, outputs:outIds.length, family:'custom',
+      compute(inputVals, state) {
+        if (!state.sub) { state.sub = window.createCircuit(); state.sub.load(data); }
+        const sub = state.sub;
+        inIds.forEach((ioId,i)=>{ const c=sub.ioComponents.get(ioId); if (c) c.state.value = inputVals[i]?1:0; });
+        for (let i=0;i<10;i++) sub.step(performance.now(), 0, true);
+        return outIds.map(ioId=>{ const c=sub.ioComponents.get(ioId); return c ? (c.inputVals[0]||0) : 0; });
+      }
+    };
+
+    VIS[kindKey] = {
+      w:W, h,
+      inputs: inYs.map(y=>({x:0,y})),
+      outputs: outYs.map(y=>({x:W,y})),
+      body:(f,comp)=><g>
+        <rect x="0" y="0" width={W} height={h} rx="6" fill="#fff" stroke="var(--ink)" strokeWidth="2"/>
+        <text x={W/2} textAnchor="middle" fontFamily="var(--mono)" fontSize="10" fontWeight="600" fill="var(--ink)" opacity="0.6">
+          {nameLines.map((line,i)=><tspan key={i} x={W/2} y={nameStartY+i*nameLineH}>{line}</tspan>)}
+        </text>
+        {inLabels.map((lbl,i)=><text key={'i'+i} x="8" y={inYs[i]+4} fontFamily="var(--mono)" fontSize="10" fill="var(--ink)" opacity="0.7">{lbl}</text>)}
+        {outLabels.map((lbl,i)=><text key={'o'+i} x={W-8} y={outYs[i]+4} textAnchor="end" fontFamily="var(--mono)" fontSize="10" fill="var(--ink)" opacity="0.7">{lbl}</text>)}
+      </g>
+    };
+
+    return kindKey;
+  }
+  window.registerCustomGate = registerCustomGate;
 
   window.GATE_VIS=VIS; window.FAMILY_FILL=FAMILY_FILL; window.GateBody=GateBody;
 })();
@@ -1273,6 +1367,7 @@ const GROUPS=[
   {title:'Sinks',     kinds:['OUTPUT', 'SEVEN']},
   {title:'Logic',     kinds:['AND','OR','NOT','NAND','NOR','XOR','XNOR','MUX']},
   {title:'Flip-flops',kinds:['DFF','TFF','JKFF','SRFF']},
+  {title:'Custom',    kinds:[]},
 ];
 function Thumb({kind}){
   const vis=GATE_VIS[kind],def=GATE_DEFS[kind];
@@ -1280,14 +1375,25 @@ function Thumb({kind}){
   const tx2=(tw-(vis.w+12)*sc)/2,ty2=(th-vis.h*sc)/2;
   return <svg width={tw} height={th}><g transform={`translate(${tx2},${ty2}) scale(${sc})`}><GateBody comp={{kind,inputVals:new Array(def.inputs).fill(0),outputVals:new Array(def.outputs).fill(0),state:{value:0}}}/></g></svg>;
 }
-function Palette({onDragStart}){
-  return <div className="palette">{GROUPS.map(g=><div className="pal-group" key={g.title}>
+function Palette({onDragStart, onImportClick, customKinds=[]}){
+  return <div className="palette">{GROUPS.map(g=>{
+    const kinds = g.title === "Custom" ? customKinds : g.kinds;
+    return <div className="pal-group" key={g.title}>
     <div className="pal-group-title">{g.title}</div>
-    <div className="pal-grid">{g.kinds.map(k=><button key={k} className="pal-item"
+    <div className="pal-grid">
+      {g.title === "Custom" ? <button key={"import"} className="pal-item"
+      onClick={onImportClick}>
+      <svg width="62" height="44">
+        <path d="M 28 7 H 34 V 19 H 46 V 25 H 34 V 37 H 28 V 25 H 16 V 19 H 28 Z" fill="var(--low)"/>
+      </svg>
+      <div className="pal-label">Import</div>
+    </button> : null}
+      {kinds.map(k=><button key={k} className="pal-item"
       onMouseDown={e=>{e.preventDefault();onDragStart(k);}}>
       <Thumb kind={k}/><div className="pal-label">{GATE_DEFS[k].label}</div>
     </button>)}</div>
-  </div>)}</div>;
+  </div>;
+  })}</div>;
 }
 window.Palette=Palette;
 })();
@@ -1308,6 +1414,7 @@ function App(){
   const[palDrag,setPalDrag]=useState(null);
   const[delayMs,setDelayMs]=useState(600);
   const[saved,setSaved]=useState(()=>{try{return JSON.parse(localStorage.getItem('dss_v2')||'[]');}catch{return[];}});
+  const[customKinds,setCustomKinds]=useState([]);
   const[showSave,setShowSave]=useState(false);
   const[saveName,setSaveName]=useState('');
   const[showLoad,setShowLoad]=useState(false);
@@ -1362,6 +1469,7 @@ function App(){
   };
   const doLoad=(s)=>{circuit.load(s.data);setShowLoad(false);refresh();};
   const delSaved=(name)=>{const n=saved.filter(s=>s.name!==name);setSaved(n);localStorage.setItem('dss_v2',JSON.stringify(n));};
+  const doImport=(s)=>{const kind=window.registerCustomGate(s.name,s.data);setCustomKinds(prev=>prev.includes(kind)?prev:[...prev,kind]);};
   const doClear=()=>{if(!confirm('Clear canvas?'))return;[...circuit.components.keys()].forEach(id=>circuit.removeComponent(id));refresh();};
   const generateEquation=()=>{
 
@@ -1513,7 +1621,7 @@ function App(){
     </div>
 
     <div className="main">
-      <Palette onDragStart={kind=>setPalDrag({kind})}/>
+      <Palette onDragStart={kind=>setPalDrag({kind})} onImportClick={()=>setShowLoad(true)} customKinds={customKinds}/>
       <div className="canvas-wrap">
         <Canvas circuit={circuit}
                 selectedId={selectedId}
@@ -1550,6 +1658,7 @@ function App(){
             </div>
             <div style={{display:'flex',gap:6}}>
               <button className="btn ghost danger" onClick={()=>delSaved(s.name)}>Delete</button>
+              <button className="btn ghost" onClick={()=>doImport(s)}>Import</button>
               <button className="btn primary" onClick={()=>doLoad(s)}>Load</button>
             </div>
           </div>)}</div>}
