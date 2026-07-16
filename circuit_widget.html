@@ -462,7 +462,7 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
       return 0;
     }
 
-    function step(now, delayMs) {
+    function step(now, delayMs, instant) {
       // Tick clocks
       for (const c of components.values()) {
         if (c.kind==='CLOCK' && !c.state.paused) {
@@ -485,7 +485,7 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
             c.pendingOutputVals[i] = outs[i];
             c.pendingOutputStart[i] = now;
           }
-          if (typeof c.pendingOutputVals[i] !== 'undefined' && now-(c.pendingOutputStart[i]||0) >= (c.delay||0)) {
+          if (typeof c.pendingOutputVals[i] !== 'undefined' && (instant || now-(c.pendingOutputStart[i]||0) >= (c.delay||0))) {
             if (c.outputVals[i]!==c.pendingOutputVals[i]) { c.outputVals[i]=c.pendingOutputVals[i]; c.lastChange=now; }
             c.pendingOutputVals[i]=undefined; c.pendingOutputStart[i]=undefined;
           }
@@ -600,43 +600,70 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
   const VIS = {};
   const W=80,H=80,BX=12,YT=20,YB=60,YO=40,BT=6,BB=74;
 
+  // Fills in left-to-right as a pending output counts down its gate delay,
+  // so the bar reads as a progress indicator for the value about to land.
+  function PendingBar({pendingStart, delay, value}) {
+    const [now, setNow] = React.useState(performance.now());
+    React.useEffect(()=>{
+      let r; const l=()=>{setNow(performance.now()); r=requestAnimationFrame(l);};
+      r=requestAnimationFrame(l); return ()=>cancelAnimationFrame(r);
+    }, []);
+    const t = delay>0 ? Math.min(1,(now-(pendingStart||now))/delay) : 1;
+    return <rect x="20" y="-5" width={40*t} height="5" fill={value ? "var(--high)" : "var(--low)"}/>;
+  }
+
+  // Shared by every gate's body: renders the PendingBar above the shape
+  // when the gate's single output is counting down its gate delay.
+  function pendingBar(comp) {
+    return comp.pendingOutputVals && comp.pendingOutputVals[0]!==undefined &&
+      <PendingBar pendingStart={comp.pendingOutputStart[0]} delay={comp.delay||0} value={comp.pendingOutputVals[0]}/>;
+  }
+
   VIS.AND  = { w:W,h:H, inputs:[{x:0,y:YT},{x:0,y:YB}], outputs:[{x:W,y:YO}],
-    body:(f)=><g>
+    body:(f, comp)=><g>
+      {pendingBar(comp)}
       <path d={`M ${BX} ${BT} H ${W*.5} a ${(BB-BT)/2} ${(BB-BT)/2} 0 0 1 0 ${BB-BT} H ${BX} Z`} fill={f} stroke="var(--ink)" strokeWidth="2" strokeLinejoin="round"/>
     </g> };
   VIS.OR   = { w:W,h:H, inputs:[{x:0,y:YT},{x:0,y:YB}], outputs:[{x:W,y:YO}],
-    body:(f)=><g>
+    body:(f, comp)=><g>
+      {pendingBar(comp)}
       <path d={`M ${BX} ${BT} Q ${BX+14} ${YO}, ${BX} ${BB} Q ${W*.5} ${BB}, ${W-2} ${YO} Q ${W*.5} ${BT}, ${BX} ${BT} Z`} fill={f} stroke="var(--ink)" strokeWidth="2" strokeLinejoin="round"/>
     </g> };
   VIS.NOT  = { w:80,h:40, inputs:[{x:0,y:20}], outputs:[{x:80,y:20}],
-    body:(f)=><g>
+    body:(f, comp)=><g>
+      {pendingBar(comp)}
       <path d="M 12 6 L 60 20 L 12 34 Z" fill={f} stroke="var(--ink)" strokeWidth="2" strokeLinejoin="round"/>
       <circle cx="66" cy="20" r="5" fill={f} stroke="var(--ink)" strokeWidth="2"/>
     </g> };
   VIS.NAND = { w:W,h:H, inputs:[{x:0,y:YT},{x:0,y:YB}], outputs:[{x:W,y:YO}],
-    body:(f)=><g>
+    body:(f, comp)=><g>
+      {pendingBar(comp)}
       <path d={`M ${BX} ${BT} H ${W*.45} a ${(BB-BT)/2} ${(BB-BT)/2} 0 0 1 0 ${BB-BT} H ${BX} Z`} fill={f} stroke="var(--ink)" strokeWidth="2" strokeLinejoin="round"/>
       <circle cx={W-7} cy={YO} r="5" fill={f} stroke="var(--ink)" strokeWidth="2"/>
     </g> };
   VIS.NOR  = { w:W,h:H, inputs:[{x:0,y:YT},{x:0,y:YB}], outputs:[{x:W,y:YO}],
-    body:(f)=><g>
+    body:(f, comp)=><g>
+      {pendingBar(comp)}
       <path d={`M ${BX} ${BT} Q ${BX+14} ${YO}, ${BX} ${BB} Q ${W*.45} ${BB}, ${W-12} ${YO} Q ${W*.45} ${BT}, ${BX} ${BT} Z`} fill={f} stroke="var(--ink)" strokeWidth="2" strokeLinejoin="round"/>
       <circle cx={W-7} cy={YO} r="5" fill={f} stroke="var(--ink)" strokeWidth="2"/>
     </g> };
   VIS.XOR  = { w:W,h:H, inputs:[{x:0,y:YT},{x:0,y:YB}], outputs:[{x:W,y:YO}],
-    body:(f)=><g>
+    body:(f, comp)=><g>
+      {pendingBar(comp)}
       <path d={`M ${BX-6} ${BT} Q ${BX+8} ${YO}, ${BX-6} ${BB}`} fill="none" stroke="var(--ink)" strokeWidth="2"/>
       <path d={`M ${BX} ${BT} Q ${BX+14} ${YO}, ${BX} ${BB} Q ${W*.5} ${BB}, ${W-2} ${YO} Q ${W*.5} ${BT}, ${BX} ${BT} Z`} fill={f} stroke="var(--ink)" strokeWidth="2" strokeLinejoin="round"/>
     </g> };
   VIS.XNOR = { w:W,h:H, inputs:[{x:0,y:YT},{x:0,y:YB}], outputs:[{x:W,y:YO}],
-    body:(f)=><g>
+    body:(f, comp)=><g>
+      {pendingBar(comp)}
       <path d={`M ${BX-6} ${BT} Q ${BX+8} ${YO}, ${BX-6} ${BB}`} fill="none" stroke="var(--ink)" strokeWidth="2"/>
       <path d={`M ${BX} ${BT} Q ${BX+14} ${YO}, ${BX} ${BB} Q ${W*.45} ${BB}, ${W-12} ${YO} Q ${W*.45} ${BT}, ${BX} ${BT} Z`} fill={f} stroke="var(--ink)" strokeWidth="2" strokeLinejoin="round"/>
       <circle cx={W-7} cy={YO} r="5" fill={f} stroke="var(--ink)" strokeWidth="2"/>
     </g> };
   VIS.MUX  = { w:W,h:H, inputs:[{x:0,y:YT},{x:0,y:YB},{x:W*.5,y:YT*0.25,dir:'up'}],outputs:[{x:W,y:YO}],
-    body:(f)=><g>
-      <path d={`M ${BX} ${BT} L ${W-BX} ${BT + BB*.25} V ${BB*.75} L ${BX} ${BB} Z`} fill={f} stroke="var(--ink)" strokeWidth="2" strokeLinejoin="round"/>
+    body:(f, comp)=><g>
+      {pendingBar(comp)}
+      <path d={`M ${BX} ${BT} L ${W - BX} ${BT + BB*.25} V ${BB*.75} L ${BX} ${BB} Z`} fill={f} stroke="var(--ink)" strokeWidth="2" strokeLinejoin="round"/>
     </g>}
 
 
@@ -701,10 +728,10 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
   const ffTxt=(x,y,t)=><text x={x} y={y} fontFamily="var(--mono)" fontSize="12" fill="var(--ink)">{t}</text>;
   const ffSub=(t)=><text x="40" y="74" fontFamily="var(--ui)" fontSize="9" textAnchor="middle" fill="var(--ink)" opacity="0.38">{t}</text>;
 
-  VIS.DFF  = {w:80,h:80,  inputs:[{x:0,y:20},{x:0,y:60}],            outputs:[{x:80,y:40}], body:(f)=><g>{ffRect(f,80)}{ffTxt(14,24,'D')}{ffTxt(14,64,'▷')}{ffTxt(66,44,'Q')}{ffSub('D')}</g>};
-  VIS.TFF  = {w:80,h:80,  inputs:[{x:0,y:20},{x:0,y:60}],            outputs:[{x:80,y:40}], body:(f)=><g>{ffRect(f,80)}{ffTxt(14,24,'T')}{ffTxt(14,64,'▷')}{ffTxt(66,44,'Q')}{ffSub('T')}</g>};
-  VIS.SRFF = {w:80,h:80,  inputs:[{x:0,y:20},{x:0,y:60}],            outputs:[{x:80,y:40}], body:(f)=><g>{ffRect(f,80)}{ffTxt(14,24,'S')}{ffTxt(14,64,'R')}{ffTxt(66,44,'Q')}{ffSub('SR')}</g>};
-  VIS.JKFF = {w:80,h:120, inputs:[{x:0,y:20},{x:0,y:60},{x:0,y:100}],outputs:[{x:80,y:40}], body:(f)=><g>{ffRect(f,120)}{ffTxt(14,24,'J')}{ffTxt(14,64,'K')}{ffTxt(14,104,'▷')}{ffTxt(66,44,'Q')}<text x="40" y="114" fontFamily="var(--ui)" fontSize="9" textAnchor="middle" fill="var(--ink)" opacity="0.38">JK</text></g>};
+  VIS.DFF  = {w:80,h:80,  inputs:[{x:0,y:20},{x:0,y:60}],            outputs:[{x:80,y:40}], body:(f,comp)=><g>{pendingBar(comp)}{ffRect(f,80)}{ffTxt(14,24,'D')}{ffTxt(14,64,'▷')}{ffTxt(66,44,'Q')}{ffSub('D')}</g>};
+  VIS.TFF  = {w:80,h:80,  inputs:[{x:0,y:20},{x:0,y:60}],            outputs:[{x:80,y:40}], body:(f,comp)=><g>{pendingBar(comp)}{ffRect(f,80)}{ffTxt(14,24,'T')}{ffTxt(14,64,'▷')}{ffTxt(66,44,'Q')}{ffSub('T')}</g>};
+  VIS.SRFF = {w:80,h:80,  inputs:[{x:0,y:20},{x:0,y:60}],            outputs:[{x:80,y:40}], body:(f,comp)=><g>{pendingBar(comp)}{ffRect(f,80)}{ffTxt(14,24,'S')}{ffTxt(14,64,'R')}{ffTxt(66,44,'Q')}{ffSub('SR')}</g>};
+  VIS.JKFF = {w:80,h:120, inputs:[{x:0,y:20},{x:0,y:60},{x:0,y:100}],outputs:[{x:80,y:40}], body:(f,comp)=><g>{pendingBar(comp)}{ffRect(f,120)}{ffTxt(14,24,'J')}{ffTxt(14,64,'K')}{ffTxt(14,104,'▷')}{ffTxt(66,44,'Q')}<text x="40" y="114" fontFamily="var(--ui)" fontSize="9" textAnchor="middle" fill="var(--ink)" opacity="0.38">JK</text></g>};
 
   // Per-pin facing: each pin stub normally points 'left' (inputs) or 'right'
   // (outputs) toward the gate body, but a pin can override this with its own
@@ -1382,12 +1409,12 @@ function App(){
       return `${output.label} = ${rhs}`;
     });
 
-    setEquation(equations.join('<br>'));
+    setEquation(equations.join('\n'));
   };
 
   function settleCircuit(circuit, maxSteps = 10) {
     for (let i = 0; i < maxSteps; i++) {
-      circuit.step(performance.now(), 0);
+      circuit.step(performance.now(), 0, true);
     }
   }
 
@@ -1473,7 +1500,7 @@ function App(){
       <div className="tb-sep"/>
       <button className="btn ghost" style={{height:26,fontSize:12}} onClick={()=>setShowSave(true)} disabled={n===0}>Save</button>
       <button className="btn ghost" style={{height:26,fontSize:12}} onClick={()=>setShowLoad(true)}>Load</button>
-      <button className="btn ghost" style={{height:26,fontSize:12,color:'var(--ink-3)'}} onClick={doClear} disabled={n===0}>Clear</button>
+      <button className="btn ghost" style={{height:26,fontSize:12}} onClick={doClear} disabled={n===0}>Clear</button>
       <button className="btn ghost" style={{height:26,fontSize:12}} onClick={()=>setShowEquation(true)}>Boolean Equation</button>
       <button className="btn ghost" style={{height:26,fontSize:12}} onClick={()=>setShowSettings(true)}>Settings</button>
       {/* Propagation delay */}
@@ -1538,7 +1565,7 @@ function App(){
     </Dialog>}
 
     {showEquation&&<Dialog title="Generate Boolean Equation" onClose={()=>setShowEquation(false)}>
-      <p>{equation === '' ? "No equation generated." : equation}</p>
+      {equation === '' ? "No equation generated." : equation}
       <div className="dialog-actions">
         <button className="btn ghost" onClick={()=>generateEquation()}>{equation === '' ? "Generate" : "Regenerate"}</button>
         <button className="btn ghost" onClick={()=>setShowEquation(false)}>Exit</button>
