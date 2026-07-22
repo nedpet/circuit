@@ -329,9 +329,20 @@ defineModule('engine', ['state'], (state) => {
         if (!c.pendingOutputVals) c.pendingOutputVals = [];
         if (!c.pendingOutputStart) c.pendingOutputStart = [];
         for (let i=0;i<outs.length;i++) {
-          if (outs[i]!==c.pendingOutputVals[i] && outs[i]!==c.outputVals[i]) {
-            c.pendingOutputVals[i] = outs[i];
-            c.pendingOutputStart[i] = now;
+          if (outs[i]!==c.pendingOutputVals[i]) {
+            if (outs[i]===c.outputVals[i]) {
+              // Input reverted before the pending change ever landed — nothing
+              // to propagate, so drop the in-flight change instead of letting
+              // it commit as a stale glitch once the old timer expires.
+              c.pendingOutputVals[i] = undefined;
+              c.pendingOutputStart[i] = undefined;
+            } else {
+              // New target value: restart the delay from now instead of
+              // keeping the original countdown, so the output always lands
+              // one full delay after the most recent input change.
+              c.pendingOutputVals[i] = outs[i];
+              c.pendingOutputStart[i] = now;
+            }
           }
           if (typeof c.pendingOutputVals[i] !== 'undefined' && (instant || now-(c.pendingOutputStart[i]||0) >= (c.delay||0))) {
             if (c.outputVals[i]!==c.pendingOutputVals[i]) { c.outputVals[i]=c.pendingOutputVals[i]; c.lastChange=now; }

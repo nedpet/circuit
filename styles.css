@@ -59,6 +59,7 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
 }
 .pal-grid { display:grid; grid-template-columns:1fr 1fr; gap:5px; }
 .pal-item {
+  position:relative;
   background:var(--bg); border:1px solid var(--border); border-radius:var(--r);
   padding:7px 3px 5px;
   display:flex; flex-direction:column; align-items:center; gap:3px;
@@ -68,6 +69,17 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
 .pal-item:hover { background:var(--panel-2); border-color:var(--border-md); transform:translateY(-1px); box-shadow:0 3px 8px rgba(26,26,24,.07); }
 .pal-item:active { cursor:grabbing; transform:none; box-shadow:none; }
 .pal-label { font-size:10px; font-family:var(--mono); color:var(--ink-2); }
+
+.pal-del-btn {
+  position:absolute; top:-6px; right:-6px; z-index:1;
+  width:16px; height:16px; border-radius:50%; padding:0;
+  background:var(--bg); border:1px solid var(--border-md); color:var(--ink-2);
+  display:flex; align-items:center; justify-content:center;
+  cursor:pointer; line-height:1;
+  transition:background .1s, border-color .1s, color .1s;
+}
+.pal-del-btn:hover { background:#dc2626; border-color:#dc2626; color:#fff; }
+.pal-del-btn svg { display:block; pointer-events:none; }
 
 /* canvas */
 .canvas-wrap { flex:1; position:relative; min-width:0; }
