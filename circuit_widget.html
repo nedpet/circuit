@@ -722,28 +722,39 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
             <GateBody comp={comp}/>
             {vis.inputs.map((_,i)=>{
               const abs=pinAbs(comp,'in',i);
-              return <circle key={'in'+i} cx={abs.x-comp.x} cy={abs.y-comp.y} r="6"
-                      fill={comp.inputVals[i]?'var(--high)':'var(--bg)'}
-                      stroke="var(--border-md)" strokeWidth="1.5"
-                      style={{cursor:'crosshair'}}
-                      onMouseUp={e=>onInputPinUp(e,comp,i)}
-                      onMouseDown={e=>e.stopPropagation()}/>
+              const px=abs.x-comp.x, py=abs.y-comp.y;
+              return <g key={'in'+i}>
+                <circle cx={px} cy={py} r="6"
+                        fill={comp.inputVals[i]?'var(--high)':'var(--bg)'}
+                        stroke="var(--border-md)" strokeWidth="1.5"/>
+                {/* Fat invisible hit target — matches the wire hit-path pattern
+                    above, so a drop that's a few px off the visible pin still
+                    connects instead of landing as a free wire endpoint. */}
+                <circle cx={px} cy={py} r="14" fill="transparent"
+                        style={{cursor:'crosshair'}}
+                        onMouseUp={e=>onInputPinUp(e,comp,i)}
+                        onMouseDown={e=>e.stopPropagation()}/>
+              </g>;
             })}
             {vis.outputs.map((_,i)=>{
               const abs=pinAbs(comp,'out',i);
-              return <circle key={'out'+i} cx={abs.x-comp.x} cy={abs.y-comp.y} r="6"
-                      fill={comp.outputVals[i]?'var(--high)':'var(--bg)'}
-                      stroke="var(--border-md)" strokeWidth="1.5"
-                      style={{cursor:'crosshair'}}
-                      onMouseDown={e=>onOutputPinDown(e,comp,i)}
-                      onMouseUp={e=>onOutputPinUp(e,comp,i)}/>
+              const px=abs.x-comp.x, py=abs.y-comp.y;
+              return <g key={'out'+i}>
+                <circle cx={px} cy={py} r="6"
+                        fill={comp.outputVals[i]?'var(--high)':'var(--bg)'}
+                        stroke="var(--border-md)" strokeWidth="1.5"/>
+                <circle cx={px} cy={py} r="14" fill="transparent"
+                        style={{cursor:'crosshair'}}
+                        onMouseDown={e=>onOutputPinDown(e,comp,i)}
+                        onMouseUp={e=>onOutputPinUp(e,comp,i)}/>
+              </g>;
             })}
           </g>;
         })}
 
         {/* Wiring preview */}
         {wiringFrom&&
-          <path d={wirePath(wiringFrom.x,wiringFrom.y,snap(mousePos.x,snapGrid),snap(mousePos.y,snapGrid))}
+          <path d={wirePath(wiringFrom.x,wiringFrom.y,mousePos.x,mousePos.y)}
                 fill="none" stroke="var(--high)" strokeWidth="2"
                 strokeDasharray="6 4" opacity="0.7"/>}
 
