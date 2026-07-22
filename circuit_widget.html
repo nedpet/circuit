@@ -756,7 +756,7 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
         {wiringFrom&&
           <path d={wirePath(wiringFrom.x,wiringFrom.y,mousePos.x,mousePos.y)}
                 fill="none" stroke="var(--high)" strokeWidth="2"
-                strokeDasharray="6 4" opacity="0.7"/>}
+                strokeDasharray="6 4" opacity="0.7" pointerEvents="none"/>}
 
         {/* Palette drag ghost */}
         {paletteDrag&&(()=>{
