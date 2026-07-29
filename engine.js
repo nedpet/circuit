@@ -14,6 +14,13 @@ defineModule('engine', ['state'], (state) => {
   // sequential/misc kinds are intentionally excluded for now).
   const BIT_WIDTH_KINDS = new Set(['INPUT','OUTPUT','AND','OR','NOT','NAND','NOR','XOR','XNOR']);
 
+  // Every pin on a component shares that component's single bitWidth (no
+  // per-pin widths); kinds outside BIT_WIDTH_KINDS (MUX, flip-flops, REG,
+  // SEVEN, CLOCK) only ever handle 1-bit values on all their pins.
+  function pinBitWidth(comp) {
+    return comp && BIT_WIDTH_KINDS.has(comp.kind) ? (comp.bitWidth||1) : 1;
+  }
+
   const GATE_DEFS = {
     INPUT:  { kind:'INPUT',  label:'IN',    inputs:0, outputs:1, family:'io',
               compute:(i,s,w) => [maskVal(s.value||0, w||1)] },
@@ -251,6 +258,41 @@ defineModule('engine', ['state'], (state) => {
       }
     }
 
+    // Walks a wire back through branch junctions to the component pin that
+    // ultimately drives it, so a branched wire is checked against the same
+    // source width as the wire it forked from. Returns null when the chain
+    // doesn't (yet) reach a real output pin — e.g. mid-drag or a dangling
+    // free endpoint — since there's nothing to compare a width against.
+    function wireSourceBitWidth(wire, circuit, seen) {
+      seen = seen || new Set();
+      if (seen.has(wire.id)) return null;
+      seen.add(wire.id);
+      if (isWireTerminal(wire.from)) {
+        return pinBitWidth(circuit.components.get(wire.from.compId));
+      }
+      if (typeof wire.from.x === 'number' && typeof wire.from.y === 'number') {
+        for (const j of circuit.junctions) {
+          if (Math.abs(j.x - wire.from.x) < 1e-6 && Math.abs(j.y - wire.from.y) < 1e-6) {
+            const src = circuit.wires.get(j.sourceWireId);
+            if (src) return wireSourceBitWidth(src, circuit, seen);
+          }
+        }
+      }
+      return null;
+    }
+
+    // A wire only has a meaningful width mismatch once both ends are real
+    // pins — a branch-routing wire whose far end is still a free point isn't
+    // flagged; the leaf wire that eventually lands on a pin is.
+    function wireBitMismatch(wire, circuit) {
+      if (!isWireTerminal(wire.to)) return false;
+      const dst = circuit.components.get(wire.to.compId);
+      if (!dst) return false;
+      const srcWidth = wireSourceBitWidth(wire, circuit);
+      if (srcWidth == null) return false;
+      return srcWidth !== pinBitWidth(dst);
+    }
+
     function wireSourceValue(wire, circuit, now, instant) {
       if (isWireTerminal(wire.from)) {
         const src = circuit.components.get(wire.from.compId);
@@ -367,7 +409,12 @@ defineModule('engine', ['state'], (state) => {
       }
       // Propagate with delay
       for (const w of wires.values()) {
-        const srcVal = wireSourceValue(w, {components, wires, ioComponents, junctions}, now, instant);
+        const circuitRef = {components, wires, ioComponents, junctions};
+        // A width mismatch between the pins this wire connects means the
+        // signal shouldn't cross it at all — held at 0 instead of the
+        // driven value, with the mismatch itself flagged for rendering.
+        w.bitMismatch = wireBitMismatch(w, circuitRef);
+        const srcVal = w.bitMismatch ? 0 : wireSourceValue(w, circuitRef, now, instant);
         if (srcVal!==w.pendingValue && srcVal!==w.value) { w.pendingValue=srcVal; w.pendingStart=now; }
       }
       for (const w of wires.values()) {

@@ -764,14 +764,18 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
           const pts=w.points||[];
           const path=wirePath(a.x,a.y,b.x,b.y,pts);
           const high=w.value>0;
+          const mismatch=w.bitMismatch;
           return <g key={w.id}>
             {/* Shadow */}
             <path d={path} fill="none" stroke="var(--ink)" strokeWidth="3.5"
                   strokeLinejoin="round" strokeLinecap="round" opacity="0.07"/>
-            {/* Signal color */}
+            {/* Signal color — red instead of low/high when the pins on
+                either end disagree on bit width; the signal is held at 0
+                rather than crossing, so `high` is never true here too. */}
             <path d={path} fill="none"
-                  stroke={high?'var(--high)':'var(--low)'}
+                  stroke={mismatch?'var(--err)':(high?'var(--high)':'var(--low)')}
                   strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round"
+                  strokeDasharray={mismatch?'5 4':undefined}
                   style={{transition:'stroke 100ms ease'}}/>
             {/* Fat hit target — click to add branch */}
             <path d={path} fill="none" stroke="transparent" strokeWidth="16"
