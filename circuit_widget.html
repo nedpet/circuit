@@ -42,7 +42,7 @@ defineModule('gates', ['engine'], (engine) => {
   'use strict';
   const { GATE_DEFS } = engine;
 
-  const FAMILY_FILL = { and:'#fffae3', or:'#e8f5ee', not:'#ede8f7', xor:'#e4eef8', mux: '#fff1e3', seq:'#fce8ee', io:'#fefce8' };
+  const FAMILY_FILL = { and:'#fffae3', or:'#e8f5ee', not:'#ede8f7', xor:'#e4eef8', mux: '#fff1e3', seq:'#fce8ee', io:'#fefce8', misc:'#ede8f7' };
   const VIS = {};
   const W=80,H=80,BX=12,YT=20,YB=60,YO=40,BT=6,BB=74;
 
@@ -125,6 +125,70 @@ defineModule('gates', ['engine'], (engine) => {
     }
   };
 
+  // Multi-bit INPUT/OUTPUT: each pin still carries exactly one bus value (an
+  // integer, masked to comp.bitWidth in engine.js), so pin *count* never
+  // changes — only how wide the component is drawn to show that many bits.
+  // Cells render leftmost = most-significant bit. `data-bit` is read back by
+  // Canvas's existing drag/click detection (onCompMouseDown/onUp) via plain
+  // DOM event-target bubbling, so no extra handler plumbing is needed here.
+  const BIT_CELL_W=18, BIT_CELL_H=24, BIT_GAP=3, BIT_PAD=8;
+  function bitsRowWidth(n) { return BIT_PAD*2 + n*BIT_CELL_W + Math.max(0,n-1)*BIT_GAP; }
+  function BitCells({ n, value, editable }) {
+    const cy=20;
+    return Array.from({length:n},(_,i)=>{
+      const bit=n-1-i;
+      const on=(value>>>bit)&1;
+      const cx=BIT_PAD+i*(BIT_CELL_W+BIT_GAP);
+      return <g key={bit}>
+        <rect x={cx} y={cy-BIT_CELL_H/2} width={BIT_CELL_W} height={BIT_CELL_H} rx="4"
+              data-bit={editable?bit:undefined}
+              fill={on?'#fef3c7':'#f3f3f1'} stroke="var(--low)" strokeWidth="1.5"
+              style={editable?{cursor:'pointer'}:undefined}/>
+        <text x={cx+BIT_CELL_W/2} y={cy+4} textAnchor="middle" fontFamily="var(--mono)" fontSize="12"
+              fontWeight="600" fill="var(--ink)" opacity="0.55" pointerEvents="none">{on?'1':'0'}</text>
+      </g>;
+    });
+  }
+  function buildInputVis(n) {
+    const w=bitsRowWidth(n), h=40;
+    return { w, h, inputs:[], outputs:[{x:w,y:20}],
+      body:(f,comp)=><g>
+        <rect x="2" y="4" width={w-4} height="32" rx="8" fill="#f3f3f1" stroke="var(--ink)" strokeWidth="2"/>
+        {BitCells({n, value:comp.state.value||0, editable:true})}
+        <text x="-15" y="26" fontFamily="var(--mono)" fontSize="16" fontWeight="600" textAnchor="end" fill="var(--ink)" opacity="0.8">{comp.label}</text>
+      </g>
+    };
+  }
+  function buildOutputVis(n) {
+    const w=bitsRowWidth(n), h=40;
+    return { w, h, inputs:[{x:0,y:20}], outputs:[],
+      body:(f,comp)=><g>
+        <rect x="2" y="4" width={w-4} height="32" rx="8" fill="#f3f3f1" stroke="var(--ink)" strokeWidth="2"/>
+        {BitCells({n, value:comp.inputVals[0]||0, editable:false})}
+        <text x={w+15} y="26" fontFamily="var(--mono)" fontSize="16" fontWeight="600" textAnchor="start" fill="var(--ink)" opacity="0.8">{comp.label}</text>
+      </g>
+    };
+  }
+  const inputVisCache={}, outputVisCache={};
+  function inputVis(bw) {
+    const n=Math.max(1,Math.min(32,bw|0||1));
+    if (n<=1) return VIS.INPUT;
+    return inputVisCache[n] || (inputVisCache[n]=buildInputVis(n));
+  }
+  function outputVis(bw) {
+    const n=Math.max(1,Math.min(32,bw|0||1));
+    if (n<=1) return VIS.OUTPUT;
+    return outputVisCache[n] || (outputVisCache[n]=buildOutputVis(n));
+  }
+  // Single point every consumer (rendering, pin geometry, wiring) should go
+  // through instead of `VIS[comp.kind]` directly, since INPUT/OUTPUT no
+  // longer have a fixed size — everything else still has one.
+  function visForComp(comp) {
+    if (comp.kind==='INPUT') return inputVis(comp.bitWidth);
+    if (comp.kind==='OUTPUT') return outputVis(comp.bitWidth);
+    return VIS[comp.kind];
+  }
+
   VIS.CLOCK = { w:60,h:40, inputs:[], outputs:[{x:60,y:20}],
     body:(f,comp)=>{
       const on=comp.state.value, paused=comp.state.paused;
@@ -148,6 +212,7 @@ defineModule('gates', ['engine'], (engine) => {
         <circle cx="22" cy="20" r="13" fill={on?'#fde68a':'#f3f3f1'} stroke="var(--ink)" strokeWidth="2"/>
         <path d="M 17 26 L 17 30 L 27 30 L 27 26" fill="none" stroke="var(--ink)" strokeWidth="1.5" strokeLinecap="round"/>
         <text x="55" y="26" fontFamily="var(--mono)" fontSize="16" fontWeight="600" textAnchor="start" fill="var(--ink)" opacity="0.8">{comp.label}</text>
+        <text x="22" y="24" fontFamily="var(--mono)" fontSize="11" fontWeight="600" textAnchor="middle" fill="var(--ink)" opacity="0.45">{on?'1':'0'}</text>
         {on?<g stroke="#d97706" strokeWidth="1.5" strokeLinecap="round">
           <line x1="22" y1="3"  x2="22" y2="6"/><line x1="37" y1="20" x2="40" y2="20"/>
           <line x1="4"  y1="20" x2="7"  y2="20"/><line x1="33" y1="9"  x2="35" y2="7"/>
@@ -204,7 +269,7 @@ defineModule('gates', ['engine'], (engine) => {
   }
 
   function GateBody({ comp }) {
-    const def=GATE_DEFS[comp.kind], vis=VIS[comp.kind];
+    const def=GATE_DEFS[comp.kind], vis=visForComp(comp);
     if (!vis) return null;
     const fill=FAMILY_FILL[def.family]||'#fff';
     return <g transform={comp.facing==='left'
@@ -293,7 +358,7 @@ defineModule('gates', ['engine'], (engine) => {
     return kindKey;
   }
 
-  return { GATE_VIS: VIS, FAMILY_FILL, GateBody, registerCustomGate };
+  return { GATE_VIS: VIS, FAMILY_FILL, GateBody, registerCustomGate, visForComp };
 });
 </script>
 
@@ -302,7 +367,7 @@ defineModule('gates', ['engine'], (engine) => {
 defineModule('canvas', ['state', 'engine', 'gates'], (state, engine, gates) => {
 'use strict';
 const { useState, useEffect, useRef, useCallback } = React;
-const { GATE_VIS, GateBody } = gates;
+const { GATE_VIS, GateBody, visForComp } = gates;
 const {
   GATE_DEFS,
   projectOrthogonalPoint, terminalCoords, wireKnots, resolveWire, wirePath,
@@ -436,7 +501,14 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
         const d=compDragRef.current;
         if (!d.moved) {
           const comp=circuit.components.get(d.id);
-          if (comp?.kind==='INPUT') { circuit.toggleInput(comp.id); onChangedRef.current?.(); }
+          if (comp?.kind==='INPUT') {
+            // A stray click on the multi-bit body's padding (not a bit cell)
+            // has no single-bit meaning — only single-bit INPUTs toggle from
+            // an unspecific click; wide ones require hitting an actual cell.
+            if ((comp.bitWidth||1)>1) { if (d.bitIndex!=null) circuit.toggleInputBit(comp.id,d.bitIndex); }
+            else circuit.toggleInput(comp.id);
+            onChangedRef.current?.();
+          }
           if (comp?.kind==='CLOCK')  { circuit.toggleClock(comp.id);  onChangedRef.current?.(); }
         }
         compDragRef.current=null;
@@ -470,7 +542,12 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
   const onCompMouseDown=(e,comp)=>{
     e.stopPropagation(); if(e.button===2)return;
     const w=screenToWorld(e.clientX,e.clientY);
-    compDragRef.current={id:comp.id,ox:w.x-comp.x,oy:w.y-comp.y,startSX:e.clientX,startSY:e.clientY,moved:false};
+    // Bit cells (multi-bit INPUT) tag themselves with data-bit; reading it off
+    // the real event target lets the browser's own hit-testing tell us which
+    // cell was pressed, transform/rotation and all, instead of re-deriving it.
+    const bitAttr = e.target && e.target.dataset ? e.target.dataset.bit : undefined;
+    const bitIndex = bitAttr!==undefined ? Number(bitAttr) : null;
+    compDragRef.current={id:comp.id,ox:w.x-comp.x,oy:w.y-comp.y,startSX:e.clientX,startSY:e.clientY,moved:false,bitIndex};
     onSelect(comp.id);
   };
   const onCompContext=(e,comp)=>{e.preventDefault();circuit.removeComponent(comp.id);onComponentChanged?.();};
@@ -614,6 +691,12 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
                   onChange={e=>{circuit.setIOLabel(selComp.id,e.target.value);onComponentChanged?.();}}/>
         </div>
         <div className="prop-option">
+          <span className="prop-label">Bits</span>
+          <input  className="prop-input" type="number" min="1" max="32"
+                  value={selComp.bitWidth||1}
+                  onChange={e=>{circuit.setBitWidth(selComp.id,Number(e.target.value));onComponentChanged?.();}}/>
+        </div>
+        <div className="prop-option">
           <span className="prop-label">Facing</span>
           <select className="prop-input"
                   value={selComp.facing}
@@ -631,6 +714,12 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
     return (
       <div className="prop-panel" onMouseDown={e=>e.stopPropagation()}>
         <div className="prop-title">{selComp.kind} Properties</div>
+        {selComp.kind!=='MUX' && <div className="prop-option">
+          <span className="prop-label">Bits</span>
+          <input  className="prop-input" type="number" min="1" max="32"
+                  value={selComp.bitWidth||1}
+                  onChange={e=>{circuit.setBitWidth(selComp.id,Number(e.target.value));onComponentChanged?.();}}/>
+        </div>}
         <div className="prop-option">
           <span className="prop-label">Facing</span>
           <select className="prop-input"
@@ -674,7 +763,7 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
           const a=terminalCoords(w.from,circuit), b=terminalCoords(w.to,circuit);
           const pts=w.points||[];
           const path=wirePath(a.x,a.y,b.x,b.y,pts);
-          const high=w.value===1;
+          const high=w.value>0;
           return <g key={w.id}>
             {/* Shadow */}
             <path d={path} fill="none" stroke="var(--ink)" strokeWidth="3.5"
@@ -722,7 +811,7 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
 
         {/* Components */}
         {components.map(comp=>{
-          const vis=GATE_VIS[comp.kind],isSel=selectedId===comp.id;
+          const vis=visForComp(comp),isSel=selectedId===comp.id;
           return <g key={comp.id} transform={`translate(${comp.x},${comp.y})`}
                     onMouseDown={e=>onCompMouseDown(e,comp)}
                     onContextMenu={e=>onCompContext(e,comp)}
@@ -802,7 +891,7 @@ function InflightPulse({a,b,pts=[],pendingValue,pendingStart,delayMs}) {
   useEffect(()=>{let r;const l=()=>{setNow(performance.now());r=requestAnimationFrame(l);};r=requestAnimationFrame(l);return()=>cancelAnimationFrame(r);},[]);
   const t=Math.min(1,(now-(pendingStart||now))/delayMs);
   const[x,y]=sampleWire(a.x,a.y,b.x,b.y,pts,t);
-  const col=pendingValue===1?'var(--high)':'var(--low-p)';
+  const col=pendingValue>0?'var(--high)':'var(--low-p)';
   return <g pointerEvents="none"><circle cx={x} cy={y} r="7" fill={col} opacity=".22"/><circle cx={x} cy={y} r="3.5" fill={col}/></g>;
 }
 
@@ -1053,7 +1142,7 @@ function App(){
     removeCustomKind(name);
   };
   const onDeleteCustom=(kind)=>{
-    if(!confirm('Remove this custom gate from the palette?'))return;
+    if(!confirm('Remove the custom gate "' + kind.slice(7) + '" from the palette?'))return;
     removeCustomKind(kind.slice('CUSTOM:'.length));
   };
   const doImport=(s)=>{

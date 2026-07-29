@@ -2,22 +2,34 @@
 defineModule('engine', ['state'], (state) => {
   'use strict';
 
+  // Every pin already maps to exactly one array slot (Q1/Q3 of the bit-width
+  // research) — a "wide" pin just lets that slot hold an integer bus value
+  // instead of a lone 0/1, so gate arity and wiring are untouched. maskVal
+  // clamps a raw bitwise result down to the pin's configured width and back
+  // to an unsigned reading, since JS's bitwise ops are 32-bit signed.
+  function bitMask(width) { return width>=32 ? 0xFFFFFFFF : (Math.pow(2,width)-1); }
+  function maskVal(v, width) { return (v & bitMask(width)) >>> 0; }
+
+  // Kinds whose per-instance `bitWidth` is user-configurable (MUX and the
+  // sequential/misc kinds are intentionally excluded for now).
+  const BIT_WIDTH_KINDS = new Set(['INPUT','OUTPUT','AND','OR','NOT','NAND','NOR','XOR','XNOR']);
+
   const GATE_DEFS = {
     INPUT:  { kind:'INPUT',  label:'IN',    inputs:0, outputs:1, family:'io',
-              compute:(i,s) => [s.value?1:0] },
+              compute:(i,s,w) => [maskVal(s.value||0, w||1)] },
     OUTPUT: { kind:'OUTPUT', label:'OUT',   inputs:1, outputs:0, family:'io',
               compute:()=>[] },
     CLOCK:  { kind:'CLOCK',  label:'CLK',   inputs:0, outputs:1, family:'io',
               compute:(i,s) => [s.value?1:0] },
     SEVEN:  { kind:'SEVEN',  label:'7SEG',  inputs:7, outputs:0, family:'io',
               compute:()=>[] },
-    AND:    { kind:'AND',  label:'AND',   inputs:2, outputs:1, family:'and',  compute:([a,b])=>[(a&b)&1] },
-    OR:     { kind:'OR',   label:'OR',    inputs:2, outputs:1, family:'or',   compute:([a,b])=>[(a|b)&1] },
-    NOT:    { kind:'NOT',  label:'NOT',   inputs:1, outputs:1, family:'not',  compute:([a])=>[a?0:1] },
-    NAND:   { kind:'NAND', label:'NAND',  inputs:2, outputs:1, family:'and',  compute:([a,b])=>[(a&b)?0:1] },
-    NOR:    { kind:'NOR',  label:'NOR',   inputs:2, outputs:1, family:'or',   compute:([a,b])=>[(a|b)?0:1] },
-    XOR:    { kind:'XOR',  label:'XOR',   inputs:2, outputs:1, family:'xor',  compute:([a,b])=>[(a^b)&1] },
-    XNOR:   { kind:'XNOR', label:'XNOR',  inputs:2, outputs:1, family:'xor',  compute:([a,b])=>[(a^b)?0:1] },
+    AND:    { kind:'AND',  label:'AND',   inputs:2, outputs:1, family:'and',  compute:([a,b],s,w)=>[maskVal(a&b,w)] },
+    OR:     { kind:'OR',   label:'OR',    inputs:2, outputs:1, family:'or',   compute:([a,b],s,w)=>[maskVal(a|b,w)] },
+    NOT:    { kind:'NOT',  label:'NOT',   inputs:1, outputs:1, family:'not',  compute:([a],s,w)=>[maskVal(~a,w)] },
+    NAND:   { kind:'NAND', label:'NAND',  inputs:2, outputs:1, family:'and',  compute:([a,b],s,w)=>[maskVal(~(a&b),w)] },
+    NOR:    { kind:'NOR',  label:'NOR',   inputs:2, outputs:1, family:'or',   compute:([a,b],s,w)=>[maskVal(~(a|b),w)] },
+    XOR:    { kind:'XOR',  label:'XOR',   inputs:2, outputs:1, family:'xor',  compute:([a,b],s,w)=>[maskVal(a^b,w)] },
+    XNOR:   { kind:'XNOR', label:'XNOR',  inputs:2, outputs:1, family:'xor',  compute:([a,b],s,w)=>[maskVal(~(a^b),w)] },
     MUX:    { kind:'MUX',  label:'MUX',   inputs:3, outputs:1, family:'mux',  compute:([a,b,c])=>[c?b:a] },
     DFF:    { kind:'DFF',  label:'D-FF',  inputs:2, outputs:1, family:'seq',
               compute:([d,clk],s)=>{ const r=clk&&!s.lastClk; s.lastClk=clk; if(r)s.q=d?1:0; return[s.q||0]; } },
@@ -55,7 +67,7 @@ defineModule('engine', ['state'], (state) => {
       // by which point Modules.gates exists. So this one lookup deliberately
       // bypasses the declared-deps pattern and reaches into the registry
       // directly, instead of receiving 'gates' as a constructor argument.
-      const vis = window.Modules.gates.GATE_VIS[comp.kind];
+      const vis = window.Modules.gates.visForComp(comp);
       const kind = term.type || (typeof term.pin==='number' && term.pin < (vis.inputs.length||0) ? 'in' : 'out');
       return pinAbs(comp, kind, term.pin);
     }
@@ -156,7 +168,7 @@ defineModule('engine', ['state'], (state) => {
   }
 
   function pinAbs(comp,kind,idx){
-    const vis=window.Modules.gates.GATE_VIS[comp.kind],p=kind==='in'?vis.inputs[idx]:vis.outputs[idx];
+    const vis=window.Modules.gates.visForComp(comp),p=kind==='in'?vis.inputs[idx]:vis.outputs[idx];
     const cx=vis.w/2, cy=vis.h/2;
     if (comp.facing==='left') {
       // Mirror horizontally: flip x around centre
@@ -178,7 +190,7 @@ defineModule('engine', ['state'], (state) => {
     const wires = new Map();
     const junctions = new Set(); // {x, y, sourceWireId}
 
-    function addComponent(kind, x, y, facing = "right", delay = 0, label = "none") {
+    function addComponent(kind, x, y, facing = "right", delay = 0, label = "none", bitWidth) {
       const def = GATE_DEFS[kind];
       const id = 'c'+(nextId++);
       const ioId = kind==='INPUT' || kind==='OUTPUT' ? 'io'+(nextIoId++) : ''
@@ -193,6 +205,7 @@ defineModule('engine', ['state'], (state) => {
         lastChange: 0,
         facing,
         delay,
+        bitWidth: BIT_WIDTH_KINDS.has(kind) ? Math.max(1,Math.min(32,Math.round(bitWidth||1))) : undefined,
       };
       components.set(id, comp);
       if (ioId != '') {
@@ -327,7 +340,7 @@ defineModule('engine', ['state'], (state) => {
       // pendingValue for their travel time below.
       for (const c of components.values()) {
         const def = GATE_DEFS[c.kind];
-        const outs = def.compute(c.inputVals, c.state)||[];
+        const outs = def.compute(c.inputVals, c.state, c.bitWidth||1)||[];
         if (!c.pendingOutputVals) c.pendingOutputVals = [];
         if (!c.pendingOutputStart) c.pendingOutputStart = [];
         for (let i=0;i<outs.length;i++) {
@@ -390,7 +403,7 @@ defineModule('engine', ['state'], (state) => {
 
     function serialize() {
       return {
-        components: [...components.values()].map(c=>({id:c.id,ioId:c.ioId,kind:c.kind,x:c.x,y:c.y,facing:c.facing,delay:c.delay,label:c.label,
+        components: [...components.values()].map(c=>({id:c.id,ioId:c.ioId,kind:c.kind,x:c.x,y:c.y,facing:c.facing,delay:c.delay,label:c.label,bitWidth:c.bitWidth,
           state:c.kind==='INPUT'?{value:c.state.value}:c.kind==='CLOCK'?{period:c.state.period,paused:c.state.paused}:{}})),
         wires: [...wires.values()].map(w=>({id:w.id,from:w.from,to:w.to,points:w.points||[]})),
         junctions: [...junctions],
@@ -409,7 +422,7 @@ defineModule('engine', ['state'], (state) => {
       // temp id first, then assign real ids and populate the maps once.
       const builtComponents = [];
       for (const cd of data.components||[]) {
-        const c=addComponent(cd.kind,cd.x,cd.y,cd.facing,cd.delay); components.delete(c.id); ioComponents.delete(c.ioId);
+        const c=addComponent(cd.kind,cd.x,cd.y,cd.facing,cd.delay,undefined,cd.bitWidth); components.delete(c.id); ioComponents.delete(c.ioId);
         if(cd.label!==undefined) c.label=cd.label;
         if(cd.state) Object.assign(c.state,cd.state);
         builtComponents.push({c,cd});
@@ -436,6 +449,18 @@ defineModule('engine', ['state'], (state) => {
       components, wires, ioComponents, junctions,
       addComponent, removeComponent, addWire, removeWire, step, serialize, load,
       toggleInput(id){const c=components.get(id);if(c&&c.kind==='INPUT')c.state.value=c.state.value?0:1;},
+      toggleInputBit(id,bit){
+        const c=components.get(id); if(!c||c.kind!=='INPUT') return;
+        const width=c.bitWidth||1;
+        if (bit<0||bit>=width) return;
+        c.state.value = ((c.state.value||0) ^ (1<<bit)) >>> 0;
+      },
+      setBitWidth(id,w){
+        const c=components.get(id); if(!c||!BIT_WIDTH_KINDS.has(c.kind)) return;
+        const width=Math.max(1,Math.min(32,Math.round(w)||1));
+        c.bitWidth=width;
+        if (c.kind==='INPUT') c.state.value = maskVal(c.state.value||0, width);
+      },
       toggleClock(id){const c=components.get(id);if(c&&c.kind==='CLOCK'){c.state.paused=!c.state.paused;if(!c.state.paused)c.state.lastTick=performance.now();}},
       setClockPeriod(id,p){const c=components.get(id);if(c&&c.kind==='CLOCK')c.state.period=p;},
       setIOLabel(id,l){const c=components.get(id);c.label=l;},
@@ -445,7 +470,7 @@ defineModule('engine', ['state'], (state) => {
   }
 
   return {
-    GATE_DEFS, createCircuit,
+    GATE_DEFS, BIT_WIDTH_KINDS, createCircuit,
     projectOrthogonalPoint, terminalCoords, wireKnots, resolveWire, wirePath,
     sampleWire, distToSeg, wireSegmentPoints, wireDelayForLength,
     findNearestWirePoint, insertBranchPoint, routeManhattanPoints, pinAbs,
