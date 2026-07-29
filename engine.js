@@ -10,22 +10,41 @@ defineModule('engine', ['state'], (state) => {
   function bitMask(width) { return width>=32 ? 0xFFFFFFFF : (Math.pow(2,width)-1); }
   function maskVal(v, width) { return (v & bitMask(width)) >>> 0; }
 
-  // Kinds whose per-instance `bitWidth` is user-configurable (MUX and the
-  // other sequential kinds are intentionally excluded for now).
-  const BIT_WIDTH_KINDS = new Set(['INPUT','OUTPUT','AND','OR','NOT','NAND','NOR','XOR','XNOR','REG']);
+  // Kinds whose per-instance `bitWidth` is user-configurable (the remaining
+  // sequential kinds are intentionally excluded for now).
+  const BIT_WIDTH_KINDS = new Set(['INPUT','OUTPUT','AND','OR','NOT','NAND','NOR','XOR','XNOR','REG','MUX']);
 
   // Most BIT_WIDTH_KINDS share one width across every pin, but REG's D input
   // and Q output are the only ones meant to carry a bus — EN/CLK/RESET stay
   // control lines and must stay 1-bit regardless of the component's bitWidth.
   const FIXED_WIDTH_PINS = { REG: { in: new Set([1,2,3]) } };
 
-  // Kinds outside BIT_WIDTH_KINDS (MUX, flip-flops other than REG, SEVEN,
-  // CLOCK) only ever handle 1-bit values on all their pins.
+  // MUX's data inputs/output follow bitWidth like any other gate, but its
+  // select pin is a control line whose OWN width is derived from muxInputs
+  // (1 bit for a 2:1 mux, 2 bits once there are 3-4 data lines to address) —
+  // never from bitWidth. Select always sits at input index muxInputs (the
+  // last input pin), one past the last data line.
+  function muxSelectWidth(muxInputs) { return (muxInputs||2) <= 2 ? 1 : 2; }
+
+  // Kinds outside BIT_WIDTH_KINDS (flip-flops other than REG, SEVEN, CLOCK)
+  // only ever handle 1-bit values on all their pins.
   function pinBitWidthAt(comp, dir, idx) {
     if (!comp) return 1;
+    if (comp.kind === 'MUX') {
+      const n = comp.muxInputs || 2;
+      if (dir === 'in' && idx === n) return muxSelectWidth(n);
+      return comp.bitWidth || 1;
+    }
     const fixed = FIXED_WIDTH_PINS[comp.kind];
     if (fixed && fixed[dir] && fixed[dir].has(idx)) return 1;
     return BIT_WIDTH_KINDS.has(comp.kind) ? (comp.bitWidth||1) : 1;
+  }
+
+  // MUX is the only kind whose *pin count* varies per instance (2-4 data
+  // lines + 1 select), so unlike bitWidth this changes the size of
+  // inputVals itself, not just how a slot's value is interpreted.
+  function compInputCount(c) {
+    return c.kind === 'MUX' ? (c.muxInputs||2) + 1 : GATE_DEFS[c.kind].inputs;
   }
 
   const GATE_DEFS = {
@@ -44,7 +63,17 @@ defineModule('engine', ['state'], (state) => {
     NOR:    { kind:'NOR',  label:'NOR',   inputs:2, outputs:1, family:'or',   compute:([a,b],s,w)=>[maskVal(~(a|b),w)] },
     XOR:    { kind:'XOR',  label:'XOR',   inputs:2, outputs:1, family:'xor',  compute:([a,b],s,w)=>[maskVal(a^b,w)] },
     XNOR:   { kind:'XNOR', label:'XNOR',  inputs:2, outputs:1, family:'xor',  compute:([a,b],s,w)=>[maskVal(~(a^b),w)] },
-    MUX:    { kind:'MUX',  label:'MUX',   inputs:3, outputs:1, family:'mux',  compute:([a,b,c])=>[c?b:a] },
+    // inputVals is [data0..data(n-1), select] where n = comp.muxInputs (2-4);
+    // arity is per-instance, so compute needs the whole comp, not just its
+    // input array, to know where the select pin sits. A 3-input mux's select
+    // is 2 bits (0-3) but only 3 data lines exist, so sel===3 falls back to 0.
+    MUX:    { kind:'MUX',  label:'MUX',   inputs:3, outputs:1, family:'mux',
+              compute:(inputVals,s,w,comp)=>{
+                const n=(comp&&comp.muxInputs)||2;
+                const sel=(inputVals[n]||0) & (n<=2?1:3);
+                const val=(n===2) ? (sel?inputVals[1]:inputVals[0]) : ((sel<n)?(inputVals[sel]||0):0);
+                return [maskVal(val||0, w||1)];
+              } },
     DFF:    { kind:'DFF',  label:'D-FF',  inputs:2, outputs:1, family:'seq',
               compute:([d,clk],s)=>{ const r=clk&&!s.lastClk; s.lastClk=clk; if(r)s.q=d?1:0; return[s.q||0]; } },
     TFF:    { kind:'TFF',  label:'T-FF',  inputs:2, outputs:1, family:'seq',
@@ -206,16 +235,20 @@ defineModule('engine', ['state'], (state) => {
     const wires = new Map();
     const junctions = new Set(); // {x, y, sourceWireId}
 
-    function addComponent(kind, x, y, facing = "right", delay = 0, label = "none", bitWidth) {
+    function addComponent(kind, x, y, facing = "right", delay = 0, label = "none", bitWidth, muxInputs) {
       const def = GATE_DEFS[kind];
       const id = 'c'+(nextId++);
       const ioId = kind==='INPUT' || kind==='OUTPUT' ? 'io'+(nextIoId++) : ''
+      // MUX's pin count (unlike bitWidth) varies per instance, so its
+      // inputVals can't be sized off the kind's static def.inputs.
+      const muxN = kind==='MUX' ? Math.max(2,Math.min(4,Math.round(muxInputs||2))) : undefined;
+      const inputCount = kind==='MUX' ? muxN+1 : def.inputs;
       const comp = {
         id, ioId, kind, x, y,
         state: kind==='INPUT' ? {value:0}
             : kind==='CLOCK' ? {value:0, period:1000, lastTick:0, paused:false}
             : kind==='DFF'   ? {q:0, lastClk:0} : {},
-        inputVals:  new Array(def.inputs).fill(0),
+        inputVals:  new Array(inputCount).fill(0),
         outputVals: new Array(def.outputs).fill(0),
         label: label == "none" ? String.fromCharCode(Number(ioId.slice(2)) + 64) : label,
         lastChange: 0,
@@ -223,6 +256,7 @@ defineModule('engine', ['state'], (state) => {
         delay,
         bitWidth: BIT_WIDTH_KINDS.has(kind) ? Math.max(1,Math.min(32,Math.round(bitWidth||1))) : undefined,
         displayMode: kind==='REG' ? 'bin' : undefined,
+        muxInputs: muxN,
       };
       components.set(id, comp);
       if (ioId != '') {
@@ -392,7 +426,7 @@ defineModule('engine', ['state'], (state) => {
       // pendingValue for their travel time below.
       for (const c of components.values()) {
         const def = GATE_DEFS[c.kind];
-        const outs = def.compute(c.inputVals, c.state, c.bitWidth||1)||[];
+        const outs = def.compute(c.inputVals, c.state, c.bitWidth||1, c)||[];
         if (!c.pendingOutputVals) c.pendingOutputVals = [];
         if (!c.pendingOutputStart) c.pendingOutputStart = [];
         for (let i=0;i<outs.length;i++) {
@@ -445,7 +479,7 @@ defineModule('engine', ['state'], (state) => {
       }
       // Reset inputs from wires
       const acc = new Map();
-      for (const c of components.values()) acc.set(c.id, new Array(GATE_DEFS[c.kind].inputs).fill(0));
+      for (const c of components.values()) acc.set(c.id, new Array(compInputCount(c)).fill(0));
       for (const w of wires.values()) {
         if (!isWireTerminal(w.to)) continue;
         const a = acc.get(w.to.compId);
@@ -460,7 +494,7 @@ defineModule('engine', ['state'], (state) => {
 
     function serialize() {
       return {
-        components: [...components.values()].map(c=>({id:c.id,ioId:c.ioId,kind:c.kind,x:c.x,y:c.y,facing:c.facing,delay:c.delay,label:c.label,bitWidth:c.bitWidth,displayMode:c.displayMode,
+        components: [...components.values()].map(c=>({id:c.id,ioId:c.ioId,kind:c.kind,x:c.x,y:c.y,facing:c.facing,delay:c.delay,label:c.label,bitWidth:c.bitWidth,displayMode:c.displayMode,muxInputs:c.muxInputs,
           state:c.kind==='INPUT'?{value:c.state.value}:c.kind==='CLOCK'?{period:c.state.period,paused:c.state.paused}:{}})),
         wires: [...wires.values()].map(w=>({id:w.id,from:w.from,to:w.to,points:w.points||[]})),
         junctions: [...junctions],
@@ -479,7 +513,7 @@ defineModule('engine', ['state'], (state) => {
       // temp id first, then assign real ids and populate the maps once.
       const builtComponents = [];
       for (const cd of data.components||[]) {
-        const c=addComponent(cd.kind,cd.x,cd.y,cd.facing,cd.delay,undefined,cd.bitWidth); components.delete(c.id); ioComponents.delete(c.ioId);
+        const c=addComponent(cd.kind,cd.x,cd.y,cd.facing,cd.delay,undefined,cd.bitWidth,cd.muxInputs); components.delete(c.id); ioComponents.delete(c.ioId);
         if(cd.label!==undefined) c.label=cd.label;
         if(cd.displayMode!==undefined) c.displayMode=cd.displayMode;
         if(cd.state) Object.assign(c.state,cd.state);
@@ -523,6 +557,23 @@ defineModule('engine', ['state'], (state) => {
       setDisplayMode(id,mode){
         const c=components.get(id); if(!c||c.kind!=='REG') return;
         c.displayMode = mode==='hex' ? 'hex' : 'bin';
+      },
+      setMuxInputs(id,n){
+        const c=components.get(id); if(!c||c.kind!=='MUX') return;
+        const newN=Math.max(2,Math.min(4,Math.round(n)||2));
+        const oldN=c.muxInputs||2;
+        if (newN===oldN) return;
+        c.muxInputs=newN;
+        // Select always sits at index === the input count, so it moves as
+        // arity changes — a wire feeding it should follow to the new index
+        // rather than silently become a data-line wire. Data pins beyond the
+        // new count no longer exist at all, so their wires are dropped the
+        // same way removeComponent drops a deleted component's wires.
+        for (const [wid,w] of wires) {
+          if (w.to.compId!==id || typeof w.to.pin!=='number') continue;
+          if (w.to.pin===oldN) w.to={...w.to, pin:newN};
+          else if (w.to.pin>=newN && w.to.pin<oldN) wires.delete(wid);
+        }
       },
       toggleClock(id){const c=components.get(id);if(c&&c.kind==='CLOCK'){c.state.paused=!c.state.paused;if(!c.state.paused)c.state.lastTick=performance.now();}},
       setClockPeriod(id,p){const c=components.get(id);if(c&&c.kind==='CLOCK')c.state.period=p;},
