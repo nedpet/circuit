@@ -244,8 +244,21 @@ defineModule('gates', ['engine'], (engine) => {
   VIS.SRFF = {w:80,h:80,  inputs:[{x:0,y:20},{x:0,y:60}],            outputs:[{x:80,y:40}], body:(f,comp)=><g>{pendingBar(comp)}{ffRect(f,80)}{ffTxt(14,24,'S')}{ffTxt(14,64,'R')}{ffTxt(66,44,'Q')}{ffSub('SR')}</g>};
   VIS.JKFF = {w:80,h:120, inputs:[{x:0,y:20},{x:0,y:60},{x:0,y:100}],outputs:[{x:80,y:40}], body:(f,comp)=><g>{pendingBar(comp)}{ffRect(f,120)}{ffTxt(14,24,'J')}{ffTxt(14,64,'K')}{ffTxt(14,104,'▷')}{ffTxt(66,44,'Q')}<text x="40" y="114" fontFamily="var(--ui)" fontSize="9" textAnchor="middle" fill="var(--ink)" opacity="0.38">JK</text></g>};
 
-  VIS.REG =  {w:80,h:80,  inputs:[{x:0,y:20},{x:0,y:40},{x:0,y:60},{x:40,y:84,dir:'down'}], outputs:[{x:80,y:40}], 
-    body:(f,comp)=><g>
+  // REG's D input and Q output are the only pins that scale with bitWidth
+  // (EN/CLK/RESET stay 1-bit control lines — enforced in engine.js), so only
+  // the little value readout above the box needs to grow; the box itself and
+  // its pin layout stay fixed, unlike INPUT/OUTPUT's whole-body resize.
+  function regValueText(value, bitWidth, mode) {
+    const v = (value||0) >>> 0;
+    if (mode === 'hex') return v.toString(16).toUpperCase().padStart(Math.ceil(bitWidth/4), '0');
+    return v.toString(2).padStart(bitWidth, '0');
+  }
+  const REG_CHAR_W=7, REG_VAL_PAD=6;
+  VIS.REG =  {w:80,h:80,  inputs:[{x:0,y:20},{x:0,y:40},{x:0,y:60},{x:40,y:84,dir:'down'}], outputs:[{x:80,y:40}],
+    body:(f,comp)=>{
+      const bw=comp.bitWidth||1, text=regValueText(comp.state.q, bw, comp.displayMode||'bin');
+      const valW=Math.max(12, text.length*REG_CHAR_W + REG_VAL_PAD*2);
+      return <g>
       {pendingBar(comp)}
       {ffRect(f,80)}
       {ffTxt(10,24,'D')}
@@ -253,10 +266,11 @@ defineModule('gates', ['engine'], (engine) => {
       {ffTxt(10,64,'▷')}
       {ffTxt(36,70,'R')}
       {ffTxt(64,44,'Q')}
-      <rect x="34" y="-14" width="12" height="16" rx="2" fill="var(--low)" opacity="0.75"/>
-      <text x="40" y="-2" fontFamily="var(--mono)" fontSize="11" fontWeight="600" textAnchor="middle" fill="var(--ink)" opacity="0.45">{comp.state.q?'1':'0'}</text>
+      <rect x={40-valW/2} y="-14" width={valW} height="16" rx="2" fill="var(--low)" opacity="0.75"/>
+      <text x="40" y="-2" fontFamily="var(--mono)" fontSize="11" fontWeight="600" textAnchor="middle" fill="var(--ink)" opacity="0.45">{text}</text>
       <text x="40" y="44" fontFamily="var(--ui)" fontSize="9" textAnchor="middle" fill="var(--ink)" opacity="0.38">REG</text>
-    </g>};
+    </g>;
+    }};
 
   // Per-pin facing: each pin stub normally points 'left' (inputs) or 'right'
   // (outputs) toward the gate body, but a pin can override this with its own
@@ -741,6 +755,28 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
       </div>
     )
   })() : null;
+  const regPanel = selComp?.kind==='REG' ? (()=>{
+    return (
+      <div className="prop-panel" onMouseDown={e=>e.stopPropagation()}>
+        <div className="prop-title">REG Properties</div>
+        <div className="prop-option">
+          <span className="prop-label">Bits</span>
+          <input  className="prop-input" type="number" min="1" max="32"
+                  value={selComp.bitWidth||1}
+                  onChange={e=>{circuit.setBitWidth(selComp.id,Number(e.target.value));onComponentChanged?.();}}/>
+        </div>
+        <div className="prop-option">
+          <span className="prop-label">Format</span>
+          <select className="prop-input"
+                  value={selComp.displayMode||'bin'}
+                  onChange={e=>{circuit.setDisplayMode(selComp.id,e.target.value);onComponentChanged?.();}}>
+            <option value="bin">Binary</option>
+            <option value="hex">Hexadecimal</option>
+          </select>
+        </div>
+      </div>
+    )
+  })() : null;
 
   return <>
     <svg ref={svgRef} className="canvas"
@@ -878,6 +914,7 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
     {clockPanel}
     {ioPanel}
     {gatePanel}
+    {regPanel}
   </>;
 }
 

@@ -11,14 +11,21 @@ defineModule('engine', ['state'], (state) => {
   function maskVal(v, width) { return (v & bitMask(width)) >>> 0; }
 
   // Kinds whose per-instance `bitWidth` is user-configurable (MUX and the
-  // sequential/misc kinds are intentionally excluded for now).
-  const BIT_WIDTH_KINDS = new Set(['INPUT','OUTPUT','AND','OR','NOT','NAND','NOR','XOR','XNOR']);
+  // other sequential kinds are intentionally excluded for now).
+  const BIT_WIDTH_KINDS = new Set(['INPUT','OUTPUT','AND','OR','NOT','NAND','NOR','XOR','XNOR','REG']);
 
-  // Every pin on a component shares that component's single bitWidth (no
-  // per-pin widths); kinds outside BIT_WIDTH_KINDS (MUX, flip-flops, REG,
-  // SEVEN, CLOCK) only ever handle 1-bit values on all their pins.
-  function pinBitWidth(comp) {
-    return comp && BIT_WIDTH_KINDS.has(comp.kind) ? (comp.bitWidth||1) : 1;
+  // Most BIT_WIDTH_KINDS share one width across every pin, but REG's D input
+  // and Q output are the only ones meant to carry a bus — EN/CLK/RESET stay
+  // control lines and must stay 1-bit regardless of the component's bitWidth.
+  const FIXED_WIDTH_PINS = { REG: { in: new Set([1,2,3]) } };
+
+  // Kinds outside BIT_WIDTH_KINDS (MUX, flip-flops other than REG, SEVEN,
+  // CLOCK) only ever handle 1-bit values on all their pins.
+  function pinBitWidthAt(comp, dir, idx) {
+    if (!comp) return 1;
+    const fixed = FIXED_WIDTH_PINS[comp.kind];
+    if (fixed && fixed[dir] && fixed[dir].has(idx)) return 1;
+    return BIT_WIDTH_KINDS.has(comp.kind) ? (comp.bitWidth||1) : 1;
   }
 
   const GATE_DEFS = {
@@ -47,7 +54,9 @@ defineModule('engine', ['state'], (state) => {
     SRFF:   { kind:'SRFF', label:'SR-FF', inputs:2, outputs:1, family:'seq',
               compute:([s2,r],s)=>{ if(s2&&!r)s.q=1; else if(r&&!s2)s.q=0; return[s.q||0]; } },
     REG:    { kind:'REG',  label:'REG',   inputs:4, outputs:1, family:'misc',
-              compute:([d,en,clk,res],s)=>{ const r=clk&&!s.lastClk; s.lastClk=clk; if(res)s.q=0; else if(r&&en)s.q=d; return[s.q||0]; } },
+              // Only D (in) and Q (out) scale with bitWidth — EN/CLK/RESET
+              // are fixed 1-bit control lines (see FIXED_WIDTH_PINS.REG).
+              compute:([d,en,clk,res],s,w)=>{ const r=clk&&!s.lastClk; s.lastClk=clk; if(res)s.q=0; else if(r&&en)s.q=maskVal(d||0,w||1); return[s.q||0]; } },
   };
 
   // ── Pure wire geometry helpers ──────────────────────────────────────────
@@ -213,6 +222,7 @@ defineModule('engine', ['state'], (state) => {
         facing,
         delay,
         bitWidth: BIT_WIDTH_KINDS.has(kind) ? Math.max(1,Math.min(32,Math.round(bitWidth||1))) : undefined,
+        displayMode: kind==='REG' ? 'bin' : undefined,
       };
       components.set(id, comp);
       if (ioId != '') {
@@ -268,7 +278,7 @@ defineModule('engine', ['state'], (state) => {
       if (seen.has(wire.id)) return null;
       seen.add(wire.id);
       if (isWireTerminal(wire.from)) {
-        return pinBitWidth(circuit.components.get(wire.from.compId));
+        return pinBitWidthAt(circuit.components.get(wire.from.compId), 'out', wire.from.pin);
       }
       if (typeof wire.from.x === 'number' && typeof wire.from.y === 'number') {
         for (const j of circuit.junctions) {
@@ -290,7 +300,7 @@ defineModule('engine', ['state'], (state) => {
       if (!dst) return false;
       const srcWidth = wireSourceBitWidth(wire, circuit);
       if (srcWidth == null) return false;
-      return srcWidth !== pinBitWidth(dst);
+      return srcWidth !== pinBitWidthAt(dst, 'in', wire.to.pin);
     }
 
     function wireSourceValue(wire, circuit, now, instant) {
@@ -450,7 +460,7 @@ defineModule('engine', ['state'], (state) => {
 
     function serialize() {
       return {
-        components: [...components.values()].map(c=>({id:c.id,ioId:c.ioId,kind:c.kind,x:c.x,y:c.y,facing:c.facing,delay:c.delay,label:c.label,bitWidth:c.bitWidth,
+        components: [...components.values()].map(c=>({id:c.id,ioId:c.ioId,kind:c.kind,x:c.x,y:c.y,facing:c.facing,delay:c.delay,label:c.label,bitWidth:c.bitWidth,displayMode:c.displayMode,
           state:c.kind==='INPUT'?{value:c.state.value}:c.kind==='CLOCK'?{period:c.state.period,paused:c.state.paused}:{}})),
         wires: [...wires.values()].map(w=>({id:w.id,from:w.from,to:w.to,points:w.points||[]})),
         junctions: [...junctions],
@@ -471,6 +481,7 @@ defineModule('engine', ['state'], (state) => {
       for (const cd of data.components||[]) {
         const c=addComponent(cd.kind,cd.x,cd.y,cd.facing,cd.delay,undefined,cd.bitWidth); components.delete(c.id); ioComponents.delete(c.ioId);
         if(cd.label!==undefined) c.label=cd.label;
+        if(cd.displayMode!==undefined) c.displayMode=cd.displayMode;
         if(cd.state) Object.assign(c.state,cd.state);
         builtComponents.push({c,cd});
       }
@@ -507,6 +518,11 @@ defineModule('engine', ['state'], (state) => {
         const width=Math.max(1,Math.min(32,Math.round(w)||1));
         c.bitWidth=width;
         if (c.kind==='INPUT') c.state.value = maskVal(c.state.value||0, width);
+        if (c.kind==='REG') c.state.q = maskVal(c.state.q||0, width);
+      },
+      setDisplayMode(id,mode){
+        const c=components.get(id); if(!c||c.kind!=='REG') return;
+        c.displayMode = mode==='hex' ? 'hex' : 'bin';
       },
       toggleClock(id){const c=components.get(id);if(c&&c.kind==='CLOCK'){c.state.paused=!c.state.paused;if(!c.state.paused)c.state.lastTick=performance.now();}},
       setClockPeriod(id,p){const c=components.get(id);if(c&&c.kind==='CLOCK')c.state.period=p;},
