@@ -288,18 +288,37 @@ defineModule('gates', ['engine'], (engine) => {
       const bw=comp.bitWidth||1, text=regValueText(comp.state.q, bw, comp.displayMode||'bin');
       const valW=Math.max(12, text.length*REG_CHAR_W + REG_VAL_PAD*2);
       return <g>
-      {pendingBar(comp)}
-      {ffRect(f,80)}
-      {ffTxt(10,24,'D')}
-      {ffTxt(10,44,'EN')}
-      {ffTxt(10,64,'▷')}
-      {ffTxt(36,70,'R')}
-      {ffTxt(64,44,'Q')}
-      <rect x={40-valW/2} y="-14" width={valW} height="16" rx="2" fill="var(--low)" opacity="0.75"/>
-      <text x="40" y="-2" fontFamily="var(--mono)" fontSize="11" fontWeight="600" textAnchor="middle" fill="var(--ink)" opacity="0.45">{text}</text>
-      <text x="40" y="44" fontFamily="var(--ui)" fontSize="9" textAnchor="middle" fill="var(--ink)" opacity="0.38">REG</text>
-    </g>;
+        {pendingBar(comp)}
+        {ffRect(f,80)}
+        {ffTxt(10,24,'D')}
+        {ffTxt(10,44,'EN')}
+        {ffTxt(10,64,'▷')}
+        {ffTxt(36,70,'R')}
+        {ffTxt(64,44,'Q')}
+        <rect x={40-valW/2} y="-14" width={valW} height="16" rx="2" fill="var(--low)" opacity="0.75"/>
+        <text x="40" y="-2" fontFamily="var(--mono)" fontSize="11" fontWeight="600" textAnchor="middle" fill="var(--ink)" opacity="0.45">{text}</text>
+        <text x="40" y="44" fontFamily="var(--ui)" fontSize="9" textAnchor="middle" fill="var(--ink)" opacity="0.38">REG</text>
+      </g>;
     }};
+
+  VIS.SHFT = {w:80,h:80,  inputs:[{x:0,y:20},{x:0,y:60}], outputs:[{x:80,y:40}],
+      body:(f,comp)=>{
+        return <g>
+          {ffRect(f,80)}
+          <text x="40" y="44" fontFamily="var(--ui)" fontSize="9" textAnchor="middle" fill="var(--ink)" opacity="0.38">SHIFT</text>
+          <path d="M 57 41 L 63 37 L 63 39 L 68 39 L 68 43 L 63 43 L 63 45 Z" fill="var(--ink)" opacity="0.85"/>
+        </g>;
+      }};
+
+  // Single in/out (unlike SHFT's value+shift-amount pair), centered to match
+  // the output's y=40 — GATE_DEFS.EXTND has inputs:1.
+  VIS.EXTND = {w:80,h:80,  inputs:[{x:0,y:40}], outputs:[{x:80,y:40}],
+      body:(f,comp)=>{
+        return <g>
+          {ffRect(f,80)}
+          <text x="40" y="44" fontFamily="var(--ui)" fontSize="9" textAnchor="middle" fill="var(--ink)" opacity="0.38">EXTEND</text>
+        </g>;
+      }};
 
   // Per-pin facing: each pin stub normally points 'left' (inputs) or 'right'
   // (outputs) toward the gate body, but a pin can override this with its own
@@ -753,16 +772,29 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
       </div>
     )
   })() : null;
-  const gatePanel = ['NOT', 'AND','OR','NAND','NOR','XOR','XNOR','MUX'].includes(selComp?.kind) ? (()=>{
+  const gatePanel = ['NOT', 'AND','OR','NAND','NOR','XOR','XNOR','MUX','SHFT','EXTND'].includes(selComp?.kind) ? (()=>{
     return (
       <div className="prop-panel" onMouseDown={e=>e.stopPropagation()}>
         <div className="prop-title">{selComp.kind} Properties</div>
-        <div className="prop-option">
+        {selComp.kind==='EXTND' ? <>
+          <div className="prop-option">
+            <span className="prop-label">Bits In</span>
+            <input  className="prop-input" type="number" min="1" max="32"
+                    value={selComp.bitWidthIn||1}
+                    onChange={e=>{circuit.setExtBitWidthIn(selComp.id,Number(e.target.value));onComponentChanged?.();}}/>
+          </div>
+          <div className="prop-option">
+            <span className="prop-label">Bits Out</span>
+            <input  className="prop-input" type="number" min="1" max="32"
+                    value={selComp.bitWidthOut||1}
+                    onChange={e=>{circuit.setExtBitWidthOut(selComp.id,Number(e.target.value));onComponentChanged?.();}}/>
+          </div>
+        </> : <div className="prop-option">
           <span className="prop-label">Bits</span>
           <input  className="prop-input" type="number" min="1" max="32"
                   value={selComp.bitWidth||1}
                   onChange={e=>{circuit.setBitWidth(selComp.id,Number(e.target.value));onComponentChanged?.();}}/>
-        </div>
+        </div>}
         {selComp.kind==='MUX' && <div className="prop-option">
           <span className="prop-label">Inputs</span>
           <select className="prop-input"
@@ -990,7 +1022,7 @@ const GROUPS=[
   {title:'Sinks',     kinds:['OUTPUT', 'SEVEN']},
   {title:'Logic',     kinds:['AND','OR','NOT','NAND','NOR','XOR','XNOR','MUX']},
   {title:'Flip-flops',kinds:['DFF','TFF','JKFF','SRFF']},
-  {title:'Miscellaneous',kinds:['REG']}, //temp
+  {title:'Miscellaneous',kinds:['REG', 'SHFT', 'EXTND']}, //temp
   {title:'Custom',    kinds:[]},
 ];
 function Thumb({kind}){

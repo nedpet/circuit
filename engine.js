@@ -12,7 +12,7 @@ defineModule('engine', ['state'], (state) => {
 
   // Kinds whose per-instance `bitWidth` is user-configurable (the remaining
   // sequential kinds are intentionally excluded for now).
-  const BIT_WIDTH_KINDS = new Set(['INPUT','OUTPUT','AND','OR','NOT','NAND','NOR','XOR','XNOR','REG','MUX']);
+  const BIT_WIDTH_KINDS = new Set(['INPUT','OUTPUT','AND','OR','NOT','NAND','NOR','XOR','XNOR','REG','MUX','SHFT']);
 
   // Most BIT_WIDTH_KINDS share one width across every pin, but REG's D input
   // and Q output are the only ones meant to carry a bus — EN/CLK/RESET stay
@@ -26,6 +26,24 @@ defineModule('engine', ['state'], (state) => {
   // last input pin), one past the last data line.
   function muxSelectWidth(muxInputs) { return (muxInputs||2) <= 2 ? 1 : 2; }
 
+  // SHFT's shift-amount input (in1) only ever needs enough bits to address
+  // every position in the value being shifted (in0/out, bitWidth wide) — a
+  // standard barrel-shifter select width, derived rather than configurable.
+  // bitWidth 1 has no meaningful shift amount, so it's floored at 1 bit.
+  function shiftAmountWidth(bitWidth) { return Math.max(1, Math.ceil(Math.log2(Math.max(1,bitWidth||1)))); }
+
+  // Sign-extends (or truncates) v — read as a two's-complement number in
+  // fromWidth bits — into a toWidth-bit two's-complement reading. Going
+  // through a signed intermediate (instead of just re-masking) is what makes
+  // the top bits repeat the sign rather than zero-fill.
+  function signExtend(v, fromWidth, toWidth) {
+    const masked = maskVal(v, fromWidth);
+    const half = Math.pow(2, fromWidth-1);
+    const signed = masked >= half ? masked - Math.pow(2, fromWidth) : masked;
+    const reencoded = signed < 0 ? signed + Math.pow(2, toWidth) : signed;
+    return maskVal(reencoded, toWidth);
+  }
+
   // Kinds outside BIT_WIDTH_KINDS (flip-flops other than REG, SEVEN, CLOCK)
   // only ever handle 1-bit values on all their pins.
   function pinBitWidthAt(comp, dir, idx) {
@@ -34,6 +52,17 @@ defineModule('engine', ['state'], (state) => {
       const n = comp.muxInputs || 2;
       if (dir === 'in' && idx === n) return muxSelectWidth(n);
       return comp.bitWidth || 1;
+    }
+    if (comp.kind === 'SHFT') {
+      if (dir === 'in' && idx === 1) return shiftAmountWidth(comp.bitWidth);
+      return comp.bitWidth || 1;
+    }
+    // EXTND has two independently configurable widths rather than one
+    // shared bitWidth — in0 follows bitWidthIn, the output follows
+    // bitWidthOut (EXTND is deliberately left out of BIT_WIDTH_KINDS since
+    // that set means "one shared comp.bitWidth", which doesn't apply here).
+    if (comp.kind === 'EXTND') {
+      return dir === 'in' ? (comp.bitWidthIn||1) : (comp.bitWidthOut||1);
     }
     const fixed = FIXED_WIDTH_PINS[comp.kind];
     if (fixed && fixed[dir] && fixed[dir].has(idx)) return 1;
@@ -82,10 +111,25 @@ defineModule('engine', ['state'], (state) => {
               compute:([j,k,clk],s)=>{ const r=clk&&!s.lastClk; s.lastClk=clk; if(r){if(j&&k)s.q=s.q?0:1; else if(j)s.q=1; else if(k)s.q=0;} return[s.q||0]; } },
     SRFF:   { kind:'SRFF', label:'SR-FF', inputs:2, outputs:1, family:'seq',
               compute:([s2,r],s)=>{ if(s2&&!r)s.q=1; else if(r&&!s2)s.q=0; return[s.q||0]; } },
-    REG:    { kind:'REG',  label:'REG',   inputs:4, outputs:1, family:'misc',
-              // Only D (in) and Q (out) scale with bitWidth — EN/CLK/RESET
-              // are fixed 1-bit control lines (see FIXED_WIDTH_PINS.REG).
+    REG:    { kind:'REG',  label:'REGISTER',   inputs:4, outputs:1, family:'misc',
               compute:([d,en,clk,res],s,w)=>{ const r=clk&&!s.lastClk; s.lastClk=clk; if(res)s.q=0; else if(r&&en)s.q=maskVal(d||0,w||1); return[s.q||0]; } },
+    // in0 (value) and out follow bitWidth; in1 (shift amount) is masked to
+    // its own derived width so an unmasked/oversized value can't produce a
+    // shift larger than the barrel actually supports.
+    SHFT:   { kind:'SHFT', label:'SHIFTER',  inputs:2, outputs:1, family:'misc',
+              compute:([a,b],s,w) => {
+                const amt = (b||0) & bitMask(shiftAmountWidth(w||1));
+                return [maskVal((a||0)*(2**amt),w||1)];
+              } } ,
+    // Independently configurable in/out widths (bitWidthIn/bitWidthOut) live
+    // on the comp itself rather than a single shared bitWidth, so compute
+    // reads them off `comp` (4th arg) instead of the generic `w` width param.
+    EXTND:  { kind:'EXTND', label:'EXTENDER', inputs:1, outputs:1, family:'misc',
+              compute:([a],s,w,comp) => {
+                const fromW = (comp&&comp.bitWidthIn)||1;
+                const toW = (comp&&comp.bitWidthOut)||1;
+                return [signExtend(a||0, fromW, toW)];
+              } } ,
   };
 
   // ── Pure wire geometry helpers ──────────────────────────────────────────
@@ -235,7 +279,7 @@ defineModule('engine', ['state'], (state) => {
     const wires = new Map();
     const junctions = new Set(); // {x, y, sourceWireId}
 
-    function addComponent(kind, x, y, facing = "right", delay = 0, label = "none", bitWidth, muxInputs) {
+    function addComponent(kind, x, y, facing = "right", delay = 0, label = "none", bitWidth, muxInputs, bitWidthIn, bitWidthOut) {
       const def = GATE_DEFS[kind];
       const id = 'c'+(nextId++);
       const ioId = kind==='INPUT' || kind==='OUTPUT' ? 'io'+(nextIoId++) : ''
@@ -257,6 +301,8 @@ defineModule('engine', ['state'], (state) => {
         bitWidth: BIT_WIDTH_KINDS.has(kind) ? Math.max(1,Math.min(32,Math.round(bitWidth||1))) : undefined,
         displayMode: kind==='REG' ? 'bin' : undefined,
         muxInputs: muxN,
+        bitWidthIn:  kind==='EXTND' ? Math.max(1,Math.min(32,Math.round(bitWidthIn||1)))  : undefined,
+        bitWidthOut: kind==='EXTND' ? Math.max(1,Math.min(32,Math.round(bitWidthOut||1))) : undefined,
       };
       components.set(id, comp);
       if (ioId != '') {
@@ -494,7 +540,7 @@ defineModule('engine', ['state'], (state) => {
 
     function serialize() {
       return {
-        components: [...components.values()].map(c=>({id:c.id,ioId:c.ioId,kind:c.kind,x:c.x,y:c.y,facing:c.facing,delay:c.delay,label:c.label,bitWidth:c.bitWidth,displayMode:c.displayMode,muxInputs:c.muxInputs,
+        components: [...components.values()].map(c=>({id:c.id,ioId:c.ioId,kind:c.kind,x:c.x,y:c.y,facing:c.facing,delay:c.delay,label:c.label,bitWidth:c.bitWidth,displayMode:c.displayMode,muxInputs:c.muxInputs,bitWidthIn:c.bitWidthIn,bitWidthOut:c.bitWidthOut,
           state:c.kind==='INPUT'?{value:c.state.value}:c.kind==='CLOCK'?{period:c.state.period,paused:c.state.paused}:{}})),
         wires: [...wires.values()].map(w=>({id:w.id,from:w.from,to:w.to,points:w.points||[]})),
         junctions: [...junctions],
@@ -513,7 +559,7 @@ defineModule('engine', ['state'], (state) => {
       // temp id first, then assign real ids and populate the maps once.
       const builtComponents = [];
       for (const cd of data.components||[]) {
-        const c=addComponent(cd.kind,cd.x,cd.y,cd.facing,cd.delay,undefined,cd.bitWidth,cd.muxInputs); components.delete(c.id); ioComponents.delete(c.ioId);
+        const c=addComponent(cd.kind,cd.x,cd.y,cd.facing,cd.delay,undefined,cd.bitWidth,cd.muxInputs,cd.bitWidthIn,cd.bitWidthOut); components.delete(c.id); ioComponents.delete(c.ioId);
         if(cd.label!==undefined) c.label=cd.label;
         if(cd.displayMode!==undefined) c.displayMode=cd.displayMode;
         if(cd.state) Object.assign(c.state,cd.state);
@@ -553,6 +599,14 @@ defineModule('engine', ['state'], (state) => {
         c.bitWidth=width;
         if (c.kind==='INPUT') c.state.value = maskVal(c.state.value||0, width);
         if (c.kind==='REG') c.state.q = maskVal(c.state.q||0, width);
+      },
+      setExtBitWidthIn(id,w){
+        const c=components.get(id); if(!c||c.kind!=='EXTND') return;
+        c.bitWidthIn=Math.max(1,Math.min(32,Math.round(w)||1));
+      },
+      setExtBitWidthOut(id,w){
+        const c=components.get(id); if(!c||c.kind!=='EXTND') return;
+        c.bitWidthOut=Math.max(1,Math.min(32,Math.round(w)||1));
       },
       setDisplayMode(id,mode){
         const c=components.get(id); if(!c||c.kind!=='REG') return;
