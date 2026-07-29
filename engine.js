@@ -27,6 +27,8 @@ defineModule('engine', ['state'], (state) => {
               compute:([j,k,clk],s)=>{ const r=clk&&!s.lastClk; s.lastClk=clk; if(r){if(j&&k)s.q=s.q?0:1; else if(j)s.q=1; else if(k)s.q=0;} return[s.q||0]; } },
     SRFF:   { kind:'SRFF', label:'SR-FF', inputs:2, outputs:1, family:'seq',
               compute:([s2,r],s)=>{ if(s2&&!r)s.q=1; else if(r&&!s2)s.q=0; return[s.q||0]; } },
+    REG:    { kind:'REG',  label:'REG',   inputs:4, outputs:1, family:'misc',
+              compute:([d,en,clk,res],s)=>{ const r=clk&&!s.lastClk; s.lastClk=clk; if(res)s.q=0; else if(r&&en)s.q=d; return[s.q||0]; } },
   };
 
   // ── Pure wire geometry helpers ──────────────────────────────────────────

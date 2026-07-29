@@ -179,6 +179,20 @@ defineModule('gates', ['engine'], (engine) => {
   VIS.SRFF = {w:80,h:80,  inputs:[{x:0,y:20},{x:0,y:60}],            outputs:[{x:80,y:40}], body:(f,comp)=><g>{pendingBar(comp)}{ffRect(f,80)}{ffTxt(14,24,'S')}{ffTxt(14,64,'R')}{ffTxt(66,44,'Q')}{ffSub('SR')}</g>};
   VIS.JKFF = {w:80,h:120, inputs:[{x:0,y:20},{x:0,y:60},{x:0,y:100}],outputs:[{x:80,y:40}], body:(f,comp)=><g>{pendingBar(comp)}{ffRect(f,120)}{ffTxt(14,24,'J')}{ffTxt(14,64,'K')}{ffTxt(14,104,'▷')}{ffTxt(66,44,'Q')}<text x="40" y="114" fontFamily="var(--ui)" fontSize="9" textAnchor="middle" fill="var(--ink)" opacity="0.38">JK</text></g>};
 
+  VIS.REG =  {w:80,h:80,  inputs:[{x:0,y:20},{x:0,y:40},{x:0,y:60},{x:40,y:84,dir:'down'}], outputs:[{x:80,y:40}], 
+    body:(f,comp)=><g>
+      {pendingBar(comp)}
+      {ffRect(f,80)}
+      {ffTxt(10,24,'D')}
+      {ffTxt(10,44,'EN')}
+      {ffTxt(10,64,'▷')}
+      {ffTxt(36,70,'R')}
+      {ffTxt(64,44,'Q')}
+      <rect x="34" y="-14" width="12" height="16" rx="2" fill="var(--low)" opacity="0.75"/>
+      <text x="40" y="-2" fontFamily="var(--mono)" fontSize="11" fontWeight="600" textAnchor="middle" fill="var(--ink)" opacity="0.45">{comp.state.q?'1':'0'}</text>
+      <text x="40" y="44" fontFamily="var(--ui)" fontSize="9" textAnchor="middle" fill="var(--ink)" opacity="0.38">REG</text>
+    </g>};
+
   // Per-pin facing: each pin stub normally points 'left' (inputs) or 'right'
   // (outputs) toward the gate body, but a pin can override this with its own
   // `dir` ('left'|'right'|'up'|'down') to poke out a different side — e.g. a
@@ -807,6 +821,7 @@ const GROUPS=[
   {title:'Sinks',     kinds:['OUTPUT', 'SEVEN']},
   {title:'Logic',     kinds:['AND','OR','NOT','NAND','NOR','XOR','XNOR','MUX']},
   {title:'Flip-flops',kinds:['DFF','TFF','JKFF','SRFF']},
+  {title:'Miscellaneous',kinds:['REG']}, //temp
   {title:'Custom',    kinds:[]},
 ];
 function Thumb({kind}){
