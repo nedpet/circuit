@@ -299,7 +299,7 @@ defineModule('engine', ['state'], (state) => {
         facing,
         delay,
         bitWidth: BIT_WIDTH_KINDS.has(kind) ? Math.max(1,Math.min(32,Math.round(bitWidth||1))) : undefined,
-        displayMode: kind==='REG' ? 'bin' : undefined,
+        displayMode: kind==='REG' || kind==='OUTPUT' || kind==='INPUT' ? 'bin' : undefined,
         muxInputs: muxN,
         bitWidthIn:  kind==='EXTND' ? Math.max(1,Math.min(32,Math.round(bitWidthIn||1)))  : undefined,
         bitWidthOut: kind==='EXTND' ? Math.max(1,Math.min(32,Math.round(bitWidthOut||1))) : undefined,
@@ -593,6 +593,17 @@ defineModule('engine', ['state'], (state) => {
         if (bit<0||bit>=width) return;
         c.state.value = ((c.state.value||0) ^ (1<<bit)) >>> 0;
       },
+      // Hex-mode cell click: bumps just its own nibble by 1 (wrapping 0xF->0)
+      // and leaves every other nibble untouched, then re-masks to bitWidth so
+      // a wrap on a partial top nibble can't leak bits past the pin's width.
+      incrementInputDigit(id,shift){
+        const c=components.get(id); if(!c||c.kind!=='INPUT') return;
+        const width=c.bitWidth||1;
+        const v=c.state.value||0;
+        const nibble=(v>>>shift)&0xF;
+        const cleared=v & ~(0xF<<shift);
+        c.state.value = maskVal((cleared | (((nibble+1)&0xF)<<shift))>>>0, width);
+      },
       setBitWidth(id,w){
         const c=components.get(id); if(!c||!BIT_WIDTH_KINDS.has(c.kind)) return;
         const width=Math.max(1,Math.min(32,Math.round(w)||1));
@@ -609,7 +620,7 @@ defineModule('engine', ['state'], (state) => {
         c.bitWidthOut=Math.max(1,Math.min(32,Math.round(w)||1));
       },
       setDisplayMode(id,mode){
-        const c=components.get(id); if(!c||c.kind!=='REG') return;
+        const c=components.get(id); if(!c||(c.kind!=='REG'&&c.kind!=='OUTPUT'&&c.kind!=='INPUT')) return;
         c.displayMode = mode==='hex' ? 'hex' : 'bin';
       },
       setMuxInputs(id,n){
