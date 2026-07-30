@@ -115,11 +115,24 @@ defineModule('engine', ['state'], (state) => {
               compute:([d,en,clk,res],s,w)=>{ const r=clk&&!s.lastClk; s.lastClk=clk; if(res)s.q=0; else if(r&&en)s.q=maskVal(d||0,w||1); return[s.q||0]; } },
     // in0 (value) and out follow bitWidth; in1 (shift amount) is masked to
     // its own derived width so an unmasked/oversized value can't produce a
-    // shift larger than the barrel actually supports.
+    // shift larger than the barrel actually supports. comp.shiftMode picks
+    // the direction/fill: 'left' (logical, zero-fills from the low end —
+    // the original/default behavior), 'right' (logical, zero-fills from the
+    // high end), or 'arith' (right shift that repeats the sign bit instead
+    // of zero-filling, per two's-complement reading of the w-bit value).
     SHFT:   { kind:'SHFT', label:'SHIFTER',  inputs:2, outputs:1, family:'misc',
-              compute:([a,b],s,w) => {
-                const amt = (b||0) & bitMask(shiftAmountWidth(w||1));
-                return [maskVal((a||0)*(2**amt),w||1)];
+              compute:([a,b],s,w,comp) => {
+                const width = w||1;
+                const amt = (b||0) & bitMask(shiftAmountWidth(width));
+                const av = maskVal(a||0, width);
+                const mode = (comp&&comp.shiftMode) || 'left';
+                if (mode==='right') return [maskVal(av >>> amt, width)];
+                if (mode==='arith') {
+                  const half = Math.pow(2,width-1);
+                  const signed = av>=half ? av-Math.pow(2,width) : av;
+                  return [maskVal(Math.floor(signed/Math.pow(2,amt)), width)];
+                }
+                return [maskVal(av*(2**amt), width)];
               } } ,
     // Independently configurable in/out widths (bitWidthIn/bitWidthOut) live
     // on the comp itself rather than a single shared bitWidth, so compute
@@ -300,6 +313,7 @@ defineModule('engine', ['state'], (state) => {
         delay,
         bitWidth: BIT_WIDTH_KINDS.has(kind) ? Math.max(1,Math.min(32,Math.round(bitWidth||1))) : undefined,
         displayMode: kind==='REG' || kind==='OUTPUT' || kind==='INPUT' ? 'bin' : undefined,
+        shiftMode: kind==='SHFT' ? 'left' : undefined,
         muxInputs: muxN,
         bitWidthIn:  kind==='EXTND' ? Math.max(1,Math.min(32,Math.round(bitWidthIn||1)))  : undefined,
         bitWidthOut: kind==='EXTND' ? Math.max(1,Math.min(32,Math.round(bitWidthOut||1))) : undefined,
@@ -540,7 +554,7 @@ defineModule('engine', ['state'], (state) => {
 
     function serialize() {
       return {
-        components: [...components.values()].map(c=>({id:c.id,ioId:c.ioId,kind:c.kind,x:c.x,y:c.y,facing:c.facing,delay:c.delay,label:c.label,bitWidth:c.bitWidth,displayMode:c.displayMode,muxInputs:c.muxInputs,bitWidthIn:c.bitWidthIn,bitWidthOut:c.bitWidthOut,
+        components: [...components.values()].map(c=>({id:c.id,ioId:c.ioId,kind:c.kind,x:c.x,y:c.y,facing:c.facing,delay:c.delay,label:c.label,bitWidth:c.bitWidth,displayMode:c.displayMode,shiftMode:c.shiftMode,muxInputs:c.muxInputs,bitWidthIn:c.bitWidthIn,bitWidthOut:c.bitWidthOut,
           state:c.kind==='INPUT'?{value:c.state.value}:c.kind==='CLOCK'?{period:c.state.period,paused:c.state.paused}:{}})),
         wires: [...wires.values()].map(w=>({id:w.id,from:w.from,to:w.to,points:w.points||[]})),
         junctions: [...junctions],
@@ -562,6 +576,7 @@ defineModule('engine', ['state'], (state) => {
         const c=addComponent(cd.kind,cd.x,cd.y,cd.facing,cd.delay,undefined,cd.bitWidth,cd.muxInputs,cd.bitWidthIn,cd.bitWidthOut); components.delete(c.id); ioComponents.delete(c.ioId);
         if(cd.label!==undefined) c.label=cd.label;
         if(cd.displayMode!==undefined) c.displayMode=cd.displayMode;
+        if(cd.shiftMode!==undefined) c.shiftMode=cd.shiftMode;
         if(cd.state) Object.assign(c.state,cd.state);
         builtComponents.push({c,cd});
       }
@@ -622,6 +637,10 @@ defineModule('engine', ['state'], (state) => {
       setDisplayMode(id,mode){
         const c=components.get(id); if(!c||(c.kind!=='REG'&&c.kind!=='OUTPUT'&&c.kind!=='INPUT')) return;
         c.displayMode = mode==='hex' ? 'hex' : 'bin';
+      },
+      setShiftMode(id,mode){
+        const c=components.get(id); if(!c||c.kind!=='SHFT') return;
+        c.shiftMode = (mode==='right'||mode==='arith') ? mode : 'left';
       },
       setMuxInputs(id,n){
         const c=components.get(id); if(!c||c.kind!=='MUX') return;

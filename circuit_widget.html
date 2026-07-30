@@ -338,7 +338,11 @@ defineModule('gates', ['engine'], (engine) => {
         return <g>
           {ffRect(f,80)}
           <text x="40" y="44" fontFamily="var(--ui)" fontSize="9" textAnchor="middle" fill="var(--ink)" opacity="0.38">SHIFT</text>
-          <path d="M 34 65 L 40 61 L 40 63 L 46 63 L 46 67 L 40 67 L 40 69 Z" fill="var(--ink)" opacity="0.85"/>
+          {comp.shiftMode === "right" ? <path d="M 46 65 L 40 61 L 40 63 L 34 63 L 34 67 L 40 67 L 40 69 Z" fill="var(--ink)" opacity="0.85"/>
+            : comp.shiftMode === "arith" ? <g><path d="M 46 65 L 40 61 L 40 63 L 38 63 L 38 67 L 40 67 L 40 69 Z" fill="var(--ink)" opacity="0.85"/><path d="M 37 63 L 37 67 L 34 67 L 34 63 Z" fill="var(--ink)" opacity="0.85"/></g>
+            : <path d="M 34 65 L 40 61 L 40 63 L 46 63 L 46 67 L 40 67 L 40 69 Z" fill="var(--ink)" opacity="0.85"/>
+          }
+          
         </g>;
       }};
 
@@ -851,6 +855,16 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
             <option value="2">2</option>
             <option value="3">3</option>
             <option value="4">4</option>
+          </select>
+        </div>}
+        {selComp.kind==='SHFT' && <div className="prop-option">
+          <span className="prop-label">Mode</span>
+          <select className="prop-input"
+                  value={selComp.shiftMode||'left'}
+                  onChange={e=>{circuit.setShiftMode(selComp.id,e.target.value);onComponentChanged?.();}}>
+            <option value="left">Logical Left</option>
+            <option value="right">Logical Right</option>
+            <option value="arith">Arithmetic Right</option>
           </select>
         </div>}
         <div className="prop-option">
