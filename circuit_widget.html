@@ -864,12 +864,14 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
             <option value="down">Down</option>
           </select>
         </div>
-        <div className="tb-delay">
+        <div className="prop-option">
           <span className="prop-label">Delay</span>
-          <input type="range" min="0" max="2000" step="100"
-                 value={selComp.delay}
-                 onChange={e=>{circuit.setDelay(selComp.id,Number(e.target.value));onComponentChanged?.();}}/>
-          <span className="tb-delay-val">{selComp.delay}ms</span>
+          <div className="prop-range">
+            <input type="range" min="0" max="2000" step="100"
+                   value={selComp.delay}
+                   onChange={e=>{circuit.setDelay(selComp.id,Number(e.target.value));onComponentChanged?.();}}/>
+            <span className="tb-delay-val">{selComp.delay}ms</span>
+          </div>
         </div>
       </div>
     )

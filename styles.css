@@ -142,8 +142,30 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
   border-radius: 8px; padding: 10px 12px 8px;
   box-shadow: var(--shadow); z-index: 20;
   font-size:11.5px; min-width:148px;
+  /* Grid (not flex) so every row's label column shares one width — a row's
+     own text no longer determines where that row's input starts, which is
+     what let rows drift out of alignment with each other. */
+  display:grid; grid-template-columns:max-content 1fr; column-gap:10px; row-gap:7px; align-items:center;
 }
-.prop-title { font-weight: 600; font-size: 14px; margin-bottom: 7px;}
+.prop-title { font-weight: 600; font-size: 14px; grid-column:1/-1; }
 .prop-option  { display: flex; justify-content: space-between; align-items: center; margin-bottom: 7px;}
+/* Inside a prop-panel, a row's label/control become direct grid items
+   (columns 1/2) instead of a self-contained flex row, so they line up with
+   every other row's label/control regardless of this row's own text. */
+.prop-panel .prop-option { display:contents; margin-bottom:0; }
 .prop-label { font-weight: 600; font-size: 12px; margin-right: 7px; color: black;}
-.prop-input { width:100%; padding:8px 10px; border-radius:var(--r); border:1px solid var(--border); font:inherit; font-size:12px; background:var(--bg); color:var(--ink); outline:none; }
+.prop-panel .prop-label { margin-right:0; white-space:nowrap; }
+/* min-width:0 overrides the grid item's default automatic minimum size
+   (== its min-content), which for a text/select input is small enough to
+   not matter but for a range slider is wide enough on its own to blow past
+   the panel's fixed width — without this the slider (and the .prop-range
+   row containing it) refuses to shrink to fit the 1fr column at all. */
+.prop-input { width:100%; min-width:0; padding:8px 10px; border-radius:var(--r); border:1px solid var(--border); font:inherit; font-size:12px; background:var(--bg); color:var(--ink); outline:none; }
+.prop-range { display:flex; align-items:center; gap:7px; width:100%; min-width:0; }
+.prop-range input[type=range] { flex:1; min-width:0; accent-color:var(--high); cursor:pointer; }
+/* The base .tb-delay-val reserves 46px for up to "2000ms" — far more than a
+   6-char monospace value needs, so most of that box was just blank space
+   the slider could otherwise have used. ch sizes it to the font instead,
+   and right-aligning keeps the digits flush with the column's true right
+   edge (matching every other row's input) rather than floating mid-row. */
+.prop-range .tb-delay-val { min-width:6.5ch; text-align:right; }
