@@ -298,12 +298,12 @@ defineModule('gates', ['engine'], (engine) => {
 
   function ffRect(f,h){return<rect x="6" y="6" width="68" height={h-12} rx="7" fill={f} stroke="var(--ink)" strokeWidth="2"/>;}
   const ffTxt=(x,y,t)=><text x={x} y={y} fontFamily="var(--mono)" fontSize="12" fill="var(--ink)">{t}</text>;
-  const ffSub=(t)=><text x="40" y="74" fontFamily="var(--ui)" fontSize="9" textAnchor="middle" fill="var(--ink)" opacity="0.38">{t}</text>;
+  const ffSub=(t)=><text x="40" y="70" fontFamily="var(--ui)" fontSize="9" textAnchor="middle" fill="var(--ink)" opacity="0.38">{t}</text>;
 
-  VIS.DFF  = {w:80,h:80,  inputs:[{x:0,y:20},{x:0,y:60}],            outputs:[{x:80,y:40}], body:(f,comp)=><g>{pendingBar(comp)}{ffRect(f,80)}{ffTxt(14,24,'D')}{ffTxt(14,64,'▷')}{ffTxt(66,44,'Q')}{ffSub('D')}</g>};
-  VIS.TFF  = {w:80,h:80,  inputs:[{x:0,y:20},{x:0,y:60}],            outputs:[{x:80,y:40}], body:(f,comp)=><g>{pendingBar(comp)}{ffRect(f,80)}{ffTxt(14,24,'T')}{ffTxt(14,64,'▷')}{ffTxt(66,44,'Q')}{ffSub('T')}</g>};
-  VIS.SRFF = {w:80,h:80,  inputs:[{x:0,y:20},{x:0,y:60}],            outputs:[{x:80,y:40}], body:(f,comp)=><g>{pendingBar(comp)}{ffRect(f,80)}{ffTxt(14,24,'S')}{ffTxt(14,64,'R')}{ffTxt(66,44,'Q')}{ffSub('SR')}</g>};
-  VIS.JKFF = {w:80,h:120, inputs:[{x:0,y:20},{x:0,y:60},{x:0,y:100}],outputs:[{x:80,y:40}], body:(f,comp)=><g>{pendingBar(comp)}{ffRect(f,120)}{ffTxt(14,24,'J')}{ffTxt(14,64,'K')}{ffTxt(14,104,'▷')}{ffTxt(66,44,'Q')}<text x="40" y="114" fontFamily="var(--ui)" fontSize="9" textAnchor="middle" fill="var(--ink)" opacity="0.38">JK</text></g>};
+  VIS.DFF  = {w:80,h:80,  inputs:[{x:0,y:20},{x:0,y:60}],            outputs:[{x:80,y:40}], body:(f,comp)=><g>{pendingBar(comp)}{ffRect(f,80)}{ffTxt(14,24,'D')}{ffTxt(14,64,'▷')}{ffTxt(62,44,'Q')}{ffSub('D')}</g>};
+  VIS.TFF  = {w:80,h:80,  inputs:[{x:0,y:20},{x:0,y:60}],            outputs:[{x:80,y:40}], body:(f,comp)=><g>{pendingBar(comp)}{ffRect(f,80)}{ffTxt(14,24,'T')}{ffTxt(14,64,'▷')}{ffTxt(62,44,'Q')}{ffSub('T')}</g>};
+  VIS.SRFF = {w:80,h:80,  inputs:[{x:0,y:20},{x:0,y:60}],            outputs:[{x:80,y:40}], body:(f,comp)=><g>{pendingBar(comp)}{ffRect(f,80)}{ffTxt(14,24,'S')}{ffTxt(14,64,'R')}{ffTxt(62,44,'Q')}{ffSub('SR')}</g>};
+  VIS.JKFF = {w:80,h:120, inputs:[{x:0,y:20},{x:0,y:60},{x:0,y:100}],outputs:[{x:80,y:40}], body:(f,comp)=><g>{pendingBar(comp)}{ffRect(f,120)}{ffTxt(14,24,'J')}{ffTxt(14,64,'K')}{ffTxt(14,104,'▷')}{ffTxt(62,44,'Q')}<text x="40" y="110" fontFamily="var(--ui)" fontSize="9" textAnchor="middle" fill="var(--ink)" opacity="0.38">JK</text></g>};
 
   // REG's D input and Q output are the only pins that scale with bitWidth
   // (EN/CLK/RESET stay 1-bit control lines — enforced in engine.js), so only
@@ -1455,7 +1455,7 @@ function App(){
       <button className="btn ghost" style={{height:26,fontSize:12}} onClick={()=>setShowSettings(true)}>Settings</button>
       {/* Propagation delay */}
       <div className="tb-delay">
-        <span>Delay</span>
+        <span>Propagation Delay</span>
         <input type="range" min="10" max="2000" step="10" value={delayMs}
                onChange={e=>setDelayMs(Number(e.target.value))}/>
         <span className="tb-delay-val">{delayMs}ms</span>
