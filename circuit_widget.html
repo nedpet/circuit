@@ -198,6 +198,20 @@ defineModule('gates', ['engine'], (engine) => {
       </g>;
     });
   }
+  // BitCells/HexCells always draw MSB-leftmost/LSB-rightmost; that reading
+  // order needs to stay put regardless of which way the component faces, so
+  // flipping facing right<->left doesn't relabel which physical slot shows
+  // which bit. GateBody mirrors a facing:'left' component with
+  // `translate(w,0) scale(-1,1)`; applying that same transform a second
+  // time here cancels it (two mirrors = identity), so the cell row renders
+  // identically either way. Tagged data-stable so unmirrorText — which
+  // otherwise counter-mirrors every <text> it finds — leaves this subtree
+  // alone instead of correcting it a second time.
+  function stableBlock(comp, w, children) {
+    return comp.facing==='left'
+      ? <g data-stable="true" transform={`translate(${w} 0) scale(-1 1)`}>{children}</g>
+      : <g>{children}</g>;
+  }
   // hex mode packs 4 bits/cell, so its cell count (and thus w) differs from
   // binary's one-cell-per-bit layout — cached per (bitWidth, mode) pair since
   // the box width itself changes, not just the digits drawn inside it.
@@ -207,7 +221,7 @@ defineModule('gates', ['engine'], (engine) => {
     return { w, h, inputs:[], outputs:[{x:w,y:20}],
       body:(f,comp)=><g>
         <rect x="2" y="4" width={w-4} height="32" rx="8" fill="#f3f3f1" stroke="var(--ink)" strokeWidth="2"/>
-        {hex ? HexCells({n, value:comp.state.value||0, editable:true}) : BitCells({n, value:comp.state.value||0, editable:true})}
+        {stableBlock(comp, w, hex ? HexCells({n, value:comp.state.value||0, editable:true}) : BitCells({n, value:comp.state.value||0, editable:true}))}
         <text x="-15" y="26" fontFamily="var(--mono)" fontSize="16" fontWeight="600" textAnchor="end" fill="var(--ink)" opacity="0.8">{comp.label}</text>
       </g>
     };
@@ -220,7 +234,7 @@ defineModule('gates', ['engine'], (engine) => {
     return { w, h, inputs:[{x:0,y:20}], outputs:[],
       body:(f,comp)=><g>
         <rect x="2" y="4" width={w-4} height="32" rx="8" fill="#f3f3f1" stroke="var(--ink)" strokeWidth="2"/>
-        {hex ? HexCells({n, value:comp.inputVals[0]||0}) : BitCells({n, value:comp.inputVals[0]||0, editable:false})}
+        {stableBlock(comp, w, hex ? HexCells({n, value:comp.inputVals[0]||0}) : BitCells({n, value:comp.inputVals[0]||0, editable:false}))}
         <text x={w+15} y="26" fontFamily="var(--mono)" fontSize="16" fontWeight="600" textAnchor="start" fill="var(--ink)" opacity="0.8">{comp.label}</text>
       </g>
     };
@@ -367,18 +381,61 @@ defineModule('gates', ['engine'], (engine) => {
     return { x1:p.x-dx*12, y1:p.y-dy*12, x2:p.x, y2:p.y };
   }
 
+  // Facing 'left' draws the gate body under `scale(-1 1)` so the shape and
+  // pins mirror correctly — but that flips glyphs too, rendering labels as
+  // mirror-writing. This walks the body's element tree and wraps every
+  // <text> in its own local counter-scale (pivoting on that text's own x),
+  // which cancels the ancestor flip for the glyphs while leaving the text's
+  // position subject to the same mirroring as everything else. textAnchor
+  // is flipped start<->end to match: a label anchored to grow rightward off
+  // its pin should grow leftward once that pin is on the mirrored side.
+  // Only recurses into plain SVG host elements (string types) and
+  // Fragments — real components (e.g. <PendingBar/>) are opaque here since
+  // their output doesn't exist until they render, so they're left under the
+  // ordinary mirror transform, same as before.
+  function unmirrorText(node) {
+    if (Array.isArray(node)) return node.map(unmirrorText);
+    if (!React.isValidElement(node)) return node;
+    // Already self-corrected (see stableBlock) — reprocessing its <text>
+    // descendants here would cancel that correction back out.
+    if (node.props?.['data-stable']) return node;
+    if (node.type === 'text') {
+      const x = node.props.x || 0;
+      const anchor = node.props.textAnchor;
+      const flipped = anchor==='start' ? 'end' : anchor==='end' ? 'start' : anchor;
+      return <g transform={`translate(${x} 0) scale(-1 1) translate(${-x} 0)`}>
+        {React.cloneElement(node, {textAnchor: flipped})}
+      </g>;
+    }
+    if ((typeof node.type === 'string' || node.type === React.Fragment) && node.props?.children != null) {
+      const processed = unmirrorText(node.props.children);
+      // Spread array children back into positional args — passing a bare
+      // array as the sole child triggers React's "list needs keys" check
+      // (it assumes a .map() result), which the original static JSX
+      // children list never hit.
+      return Array.isArray(processed)
+        ? React.cloneElement(node, {}, ...processed)
+        : React.cloneElement(node, {}, processed);
+    }
+    return node;
+  }
+
   function GateBody({ comp }) {
     const def=GATE_DEFS[comp.kind], vis=visForComp(comp);
     if (!vis) return null;
     const fill=FAMILY_FILL[def.family]||'#fff';
-    return <g transform={comp.facing==='left'
+    const mirrored = comp.facing==='left';
+    const body = <>
+      {vis.body(fill,comp)}
+      {['AND','OR','NAND','NOR','XOR','XNOR','MUX'].includes(comp.kind)&&
+        <text x={vis.w/2+2} y={vis.h/2+4} textAnchor="middle" fontFamily="var(--mono)" fontSize="10" fontWeight="600" fill="var(--ink)" opacity="0.35" pointerEvents="none">{def.label}</text>}
+    </>;
+    return <g transform={mirrored
                           ? `translate(${vis.w} 0) scale(-1 1)`
                           : `rotate(${comp.facing==='up'?270:comp.facing==='down'?90:0} ${vis.w/2} ${vis.h/2})`}>
       {vis.inputs.map((p,i)=>{const s=pinStub(p,'left');return <line key={'i'+i} x1={s.x1} y1={s.y1} x2={s.x2} y2={s.y2} stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>;})}
       {vis.outputs.map((p,i)=>{const s=pinStub(p,'right');return <line key={'o'+i} x1={s.x1} y1={s.y1} x2={s.x2} y2={s.y2} stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>;})}
-      {vis.body(fill,comp)}
-      {['AND','OR','NAND','NOR','XOR','XNOR','MUX'].includes(comp.kind)&&
-        <text x={vis.w/2+2} y={vis.h/2+4} textAnchor="middle" fontFamily="var(--mono)" fontSize="10" fontWeight="600" fill="var(--ink)" opacity="0.35" pointerEvents="none">{def.label}</text>}
+      {mirrored ? unmirrorText(body) : body}
     </g>;
   }
 
