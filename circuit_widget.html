@@ -146,6 +146,55 @@ defineModule('gates', ['engine'], (engine) => {
   }
   VIS.MUX = muxVis(2);
 
+  // SPLIT fans a single multi-bit bus out into `bits` (2-8) individual
+  // 1-bit pins. It's deliberately drawn as bare wire, not a gate body: a
+  // vertical "trunk" with each output tapped off it every `space` grid
+  // cells (reusing the standard 12px 'right' pin stub for each tap's
+  // little leg), starting right where a one-grid-cell 45° lead-in from the
+  // single `bits`-wide input pin meets the trunk. Output i taps bit i of
+  // the input (0 = topmost, nearest the input = LSB) — arbitrary but
+  // fixed, so wiring is predictable; engine.js's SPLIT compute() matches
+  // this order, and each tap is labeled with its bit index (to the left of
+  // the trunk/pin) so it's readable straight off the diagram instead of
+  // just inferred.
+  // Both dimensions are per-instance like MUX's muxInputs, so geometry is
+  // built/cached the same way.
+  const SPLIT_UNIT = 20; // matches Canvas' GRID (20px snap), so the diagonal lands on a clean cell and taps line up with the grid
+  function buildSplitVis(n, space) {
+    const tx = SPLIT_UNIT, topY = SPLIT_UNIT, gap = space*SPLIT_UNIT;
+    // Output 0 sits right at the diagonal/trunk junction (no lead-in
+    // segment before the first tap); the trunk then only needs to reach
+    // the last output.
+    const outputs = Array.from({length:n}, (_,i)=>({x:tx+12, y:topY+i*gap}));
+    const lastY = topY + (n-1)*gap;
+    return { w: tx+12, h: lastY,
+      // noStub: the diagonal below is this pin's whole connector, drawn in
+      // full by body() — GateBody's generic (cardinal-only) stub renderer
+      // is skipped for it instead of adding a second, wrongly-angled leg.
+      inputs: [{x:0, y:0, dir:'up', noStub:true}],
+      outputs,
+      body:()=><g>
+        {/* Invisible fat hit-area — the visible body is just two thin
+            strokes with nothing to fill, so without this, clicking to
+            select/drag the component anywhere off those exact pixels (the
+            wire-like point of the whole design) would silently miss it. */}
+        <rect x="0" y="0" width={tx+12} height={lastY} fill="transparent"/>
+        <line x1={tx} y1={topY} x2="0" y2="0" stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>
+        <line x1={tx} y1={topY} x2={tx} y2={lastY} stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>
+        {outputs.map((p,i)=>(
+          <text key={i} x={tx-6} y={p.y+3} textAnchor="end" fontFamily="var(--mono)" fontSize="8" fontWeight="600" fill="var(--ink)" opacity="0.6">{i}</text>
+        ))}
+      </g> };
+  }
+  const splitVisCache = {};
+  function splitVis(n, space) {
+    const bits = Math.max(2, Math.min(8, n|0||2));
+    const sp = Math.max(1, Math.min(8, space|0||1));
+    const key = bits+'_'+sp;
+    return splitVisCache[key] || (splitVisCache[key] = buildSplitVis(bits, sp));
+  }
+  VIS.SPLIT = splitVis(2, 1);
+
 
   VIS.INPUT = { w:60,h:40, inputs:[], outputs:[{x:60,y:20}],
     body:(f,comp)=>{
@@ -261,12 +310,13 @@ defineModule('gates', ['engine'], (engine) => {
     return outputVisCache[key] || (outputVisCache[key]=buildOutputVis(n, hex));
   }
   // Single point every consumer (rendering, pin geometry, wiring) should go
-  // through instead of `VIS[comp.kind]` directly, since INPUT/OUTPUT and MUX
-  // no longer have a fixed size — everything else still does.
+  // through instead of `VIS[comp.kind]` directly, since INPUT/OUTPUT, MUX
+  // and SPLIT no longer have a fixed size — everything else still does.
   function visForComp(comp) {
     if (comp.kind==='INPUT') return inputVis(comp.bitWidth, comp.displayMode);
     if (comp.kind==='OUTPUT') return outputVis(comp.bitWidth, comp.displayMode);
     if (comp.kind==='MUX') return muxVis(comp.muxInputs, comp.muxSelectLocation);
+    if (comp.kind==='SPLIT') return splitVis(comp.bits, comp.space);
     return VIS[comp.kind];
   }
 
@@ -409,7 +459,11 @@ defineModule('gates', ['engine'], (engine) => {
       const x = node.props.x || 0;
       const anchor = node.props.textAnchor;
       const flipped = anchor==='start' ? 'end' : anchor==='end' ? 'start' : anchor;
-      return <g transform={`translate(${x} 0) scale(-1 1) translate(${-x} 0)`}>
+      // Carries the original element's key onto this wrapper — needed
+      // whenever the text came from a keyed list (e.g. SPLIT's per-tap bit
+      // labels), since `key` lives outside `.props` and isn't copied by
+      // just nesting the old element inside a new one.
+      return <g key={node.key} transform={`translate(${x} 0) scale(-1 1) translate(${-x} 0)`}>
         {React.cloneElement(node, {textAnchor: flipped})}
       </g>;
     }
@@ -439,7 +493,7 @@ defineModule('gates', ['engine'], (engine) => {
     return <g transform={mirrored
                           ? `translate(${vis.w} 0) scale(-1 1)`
                           : `rotate(${comp.facing==='up'?270:comp.facing==='down'?90:0} ${vis.w/2} ${vis.h/2})`}>
-      {vis.inputs.map((p,i)=>{const s=pinStub(p,'left');return <line key={'i'+i} x1={s.x1} y1={s.y1} x2={s.x2} y2={s.y2} stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>;})}
+      {vis.inputs.map((p,i)=>{if(p.noStub) return null; const s=pinStub(p,'left');return <line key={'i'+i} x1={s.x1} y1={s.y1} x2={s.x2} y2={s.y2} stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>;})}
       {vis.outputs.map((p,i)=>{const s=pinStub(p,'right');return <line key={'o'+i} x1={s.x1} y1={s.y1} x2={s.x2} y2={s.y2} stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>;})}
       {mirrored ? unmirrorText(body) : body}
     </g>;
@@ -887,7 +941,7 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
       </div>
     )
   })() : null;
-  const gatePanel = ['NOT', 'AND','OR','NAND','NOR','XOR','XNOR','MUX','SHFT','EXTND'].includes(selComp?.kind) ? (()=>{
+  const gatePanel = ['NOT', 'AND','OR','NAND','NOR','XOR','XNOR','MUX','SHFT','EXTND','SPLIT'].includes(selComp?.kind) ? (()=>{
     return (
       <div className="prop-panel" onMouseDown={e=>e.stopPropagation()}>
         <div className="prop-title">{selComp.kind} Properties</div>
@@ -903,6 +957,19 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
             <input  className="prop-input" type="number" min="1" max="32"
                     value={selComp.bitWidthOut||1}
                     onChange={e=>{circuit.setExtBitWidthOut(selComp.id,Number(e.target.value));onComponentChanged?.();}}/>
+          </div>
+        </> : selComp.kind==='SPLIT' ? <>
+          <div className="prop-option">
+            <span className="prop-label">Bits</span>
+            <input  className="prop-input" type="number" min="2" max="8"
+                    value={selComp.bits||2}
+                    onChange={e=>{circuit.setSplitBits(selComp.id,Number(e.target.value));onComponentChanged?.();}}/>
+          </div>
+          <div className="prop-option">
+            <span className="prop-label">Space</span>
+            <input  className="prop-input" type="number" min="1" max="8"
+                    value={selComp.space||1}
+                    onChange={e=>{circuit.setSplitSpace(selComp.id,Number(e.target.value));onComponentChanged?.();}}/>
           </div>
         </> : <div className="prop-option">
           <span className="prop-label">Bits</span>
@@ -950,7 +1017,7 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
             <option value="down">Down</option>
           </select>
         </div>
-        <div className="prop-option">
+        {selComp.kind!=='SPLIT' && <div className="prop-option">
           <span className="prop-label">Delay</span>
           <div className="prop-range">
             <input type="range" min="0" max="2000" step="100"
@@ -958,7 +1025,7 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
                    onChange={e=>{circuit.setDelay(selComp.id,Number(e.target.value));onComponentChanged?.();}}/>
             <span className="tb-delay-val">{selComp.delay}ms</span>
           </div>
-        </div>
+        </div>}
       </div>
     )
   })() : null;
@@ -1158,7 +1225,7 @@ const GROUPS=[
   {title:'Sinks',     kinds:['OUTPUT', 'SEVEN']},
   {title:'Logic',     kinds:['AND','OR','NOT','NAND','NOR','XOR','XNOR','MUX']},
   {title:'Flip-flops',kinds:['DFF','TFF','JKFF','SRFF']},
-  {title:'Miscellaneous',kinds:['REG', 'SHFT', 'EXTND']}, //temp
+  {title:'Miscellaneous',kinds:['REG', 'SHFT', 'EXTND', 'SPLIT']}, //temp
   {title:'Custom',    kinds:[]},
 ];
 function Thumb({kind}){

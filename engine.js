@@ -64,6 +64,12 @@ defineModule('engine', ['state'], (state) => {
     if (comp.kind === 'EXTND') {
       return dir === 'in' ? (comp.bitWidthIn||1) : (comp.bitWidthOut||1);
     }
+    // SPLIT's single input carries the whole `bits`-wide bus; every output
+    // is always exactly 1 bit (also excluded from BIT_WIDTH_KINDS for the
+    // same reason EXTND is — there's no single shared comp.bitWidth here).
+    if (comp.kind === 'SPLIT') {
+      return dir === 'in' ? (comp.bits||2) : 1;
+    }
     const fixed = FIXED_WIDTH_PINS[comp.kind];
     if (fixed && fixed[dir] && fixed[dir].has(idx)) return 1;
     return BIT_WIDTH_KINDS.has(comp.kind) ? (comp.bitWidth||1) : 1;
@@ -142,6 +148,19 @@ defineModule('engine', ['state'], (state) => {
                 const fromW = (comp&&comp.bitWidthIn)||1;
                 const toW = (comp&&comp.bitWidthOut)||1;
                 return [signExtend(a||0, fromW, toW)];
+              } } ,
+    // Fans a single `bits`-wide bus (2-8) out into that many 1-bit outputs.
+    // `outputs:8` is just the construction-time array size (the max — see
+    // addComponent); compute() itself returns exactly `comp.bits` values,
+    // and step() sizes its per-output bookkeeping off that returned array,
+    // not this def, so a smaller instance simply leaves the extra slots
+    // unused. Output i reads bit i of the input (0 = topmost pin = LSB),
+    // matching gates.js's buildSplitVis pin order.
+    SPLIT:  { kind:'SPLIT', label:'SPLITTER', inputs:1, outputs:8, family:'misc',
+              compute:([a],s,w,comp) => {
+                const n = (comp&&comp.bits)||2;
+                const v = a||0;
+                return Array.from({length:n}, (_,i)=>(v>>>i)&1);
               } } ,
   };
 
@@ -292,7 +311,7 @@ defineModule('engine', ['state'], (state) => {
     const wires = new Map();
     const junctions = new Set(); // {x, y, sourceWireId}
 
-    function addComponent(kind, x, y, facing = "right", delay = 0, label = "none", bitWidth, muxInputs, bitWidthIn, bitWidthOut) {
+    function addComponent(kind, x, y, facing = "right", delay = 0, label = "none", bitWidth, muxInputs, bitWidthIn, bitWidthOut, bits, space) {
       const def = GATE_DEFS[kind];
       const id = 'c'+(nextId++);
       const ioId = kind==='INPUT' || kind==='OUTPUT' ? 'io'+(nextIoId++) : ''
@@ -315,8 +334,11 @@ defineModule('engine', ['state'], (state) => {
         displayMode: kind==='REG' || kind==='OUTPUT' || kind==='INPUT' ? 'bin' : undefined,
         shiftMode: kind==='SHFT' ? 'left' : undefined,
         muxInputs: muxN,
+        muxSelectLocation: kind==='MUX' ? 'top' : undefined,
         bitWidthIn:  kind==='EXTND' ? Math.max(1,Math.min(32,Math.round(bitWidthIn||1)))  : undefined,
         bitWidthOut: kind==='EXTND' ? Math.max(1,Math.min(32,Math.round(bitWidthOut||1))) : undefined,
+        bits:  kind==='SPLIT' ? Math.max(2,Math.min(8,Math.round(bits||2)))   : undefined,
+        space: kind==='SPLIT' ? Math.max(1,Math.min(8,Math.round(space||1))) : undefined,
       };
       components.set(id, comp);
       if (ioId != '') {
@@ -554,7 +576,7 @@ defineModule('engine', ['state'], (state) => {
 
     function serialize() {
       return {
-        components: [...components.values()].map(c=>({id:c.id,ioId:c.ioId,kind:c.kind,x:c.x,y:c.y,facing:c.facing,delay:c.delay,label:c.label,bitWidth:c.bitWidth,displayMode:c.displayMode,shiftMode:c.shiftMode,muxInputs:c.muxInputs,bitWidthIn:c.bitWidthIn,bitWidthOut:c.bitWidthOut,
+        components: [...components.values()].map(c=>({id:c.id,ioId:c.ioId,kind:c.kind,x:c.x,y:c.y,facing:c.facing,delay:c.delay,label:c.label,bitWidth:c.bitWidth,displayMode:c.displayMode,shiftMode:c.shiftMode,muxInputs:c.muxInputs,muxSelectLocation:c.muxSelectLocation,bitWidthIn:c.bitWidthIn,bitWidthOut:c.bitWidthOut,bits:c.bits,space:c.space,
           state:c.kind==='INPUT'?{value:c.state.value}:c.kind==='CLOCK'?{period:c.state.period,paused:c.state.paused}:{}})),
         wires: [...wires.values()].map(w=>({id:w.id,from:w.from,to:w.to,points:w.points||[]})),
         junctions: [...junctions],
@@ -573,10 +595,11 @@ defineModule('engine', ['state'], (state) => {
       // temp id first, then assign real ids and populate the maps once.
       const builtComponents = [];
       for (const cd of data.components||[]) {
-        const c=addComponent(cd.kind,cd.x,cd.y,cd.facing,cd.delay,undefined,cd.bitWidth,cd.muxInputs,cd.bitWidthIn,cd.bitWidthOut); components.delete(c.id); ioComponents.delete(c.ioId);
+        const c=addComponent(cd.kind,cd.x,cd.y,cd.facing,cd.delay,undefined,cd.bitWidth,cd.muxInputs,cd.bitWidthIn,cd.bitWidthOut,cd.bits,cd.space); components.delete(c.id); ioComponents.delete(c.ioId);
         if(cd.label!==undefined) c.label=cd.label;
         if(cd.displayMode!==undefined) c.displayMode=cd.displayMode;
         if(cd.shiftMode!==undefined) c.shiftMode=cd.shiftMode;
+        if(cd.muxSelectLocation!==undefined) c.muxSelectLocation=cd.muxSelectLocation;
         if(cd.state) Object.assign(c.state,cd.state);
         builtComponents.push({c,cd});
       }
@@ -658,6 +681,28 @@ defineModule('engine', ['state'], (state) => {
           if (w.to.pin===oldN) w.to={...w.to, pin:newN};
           else if (w.to.pin>=newN && w.to.pin<oldN) wires.delete(wid);
         }
+      },
+      setMuxSelectLocation(id,loc){
+        const c=components.get(id); if(!c||c.kind!=='MUX') return;
+        c.muxSelectLocation = loc==='bottom' ? 'bottom' : 'top';
+      },
+      setSplitBits(id,n){
+        const c=components.get(id); if(!c||c.kind!=='SPLIT') return;
+        const newN=Math.max(2,Math.min(8,Math.round(n)||2));
+        const oldN=c.bits||2;
+        if (newN===oldN) return;
+        c.bits=newN;
+        // Output pins beyond the new bit count no longer exist — drop any
+        // wires still leaving from them, the same way setMuxInputs drops
+        // wires from data pins an arity shrink removed (mirrored here since
+        // SPLIT's variable pins are outputs rather than inputs).
+        for (const [wid,w] of wires) {
+          if (w.from.compId===id && typeof w.from.pin==='number' && w.from.pin>=newN) wires.delete(wid);
+        }
+      },
+      setSplitSpace(id,n){
+        const c=components.get(id); if(!c||c.kind!=='SPLIT') return;
+        c.space=Math.max(1,Math.min(8,Math.round(n)||1));
       },
       toggleClock(id){const c=components.get(id);if(c&&c.kind==='CLOCK'){c.state.paused=!c.state.paused;if(!c.state.paused)c.state.lastTick=performance.now();}},
       setClockPeriod(id,p){const c=components.get(id);if(c&&c.kind==='CLOCK')c.state.period=p;},
