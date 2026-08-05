@@ -114,7 +114,7 @@ defineModule('gates', ['engine'], (engine) => {
   // output re-centered — never touching W, BX or the other gates' shared
   // YT/YB/BT/BB constants.
   const MUX_PIN_GAP=40, MUX_TOP_MARGIN=20;
-  function buildMuxVis(n) {
+  function buildMuxVis(n, bottom) {
     const h = n*MUX_PIN_GAP; // 80 for n=2, matching the original fixed H
     const inputs = Array.from({length:n},(_,i)=>({x:0,y:MUX_TOP_MARGIN+i*MUX_PIN_GAP}));
     const outY = h/2, bt=6, bb=h-6;
@@ -125,8 +125,12 @@ defineModule('gates', ['engine'], (engine) => {
     // fixed y=5 that only happened to line up for the original 2-input size
     // — without this, taller bodies (3-4 inputs) pull the edge down but the
     // stub stayed put, opening a visible gap above the select pin.
-    const selectY = (bt + bb/8) - 12;
-    inputs.push({x:W*0.5,y:selectY,dir:'up'});
+    // The bottom edge is the mirror-image diagonal, from (W-BX,bb*.75) to
+    // (BX,bb); by the same symmetry it sits at bb*7/8 under the select pin's
+    // x, and since the pin now points 'down' (away from the body, toward
+    // larger y) the 12px stub sits 12px *below* that edge instead of above.
+    const selectY = bottom ? (bb*.75 + bb/8) + 12 : (bt + bb/8) - 12;
+    inputs.push({x:W*0.5,y:selectY,dir: bottom ? 'down' : 'up'});
     return { w:W, h, inputs, outputs:[{x:W,y:outY}],
       body:(f, comp)=><g>
         {pendingBar(comp)}
@@ -134,9 +138,11 @@ defineModule('gates', ['engine'], (engine) => {
       </g> };
   }
   const muxVisCache = {};
-  function muxVis(n) {
+  function muxVis(n, selectLocation) {
     const count = Math.max(2, Math.min(4, n|0||2));
-    return muxVisCache[count] || (muxVisCache[count] = buildMuxVis(count));
+    const bottom = selectLocation==='bottom';
+    const key = count+(bottom?'b':'t');
+    return muxVisCache[key] || (muxVisCache[key] = buildMuxVis(count, bottom));
   }
   VIS.MUX = muxVis(2);
 
@@ -260,7 +266,7 @@ defineModule('gates', ['engine'], (engine) => {
   function visForComp(comp) {
     if (comp.kind==='INPUT') return inputVis(comp.bitWidth, comp.displayMode);
     if (comp.kind==='OUTPUT') return outputVis(comp.bitWidth, comp.displayMode);
-    if (comp.kind==='MUX') return muxVis(comp.muxInputs);
+    if (comp.kind==='MUX') return muxVis(comp.muxInputs, comp.muxSelectLocation);
     return VIS[comp.kind];
   }
 
@@ -912,6 +918,15 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
             <option value="2">2</option>
             <option value="3">3</option>
             <option value="4">4</option>
+          </select>
+        </div>}
+        {selComp.kind==='MUX' && <div className="prop-option">
+          <span className="prop-label">Select</span>
+          <select className="prop-input"
+                  value={selComp.muxSelectLocation||'top'}
+                  onChange={e=>{circuit.setMuxSelectLocation(selComp.id,e.target.value);onComponentChanged?.();}}>
+            <option value="top">Top</option>
+            <option value="bottom">Bottom</option>
           </select>
         </div>}
         {selComp.kind==='SHFT' && <div className="prop-option">
