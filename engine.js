@@ -2,35 +2,30 @@
 defineModule('engine', ['state'], (state) => {
   'use strict';
 
-  // Every pin already maps to exactly one array slot (Q1/Q3 of the bit-width
-  // research) — a "wide" pin just lets that slot hold an integer bus value
-  // instead of a lone 0/1, so gate arity and wiring are untouched. maskVal
-  // clamps a raw bitwise result down to the pin's configured width and back
-  // to an unsigned reading, since JS's bitwise ops are 32-bit signed.
-  function bitMask(width) { return width>=32 ? 0xFFFFFFFF : (Math.pow(2,width)-1); }
-  function maskVal(v, width) { return (v & bitMask(width)) >>> 0; }
+  // These functions ensure v is read correctly as a width-bit unsigned input
+  function bitMask(width) { 
+    return width>=32 ? 0xFFFFFFFF : (Math.pow(2,width)-1); 
+  }
+  function maskVal(v, width) { 
+    return (v & bitMask(width)) >>> 0; 
+  }
 
-  // Kinds whose per-instance `bitWidth` is user-configurable (the remaining
-  // sequential kinds are intentionally excluded for now).
+  // Component whose per-instance `bitWidth` is user-configurable and consistent component-wide
   const BIT_WIDTH_KINDS = new Set(['INPUT','OUTPUT','CONST','AND','OR','NOT','NAND','NOR','XOR','XNOR','REG','MUX','SHFT']);
 
-  // Most BIT_WIDTH_KINDS share one width across every pin, but REG's D input
-  // and Q output are the only ones meant to carry a bus — EN/CLK/RESET stay
-  // control lines and must stay 1-bit regardless of the component's bitWidth.
+  // REG's EN/CLK/RESET must stay 1-bit regardless of the component's bitWidth
   const FIXED_WIDTH_PINS = { REG: { in: new Set([1,2,3]) } };
 
-  // MUX's data inputs/output follow bitWidth like any other gate, but its
-  // select pin is a control line whose OWN width is derived from muxInputs
-  // (1 bit for a 2:1 mux, 2 bits once there are 3-4 data lines to address) —
-  // never from bitWidth. Select always sits at input index muxInputs (the
-  // last input pin), one past the last data line.
-  function muxSelectWidth(muxInputs) { return (muxInputs||2) <= 2 ? 1 : 2; }
+  // MUX's select pin width is derived from muxInputs, the number of inputs in the mux
+  function muxSelectWidth(muxInputs) { 
+    return (muxInputs||2) <= 2 ? 1 : 2; 
+  }
 
-  // SHFT's shift-amount input (in1) only ever needs enough bits to address
-  // every position in the value being shifted (in0/out, bitWidth wide) — a
-  // standard barrel-shifter select width, derived rather than configurable.
-  // bitWidth 1 has no meaningful shift amount, so it's floored at 1 bit.
-  function shiftAmountWidth(bitWidth) { return Math.max(1, Math.ceil(Math.log2(Math.max(1,bitWidth||1)))); }
+  // SHFT's shift-amount input only needs enough bits to address every position in the value being shifted 
+  // bitWidth 1 has no meaningful shift amount, so it's floored at 1 bit
+  function shiftAmountWidth(bitWidth) { 
+    return Math.max(1, Math.ceil(Math.log2(Math.max(1,bitWidth||1)))); 
+  }
 
   // Sign-extends (or truncates) v — read as a two's-complement number in
   // fromWidth bits — into a toWidth-bit two's-complement reading. Going
@@ -44,8 +39,8 @@ defineModule('engine', ['state'], (state) => {
     return maskVal(reencoded, toWidth);
   }
 
-  // Kinds outside BIT_WIDTH_KINDS (flip-flops other than REG, SEVEN, CLOCK)
-  // only ever handle 1-bit values on all their pins.
+  // Returns the number of bits of the pin in direction dir at index idx on component comp
+  // Kinds outside BIT_WIDTH_KINDS only ever handle 1-bit values on all their pins
   function pinBitWidthAt(comp, dir, idx) {
     if (!comp) return 1;
     if (comp.kind === 'MUX') {
@@ -57,18 +52,9 @@ defineModule('engine', ['state'], (state) => {
       if (dir === 'in' && idx === 1) return shiftAmountWidth(comp.bitWidth);
       return comp.bitWidth || 1;
     }
-    // EXTND has two independently configurable widths rather than one
-    // shared bitWidth — in0 follows bitWidthIn, the output follows
-    // bitWidthOut (EXTND is deliberately left out of BIT_WIDTH_KINDS since
-    // that set means "one shared comp.bitWidth", which doesn't apply here).
     if (comp.kind === 'EXTND') {
       return dir === 'in' ? (comp.bitWidthIn||1) : (comp.bitWidthOut||1);
     }
-    // SPLIT: in its default 'split' mode the single input carries the whole
-    // `bits`-wide bus and every output is 1 bit; 'merge' mode reverses the
-    // roles (many 1-bit inputs, one `bits`-wide output) rather than reusing
-    // the same pin for a different width. Also excluded from BIT_WIDTH_KINDS
-    // for the same reason EXTND is — there's no single shared comp.bitWidth.
     if (comp.kind === 'SPLIT') {
       const wide = comp.bits||2, narrow = 1;
       const merge = comp.splitType === 'merge';
@@ -79,11 +65,8 @@ defineModule('engine', ['state'], (state) => {
     return BIT_WIDTH_KINDS.has(comp.kind) ? (comp.bitWidth||1) : 1;
   }
 
-  // MUX and SPLIT are the only kinds whose *pin count* varies per instance
-  // (MUX: 2-4 data lines + 1 select; SPLIT in 'merge' mode: 2-8 one-bit
-  // inputs instead of its default single wide one), so unlike bitWidth this
-  // changes the size of inputVals itself, not just how a slot's value is
-  // interpreted.
+  // Returns the number of inputs for component c
+  // MUX and SPLIT are the only kinds whose input count varies per instance
   function compInputCount(c) {
     if (c.kind === 'MUX') return (c.muxInputs||2) + 1;
     if (c.kind === 'SPLIT') return c.splitType==='merge' ? (c.bits||2) : GATE_DEFS.SPLIT.inputs;
@@ -91,32 +74,36 @@ defineModule('engine', ['state'], (state) => {
   }
 
   const GATE_DEFS = {
-    INPUT:  { kind:'INPUT',  label:'IN',    inputs:0, outputs:1, family:'io',
+    INPUT:  { kind:'INPUT',   label:'IN',    inputs:0, outputs:1, family:'io',
               compute:(i,s,w) => [maskVal(s.value||0, w||1)] },
-    OUTPUT: { kind:'OUTPUT', label:'OUT',   inputs:1, outputs:0, family:'io',
+    OUTPUT: { kind:'OUTPUT',  label:'OUT',   inputs:1, outputs:0, family:'io',
               compute:()=>[] },
-    CLOCK:  { kind:'CLOCK',  label:'CLK',   inputs:0, outputs:1, family:'io',
+    CLOCK:  { kind:'CLOCK',   label:'CLK',   inputs:0, outputs:1, family:'io',
               compute:(i,s) => [s.value?1:0] },
-    CONST:  { kind:'CONST', label: 'CONST', inputs:0, outputs:1, family:'io',
+    CONST:  { kind:'CONST',   label:'CONST', inputs:0, outputs:1, family:'io',
               compute:(i,s,w) => [maskVal(s.value||0, w||1)] },
-    SEVEN:  { kind:'SEVEN',  label:'7SEG',  inputs:7, outputs:0, family:'io',
+    SEVEN:  { kind:'SEVEN',   label:'7SEG',  inputs:7, outputs:0, family:'io',
               compute:()=>[] },
-    AND:    { kind:'AND',  label:'AND',   inputs:2, outputs:1, family:'and',  compute:([a,b],s,w)=>[maskVal(a&b,w)] },
-    OR:     { kind:'OR',   label:'OR',    inputs:2, outputs:1, family:'or',   compute:([a,b],s,w)=>[maskVal(a|b,w)] },
-    NOT:    { kind:'NOT',  label:'NOT',   inputs:1, outputs:1, family:'not',  compute:([a],s,w)=>[maskVal(~a,w)] },
-    NAND:   { kind:'NAND', label:'NAND',  inputs:2, outputs:1, family:'and',  compute:([a,b],s,w)=>[maskVal(~(a&b),w)] },
-    NOR:    { kind:'NOR',  label:'NOR',   inputs:2, outputs:1, family:'or',   compute:([a,b],s,w)=>[maskVal(~(a|b),w)] },
-    XOR:    { kind:'XOR',  label:'XOR',   inputs:2, outputs:1, family:'xor',  compute:([a,b],s,w)=>[maskVal(a^b,w)] },
-    XNOR:   { kind:'XNOR', label:'XNOR',  inputs:2, outputs:1, family:'xor',  compute:([a,b],s,w)=>[maskVal(~(a^b),w)] },
-    // inputVals is [data0..data(n-1), select] where n = comp.muxInputs (2-4);
-    // arity is per-instance, so compute needs the whole comp, not just its
-    // input array, to know where the select pin sits. A 3-input mux's select
-    // is 2 bits (0-3) but only 3 data lines exist, so sel===3 falls back to 0.
+    AND:    { kind:'AND',     label:'AND',   inputs:2, outputs:1, family:'and',  
+              compute:([a,b],s,w) => [maskVal(a&b,w)] },
+    OR:     { kind:'OR',      label:'OR',    inputs:2, outputs:1, family:'or',   
+              compute:([a,b],s,w) => [maskVal(a|b,w)] },
+    NOT:    { kind:'NOT',     label:'NOT',   inputs:1, outputs:1, family:'not',  
+              compute:([a],s,w)   => [maskVal(~a,w)] },
+    NAND:   { kind:'NAND',    label:'NAND',  inputs:2, outputs:1, family:'and',  
+              compute:([a,b],s,w) => [maskVal(~(a&b),w)] },
+    NOR:    { kind:'NOR',     label:'NOR',   inputs:2, outputs:1, family:'or',   
+              compute:([a,b],s,w) => [maskVal(~(a|b),w)] },
+    XOR:    { kind:'XOR',     label:'XOR',   inputs:2, outputs:1, family:'xor',  
+              compute:([a,b],s,w) => [maskVal(a^b,w)] },
+    XNOR:   { kind:'XNOR',    label:'XNOR',  inputs:2, outputs:1, family:'xor',  
+              compute:([a,b],s,w) => [maskVal(~(a^b),w)] },
+    // arity is per-instance, so compute needs the whole comp to know where the select pin sits
     MUX:    { kind:'MUX',  label:'MUX',   inputs:3, outputs:1, family:'mux',
               compute:(inputVals,s,w,comp)=>{
                 const n=(comp&&comp.muxInputs)||2;
                 const sel=(inputVals[n]||0) & (n<=2?1:3);
-                const val=(n===2) ? (sel?inputVals[1]:inputVals[0]) : ((sel<n)?(inputVals[sel]||0):0);
+                const val=(n===2) ? (sel?inputVals[1]:inputVals[0]) : ((sel<n)?(inputVals[sel]||0):0); // sel=3 when there are only 3 inputs sets it to 0
                 return [maskVal(val||0, w||1)];
               } },
     DFF:    { kind:'DFF',  label:'D-FF',  inputs:2, outputs:1, family:'seq',
@@ -129,47 +116,29 @@ defineModule('engine', ['state'], (state) => {
               compute:([s2,r],s)=>{ if(s2&&!r)s.q=1; else if(r&&!s2)s.q=0; return[s.q||0]; } },
     REG:    { kind:'REG',  label:'REGISTER',   inputs:4, outputs:1, family:'misc',
               compute:([d,en,clk,res],s,w)=>{ const r=clk&&!s.lastClk; s.lastClk=clk; if(res)s.q=0; else if(r&&en)s.q=maskVal(d||0,w||1); return[s.q||0]; } },
-    // in0 (value) and out follow bitWidth; in1 (shift amount) is masked to
-    // its own derived width so an unmasked/oversized value can't produce a
-    // shift larger than the barrel actually supports. comp.shiftMode picks
-    // the direction/fill: 'left' (logical, zero-fills from the low end —
-    // the original/default behavior), 'right' (logical, zero-fills from the
-    // high end), or 'arith' (right shift that repeats the sign bit instead
-    // of zero-filling, per two's-complement reading of the w-bit value).
     SHFT:   { kind:'SHFT', label:'SHIFTER',  inputs:2, outputs:1, family:'misc',
               compute:([a,b],s,w,comp) => {
                 const width = w||1;
                 const amt = (b||0) & bitMask(shiftAmountWidth(width));
                 const av = maskVal(a||0, width);
                 const mode = (comp&&comp.shiftMode) || 'left';
-                if (mode==='right') return [maskVal(av >>> amt, width)];
-                if (mode==='arith') {
+                if (mode==='right') return [maskVal(av >>> amt, width)]; // logical, zero-fills from the high end
+                if (mode==='arith') {                                    // right shift that repeats the sign bit
                   const half = Math.pow(2,width-1);
                   const signed = av>=half ? av-Math.pow(2,width) : av;
                   return [maskVal(Math.floor(signed/Math.pow(2,amt)), width)];
                 }
-                return [maskVal(av*(2**amt), width)];
+                return [maskVal(av*(2**amt), width)];                    // logical, zero-fills from the low end
               } } ,
-    // Independently configurable in/out widths (bitWidthIn/bitWidthOut) live
-    // on the comp itself rather than a single shared bitWidth, so compute
-    // reads them off `comp` (4th arg) instead of the generic `w` width param.
     EXTND:  { kind:'EXTND', label:'EXTENDER', inputs:1, outputs:1, family:'misc',
               compute:([a],s,w,comp) => {
                 const fromW = (comp&&comp.bitWidthIn)||1;
                 const toW = (comp&&comp.bitWidthOut)||1;
                 return [signExtend(a||0, fromW, toW)];
               } } ,
-    // 'split' (default): fans a single `bits`-wide bus (2-8) out into that
-    // many 1-bit outputs, output i reading bit i of the input (0 = topmost
-    // pin = LSB). 'merge' is the reverse: `bits` 1-bit inputs combine into
-    // one `bits`-wide output, input i landing at bit i — same pin order,
-    // just with input/output swapped (matches gates.js's buildSplitVis,
-    // which mirrors the whole shape rather than keeping the pins in place).
-    // `inputs:1, outputs:8` are just the construction-time array sizes (see
-    // addComponent/compInputCount) for the default 'split' mode's max —
-    // compute() itself returns exactly as many values as the current
-    // mode+bits need, and step() sizes its per-output bookkeeping off that
-    // returned array, not this def, so unused slots are simply left alone.
+    // 'split': one multibit input split into many 1-bit outputs
+    // output i reads bit i of the input (0 = topmost pin = LSB) 
+    // 'merge': many 1-bit inputs merge into one multibit output
     SPLIT:  { kind:'SPLIT', label:'SPLITTER', inputs:1, outputs:8, family:'misc',
               compute:(inputVals,s,w,comp) => {
                 const n = (comp&&comp.bits)||2;
@@ -189,12 +158,20 @@ defineModule('engine', ['state'], (state) => {
   // needs them for rendering. CANVAS declares 'engine' as a dependency and
   // gets these back through its factory argument.
 
+  // Projects (x,y) onto the axis-aligned segment a-b, clamped to the
+  // segment's extent — used to find the closest point on a wire for
+  // hit-testing and branch-point insertion. Wires are always Manhattan
+  // (axis-aligned) routed, so the "neither aligned" case just falls back to
+  // a's own point rather than needing a general point-to-line projection.
   function projectOrthogonalPoint(a,b,x,y) {
     if (a.x===b.x) return {x:a.x,y:Math.max(Math.min(y,Math.max(a.y,b.y)),Math.min(a.y,b.y))};
     if (a.y===b.y) return {x:Math.max(Math.min(x,Math.max(a.x,b.x)),Math.min(a.x,b.x)),y:a.y};
     return {x:a.x,y:a.y};
   }
 
+  // Resolves one end of a wire — either a {compId,pin} reference or a free
+  // {x,y} point (a dangling endpoint being dragged, or one still mid-route)
+  // — down to an absolute canvas coordinate.
   function terminalCoords(term, circuit) {
     if (!term) return {x:0,y:0};
     if (typeof term.compId==='string') {
@@ -214,10 +191,16 @@ defineModule('engine', ['state'], (state) => {
     return {x:term.x||0,y:term.y||0};
   }
 
+  // Assembles a wire's full point list: its two pin endpoints with any
+  // user-added waypoints in between, in order.
   function wireKnots(x1,y1,x2,y2,pts=[]) {
     return [{x:x1,y:y1},...pts,{x:x2,y:y2}];
   }
 
+  // Turns a wire's raw endpoint+waypoint list into an orthogonal
+  // (Manhattan) path, inserting an elbow point wherever two consecutive
+  // knots aren't already aligned on one axis — so freely-placed waypoints
+  // still render/route as right-angle wire segments.
   function resolveWire(x1,y1,x2,y2,pts=[]) {
     const knots=wireKnots(x1,y1,x2,y2,pts);
     const out=[knots[0]];
@@ -232,11 +215,14 @@ defineModule('engine', ['state'], (state) => {
     return out;
   }
 
+  // Renders resolveWire()'s resolved point list as an SVG path `d` string.
   function wirePath(x1,y1,x2,y2,pts=[]) {
     const p=resolveWire(x1,y1,x2,y2,pts);
     return p.map((v,i)=>(i?'L ':'M ')+v.x+' '+v.y).join('');
   }
 
+  // The point at fraction `t` (0-1) along a wire's resolved, orthogonal
+  // path — used to place the animated in-flight signal pulse.
   function sampleWire(x1,y1,x2,y2,pts=[],t) {
     const p=resolveWire(x1,y1,x2,y2,pts);
     let total=0; const lens=[];
@@ -249,6 +235,9 @@ defineModule('engine', ['state'], (state) => {
     return [p[p.length-1].x,p[p.length-1].y];
   }
 
+  // Shortest distance from point (px,py) to the segment (ax,ay)-(bx,by) —
+  // a general (not axis-restricted) point-to-segment distance, used for
+  // wire-hover/click hit-testing.
   function distToSeg(px,py,ax,ay,bx,by){
     const dx=bx-ax,dy=by-ay,l2=dx*dx+dy*dy;
     if(l2===0) return Math.hypot(px-ax,py-ay);
@@ -256,6 +245,9 @@ defineModule('engine', ['state'], (state) => {
     return Math.hypot(px-(ax+t*dx),py-(ay+t*dy));
   }
 
+  // A wire's full knot list in absolute canvas coordinates — its resolved
+  // pin endpoints plus any waypoints, unrouted (i.e. before resolveWire's
+  // elbow-insertion).
   function wireSegmentPoints(wire, circuit) {
     const from = terminalCoords(wire.from, circuit);
     const to = terminalCoords(wire.to, circuit);
@@ -264,6 +256,8 @@ defineModule('engine', ['state'], (state) => {
 
   const WIRE_REF_LEN = 80; // roughly one gate width — reference length for length-based speed
 
+  // How long (ms) a wire of length `wireLen` takes to propagate a change,
+  // per the current propagation mode.
   function wireDelayForLength(wireLen, delayMs) {
     // "component" mode: every wire takes exactly `delayMs` to propagate, so
     // two wires of different lengths off the same output still arrive
@@ -273,6 +267,9 @@ defineModule('engine', ['state'], (state) => {
     return (wireLen / WIRE_REF_LEN) * delayMs;
   }
 
+  // Closest point on a wire's path to (x,y), and which segment (by index
+  // into its knot list) it falls on — used to decide where a new
+  // branch/waypoint should be inserted.
   function findNearestWirePoint(wire,x,y,circuit) {
     const knots = wireSegmentPoints(wire, circuit);
     let best = {d:Infinity, point:null, index:0};
@@ -285,6 +282,7 @@ defineModule('engine', ['state'], (state) => {
     return best;
   }
 
+  // Splits a wire at the point nearest (x,y) by inserting a waypoint there.
   function insertBranchPoint(wire, x, y, circuit) {
     const nearest = findNearestWirePoint(wire, x, y, circuit);
     if (!nearest.point) return null;
@@ -301,12 +299,20 @@ defineModule('engine', ['state'], (state) => {
     return pt;
   }
 
+  // Picks a single elbow corner for a new wire between two points that
+  // don't already share an axis, going vertical-then-horizontal or
+  // horizontal-then-vertical depending on firstDir. Points already sharing
+  // an axis need no corner at all.
   function routeManhattanPoints(from, to, firstDir) {
     if (from.x === to.x || from.y === to.y) return [];
     const corner = firstDir === 'v' ? {x:from.x, y:to.y} : {x:to.x, y:from.y};
     return [corner];
   }
 
+  // Absolute canvas position of one pin (input or output, by index) of a
+  // component, accounting for its facing — rotated about its own center for
+  // up/down, or mirrored horizontally for left (matching how GateBody
+  // draws the component itself).
   function pinAbs(comp,kind,idx){
     const vis=window.Modules.gates.visForComp(comp),p=kind==='in'?vis.inputs[idx]:vis.outputs[idx];
     const cx=vis.w/2, cy=vis.h/2;
@@ -322,6 +328,11 @@ defineModule('engine', ['state'], (state) => {
     return{x:comp.x+cx+rx, y:comp.y+cy+ry};
   }
 
+  // Constructs a fresh, empty circuit instance: the mutable component/wire/
+  // junction store, plus every operation — simulation stepping, mutation,
+  // (de)serialization — that acts on it. Everything below lives in this
+  // closure so it can share `components`/`wires`/`junctions`/id counters
+  // without threading them through every call.
   function createCircuit() {
     let nextId = 1;
     let nextIoId = 1;
@@ -330,14 +341,15 @@ defineModule('engine', ['state'], (state) => {
     const wires = new Map();
     const junctions = new Set(); // {x, y, sourceWireId}
 
+    // Creates, registers, and returns a new component of `kind` at (x,y)
+    // Most trailing params only apply to a few specific kinds;
+    // they are stored as `undefined` on every other kind
     function addComponent(kind, x, y, facing = "right", delay = 0, label = "none", bitWidth, muxInputs, bitWidthIn, bitWidthOut, bits, space, splitType) {
       const def = GATE_DEFS[kind];
       const id = 'c'+(nextId++);
       const ioId = kind==='INPUT' || kind==='OUTPUT' ? 'io'+(nextIoId++) : ''
-      // MUX's pin count (unlike bitWidth) varies per instance, so its
-      // inputVals can't be sized off the kind's static def.inputs. SPLIT in
-      // 'merge' mode is the same story — its variable pins are inputs
-      // instead of outputs, so it needs `bits` slots up front too.
+      // MUX and SPLIT's number of inputs varies per instance, so its
+      // inputVals can't be sized off the kind's static def.inputs
       const muxN = kind==='MUX' ? Math.max(2,Math.min(4,Math.round(muxInputs||2))) : undefined;
       const splitBitsN = kind==='SPLIT' ? Math.max(2,Math.min(8,Math.round(bits||2))) : undefined;
       const splitTypeV = kind==='SPLIT' ? (splitType==='merge' ? 'merge' : 'split') : undefined;
@@ -351,20 +363,20 @@ defineModule('engine', ['state'], (state) => {
             : kind==='DFF'   ? {q:0, lastClk:0} : {},
         inputVals:  new Array(inputCount).fill(0),
         outputVals: new Array(def.outputs).fill(0),
-        label: label == "none" ? String.fromCharCode(Number(ioId.slice(2)) + 64) : label,
+        label: label == "none" ? String.fromCharCode(Number(ioId.slice(2)) + 64) : label,                     // for inputs/outputs: the label displayed next to component
         lastChange: 0,
-        facing,
-        delay,
-        bitWidth: BIT_WIDTH_KINDS.has(kind) ? Math.max(1,Math.min(32,Math.round(bitWidth||1))) : undefined,
-        displayMode: kind==='REG' || kind==='OUTPUT' || kind==='INPUT' || kind==='CONST' ? 'bin' : undefined,
-        shiftMode: kind==='SHFT' ? 'left' : undefined,
+        facing,                                                                                               // left, right, up, or down
+        delay,                                                                                                // for gates: the ms it takes to process a signal
+        bitWidth: BIT_WIDTH_KINDS.has(kind) ? Math.max(1,Math.min(32,Math.round(bitWidth||1))) : undefined,   // number of bits component-wide
+        displayMode: kind==='REG' || kind==='OUTPUT' || kind==='INPUT' || kind==='CONST' ? 'bin' : undefined, // binary or hexadecimal display
+        shiftMode: kind==='SHFT' ? 'left' : undefined,                                                        // logical left, logical right, arithmetic right
         muxInputs: muxN,
-        muxSelectLocation: kind==='MUX' ? 'top' : undefined,
+        muxSelectLocation: kind==='MUX' ? 'top' : undefined,                                                  // top or bottom
         bitWidthIn:  kind==='EXTND' ? Math.max(1,Math.min(32,Math.round(bitWidthIn||1)))  : undefined,
-        bitWidthOut: kind==='EXTND' ? Math.max(1,Math.min(32,Math.round(bitWidthOut||1))) : undefined,
-        bits:  splitBitsN,
-        space: kind==='SPLIT' ? Math.max(1,Math.min(8,Math.round(space||1))) : undefined,
-        splitType: splitTypeV,
+        bitWidthOut: kind==='EXTND' ? Math.max(1,Math.min(32,Math.round(bitWidthOut||1))) : undefined,        
+        bits:  splitBitsN,                                                                                    // number of bits to split
+        space: kind==='SPLIT' ? Math.max(1,Math.min(8,Math.round(space||1))) : undefined,                     // space between 1-bit pins
+        splitType: splitTypeV,                                                                                // split or merge
       };
       components.set(id, comp);
       if (ioId != '') {
@@ -373,21 +385,26 @@ defineModule('engine', ['state'], (state) => {
       return comp;
     }
 
+    // Deletes a component and every wire touching it.
     function removeComponent(id) {
-
       const component = components.get(id);
       components.delete(id);
-
       if (component.ioId != ''){
         ioComponents.delete(component.ioId);
       }
       for (const [wid,w] of wires) { if (w.from.compId===id||w.to.compId===id) wires.delete(wid); }
     }
 
+    // Returns true if `target` is a real component-pin reference, as opposed to a
+    // free-floating {x,y} endpoint (a dangling wire end, or a branch point).
     function isWireTerminal(target) {
       return target && typeof target.compId==='string' && typeof target.pin==='number';
     }
 
+    // Connects two wire terminals, defaulting an unlabeled pin terminal's
+    // `type` to 'out'/'in' by which side of the wire it's on. Refuses (and
+    // returns null instead of) creating an exact duplicate of an
+    // already-existing pin-to-pin wire.
     function addWire(from, to) {
       if (isWireTerminal(from) && isWireTerminal(to)) {
         for (const w of wires.values()) {
@@ -403,6 +420,7 @@ defineModule('engine', ['state'], (state) => {
       return wire;
     }
 
+    // Deletes a wire and any junction that was branching off of it.
     function removeWire(id) {
       wires.delete(id);
       for (const j of junctions) {
@@ -445,6 +463,10 @@ defineModule('engine', ['state'], (state) => {
       return srcWidth !== pinBitWidthAt(dst, 'in', wire.to.pin);
     }
 
+    // The value a wire is currently driven by, from its source — either a
+    // component's output pin directly, or (for a wire branching off another
+    // wire mid-route) whatever value has reached that branch point so far,
+    // accounting for the source wire's own in-flight propagation delay.
     function wireSourceValue(wire, circuit, now, instant) {
       if (isWireTerminal(wire.from)) {
         const src = circuit.components.get(wire.from.compId);
@@ -519,6 +541,14 @@ defineModule('engine', ['state'], (state) => {
       return 0;
     }
 
+    // Advances the simulation by one tick: ticks any running clocks,
+    // recomputes every component's outputs (holding each change for the
+    // component's own configured gate delay before it takes effect),
+    // propagates values across every wire (holding each for its own travel
+    // delay), and finally rebuilds every component's inputs from whatever
+    // wires now drive them. `instant` skips all delays — used for settling
+    // custom-gate sub-circuits and other places that need an immediate,
+    // steady-state result rather than a delay-accurate animation frame.
     function step(now, delayMs, instant) {
       // Tick clocks
       for (const c of components.values()) {
@@ -600,6 +630,7 @@ defineModule('engine', ['state'], (state) => {
       for (const c of components.values()) c.inputVals=acc.get(c.id);
     }
 
+    // Snapshots the circuit into a plain-object form suitable for JSON.stringify (Save), mirrored by load below
     function serialize() {
       return {
         components: [...components.values()].map(c=>({id:c.id,ioId:c.ioId,kind:c.kind,x:c.x,y:c.y,facing:c.facing,delay:c.delay,label:c.label,bitWidth:c.bitWidth,displayMode:c.displayMode,shiftMode:c.shiftMode,muxInputs:c.muxInputs,muxSelectLocation:c.muxSelectLocation,bitWidthIn:c.bitWidthIn,bitWidthOut:c.bitWidthOut,bits:c.bits,space:c.space,splitType:c.splitType,
@@ -610,15 +641,12 @@ defineModule('engine', ['state'], (state) => {
       };
     }
 
+    // Replaces the circuit's contents with the components/wires/junctions encoded in `data` as produced by serialize
     function load(data) {
       components.clear(); ioComponents.clear(); wires.clear(); junctions.clear(); if(!data) return;
-      // Built in two passes: addComponent()/addWire() assign throwaway
-      // sequential temp ids as a side effect of constructing the object, and
-      // those temp ids can coincide with another entry's *saved* id when the
-      // original circuit has gaps (from earlier deletions). Inserting the
-      // final id into the live map mid-loop let a later temp id silently
-      // clobber an already-restored entry; instead, finish minting every
-      // temp id first, then assign real ids and populate the maps once.
+      // Built in two passes: addComponent()/addWire() assign throwaway sequential temp ids as a side effect of constructing the object, 
+      // and deletes it immediately from components to prevent it from interfering from later components that may have the same id
+      // Only after every component is processed do they get assigned their actual ids
       const builtComponents = [];
       for (const cd of data.components||[]) {
         const c=addComponent(cd.kind,cd.x,cd.y,cd.facing,cd.delay,undefined,cd.bitWidth,cd.muxInputs,cd.bitWidthIn,cd.bitWidthOut,cd.bits,cd.space,cd.splitType); components.delete(c.id); ioComponents.delete(c.ioId);
@@ -647,19 +675,23 @@ defineModule('engine', ['state'], (state) => {
       nextIoId=Math.max(data.nextIoId||1,nextIoId);
     }
 
+    // Return for createCircuit(). Returns all properties and methods the app may need to access after build
     return {
       components, wires, ioComponents, junctions,
       addComponent, removeComponent, addWire, removeWire, step, serialize, load,
-      toggleInput(id){const c=components.get(id);if(c&&c.kind==='INPUT')c.state.value=c.state.value?0:1;},
+      // Flips a single-bit INPUT's value
+      toggleInput(id){
+        const c=components.get(id);
+        if(c&&c.kind==='INPUT') c.state.value=c.state.value?0:1;
+      },
+      // Flips one bit of a multi-bit INPUT's value (in binary mode)
       toggleInputBit(id,bit){
         const c=components.get(id); if(!c||c.kind!=='INPUT') return;
-        const width=c.bitWidth||1;
-        if (bit<0||bit>=width) return;
+        const width=c.bitWidth||1; if (bit<0||bit>=width) return;
         c.state.value = ((c.state.value||0) ^ (1<<bit)) >>> 0;
       },
-      // Hex-mode cell click: bumps just its own nibble by 1 (wrapping 0xF->0)
-      // and leaves every other nibble untouched, then re-masks to bitWidth so
-      // a wrap on a partial top nibble can't leak bits past the pin's width.
+      // Increments one nibble of a multi-bit INPUT's value (in hexadecimal mode), wrapping F to 0  
+      // Remasks to bitWidth so a wrap on a partial top nibble can't leak bits past the pin's width
       incrementInputDigit(id,shift){
         const c=components.get(id); if(!c||c.kind!=='INPUT') return;
         const width=c.bitWidth||1;
@@ -668,6 +700,8 @@ defineModule('engine', ['state'], (state) => {
         const cleared=v & ~(0xF<<shift);
         c.state.value = maskVal((cleared | (((nibble+1)&0xF)<<shift))>>>0, width);
       },
+      // Changes a component's bitWidth (clamped 1-32)
+      // Remasks any value already stored on it so it doesn't silently keep bits beyond the new, narrower width.
       setBitWidth(id,w){
         const c=components.get(id); if(!c||!BIT_WIDTH_KINDS.has(c.kind)) return;
         const width=Math.max(1,Math.min(32,Math.round(w)||1));
@@ -675,22 +709,27 @@ defineModule('engine', ['state'], (state) => {
         if (c.kind==='INPUT' || c.kind==='CONST') c.state.value = maskVal(c.state.value||0, width);
         if (c.kind==='REG') c.state.q = maskVal(c.state.q||0, width);
       },
+      // Sets EXTND's input width (clamped 1-32)
       setExtBitWidthIn(id,w){
         const c=components.get(id); if(!c||c.kind!=='EXTND') return;
         c.bitWidthIn=Math.max(1,Math.min(32,Math.round(w)||1));
       },
+      // Sets EXTND's output width (clamped 1-32)
       setExtBitWidthOut(id,w){
         const c=components.get(id); if(!c||c.kind!=='EXTND') return;
         c.bitWidthOut=Math.max(1,Math.min(32,Math.round(w)||1));
       },
+      // Switches a component's canvas readout between binary and hex
       setDisplayMode(id,mode){
         const c=components.get(id); if(!c||(c.kind!=='REG'&&c.kind!=='OUTPUT'&&c.kind!=='INPUT'&&c.kind!=='CONST')) return;
         c.displayMode = mode==='hex' ? 'hex' : 'bin';
       },
+      // Sets SHFT's shift direction/mode (logical left, logical right, or arithmetic right)
       setShiftMode(id,mode){
         const c=components.get(id); if(!c||c.kind!=='SHFT') return;
         c.shiftMode = (mode==='right'||mode==='arith') ? mode : 'left';
       },
+      // Changes MUX's number of inputs (clamped 2-4)
       setMuxInputs(id,n){
         const c=components.get(id); if(!c||c.kind!=='MUX') return;
         const newN=Math.max(2,Math.min(4,Math.round(n)||2));
@@ -708,58 +747,76 @@ defineModule('engine', ['state'], (state) => {
           else if (w.to.pin>=newN && w.to.pin<oldN) wires.delete(wid);
         }
       },
+      // Moves MUX's select pin between the top and bottom edge
       setMuxSelectLocation(id,loc){
         const c=components.get(id); if(!c||c.kind!=='MUX') return;
         c.muxSelectLocation = loc==='bottom' ? 'bottom' : 'top';
       },
+      // Changes SPLIT's bit count (clamped 2-8)
       setSplitBits(id,n){
         const c=components.get(id); if(!c||c.kind!=='SPLIT') return;
         const newN=Math.max(2,Math.min(8,Math.round(n)||2));
         const oldN=c.bits||2;
         if (newN===oldN) return;
         c.bits=newN;
-        // The variable pins beyond the new bit count no longer exist — drop
-        // any wires still attached to them, the same way setMuxInputs drops
-        // wires from data pins an arity shrink removed. Which side those
-        // pins are on depends on splitType: outputs in 'split' mode, inputs
-        // in 'merge' mode (mirrored here to match).
+        // Drop any wires still attached to now deleted pins
+        // Which side those pins are on depends on splitType (outputs in split mode, inputs in merge mode)
         const merge = c.splitType==='merge';
         for (const [wid,w] of wires) {
           const t = merge ? w.to : w.from;
           if (t.compId===id && typeof t.pin==='number' && t.pin>=newN) wires.delete(wid);
         }
       },
+      // Sets the spacing (in grid units, clamped 1-8) between SPLIT's single-bit pins
       setSplitSpace(id,n){
         const c=components.get(id); if(!c||c.kind!=='SPLIT') return;
         c.space=Math.max(1,Math.min(8,Math.round(n)||1));
       },
+      // Switches SPLIT mode between split and merge
       setSplitType(id,type){
         const c=components.get(id); if(!c||c.kind!=='SPLIT') return;
         const t = type==='merge' ? 'merge' : 'split';
         if (t===c.splitType) return;
         c.splitType=t;
-        // Flipping type swaps which pins are inputs vs outputs entirely —
-        // any wire already attached no longer connects the same kind of
-        // thing it did (a wire feeding what was the single input might now
-        // be sitting on an output), so drop them all rather than leave
-        // dangling or semantically-inverted connections, same as
-        // removeComponent does for a deleted component.
+        // Delete all wires originally attached as the context in which they were attached no longer exists
         for (const [wid,w] of wires) {
           if (w.from.compId===id || w.to.compId===id) wires.delete(wid);
         }
       },
-      toggleClock(id){const c=components.get(id);if(c&&c.kind==='CLOCK'){c.state.paused=!c.state.paused;if(!c.state.paused)c.state.lastTick=performance.now();}},
-      setClockPeriod(id,p){const c=components.get(id);if(c&&c.kind==='CLOCK')c.state.period=p;},
-      setIOLabel(id,l){const c=components.get(id);c.label=l;},
-      // Now bit-width aware (CONST used to be hard-limited to 0/1) — masks
-      // to the component's current bitWidth the same way toggling an
-      // INPUT's bits does, instead of alert()-rejecting anything but 0/1.
+      // Pauses/resumes a CLOCK
+      // When resuming, restarts its tick timer to start from now so it doesn't immediately jump using a stale lastTick
+      toggleClock(id){
+        const c=components.get(id);
+        if(c&&c.kind==='CLOCK'){
+          c.state.paused=!c.state.paused;
+          if(!c.state.paused)c.state.lastTick=performance.now();
+        }
+      },
+      // Sets a CLOCK's full period, in ms
+      setClockPeriod(id,p){
+        const c=components.get(id);
+        if(c&&c.kind==='CLOCK')c.state.period=p;
+      },
+      // Renames an IO component's label
+      setIOLabel(id,l){
+        const c=components.get(id);
+        c.label=l;
+      },
+      // Sets a CONST's value, remasking it to its current bitWidth
       setConstValue(id,v){
         const c=components.get(id); if(!c||c.kind!=='CONST') return;
         c.state.value = maskVal(Math.max(0,Math.round(Number(v)||0)), c.bitWidth||1);
       },
-      setFacing(id,f){const c=components.get(id);c.facing=f;},
-      setDelay(id,d){const c=components.get(id);c.delay=d;},
+      // Rotates/mirrors a component by setting its facing (right, left, up, or down)
+      setFacing(id,f){
+        const c=components.get(id);
+        c.facing=f;
+      },
+      // Sets a component's own gate propagation delay, in ms
+      setDelay(id,d){
+        const c=components.get(id);
+        c.delay=d;
+      },
     };
   }
 
