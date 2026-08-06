@@ -12,7 +12,7 @@ defineModule('engine', ['state'], (state) => {
 
   // Kinds whose per-instance `bitWidth` is user-configurable (the remaining
   // sequential kinds are intentionally excluded for now).
-  const BIT_WIDTH_KINDS = new Set(['INPUT','OUTPUT','AND','OR','NOT','NAND','NOR','XOR','XNOR','REG','MUX','SHFT']);
+  const BIT_WIDTH_KINDS = new Set(['INPUT','OUTPUT','CONST','AND','OR','NOT','NAND','NOR','XOR','XNOR','REG','MUX','SHFT']);
 
   // Most BIT_WIDTH_KINDS share one width across every pin, but REG's D input
   // and Q output are the only ones meant to carry a bus — EN/CLK/RESET stay
@@ -97,6 +97,8 @@ defineModule('engine', ['state'], (state) => {
               compute:()=>[] },
     CLOCK:  { kind:'CLOCK',  label:'CLK',   inputs:0, outputs:1, family:'io',
               compute:(i,s) => [s.value?1:0] },
+    CONST:  { kind:'CONST', label: 'CONST', inputs:0, outputs:1, family:'io',
+              compute:(i,s,w) => [maskVal(s.value||0, w||1)] },
     SEVEN:  { kind:'SEVEN',  label:'7SEG',  inputs:7, outputs:0, family:'io',
               compute:()=>[] },
     AND:    { kind:'AND',  label:'AND',   inputs:2, outputs:1, family:'and',  compute:([a,b],s,w)=>[maskVal(a&b,w)] },
@@ -344,7 +346,7 @@ defineModule('engine', ['state'], (state) => {
                         : def.inputs;
       const comp = {
         id, ioId, kind, x, y,
-        state: kind==='INPUT' ? {value:0}
+        state: kind==='INPUT' || kind==='CONST' ? {value:0}
             : kind==='CLOCK' ? {value:0, period:1000, lastTick:0, paused:false}
             : kind==='DFF'   ? {q:0, lastClk:0} : {},
         inputVals:  new Array(inputCount).fill(0),
@@ -354,7 +356,7 @@ defineModule('engine', ['state'], (state) => {
         facing,
         delay,
         bitWidth: BIT_WIDTH_KINDS.has(kind) ? Math.max(1,Math.min(32,Math.round(bitWidth||1))) : undefined,
-        displayMode: kind==='REG' || kind==='OUTPUT' || kind==='INPUT' ? 'bin' : undefined,
+        displayMode: kind==='REG' || kind==='OUTPUT' || kind==='INPUT' || kind==='CONST' ? 'bin' : undefined,
         shiftMode: kind==='SHFT' ? 'left' : undefined,
         muxInputs: muxN,
         muxSelectLocation: kind==='MUX' ? 'top' : undefined,
@@ -601,7 +603,7 @@ defineModule('engine', ['state'], (state) => {
     function serialize() {
       return {
         components: [...components.values()].map(c=>({id:c.id,ioId:c.ioId,kind:c.kind,x:c.x,y:c.y,facing:c.facing,delay:c.delay,label:c.label,bitWidth:c.bitWidth,displayMode:c.displayMode,shiftMode:c.shiftMode,muxInputs:c.muxInputs,muxSelectLocation:c.muxSelectLocation,bitWidthIn:c.bitWidthIn,bitWidthOut:c.bitWidthOut,bits:c.bits,space:c.space,splitType:c.splitType,
-          state:c.kind==='INPUT'?{value:c.state.value}:c.kind==='CLOCK'?{period:c.state.period,paused:c.state.paused}:{}})),
+          state:c.kind==='INPUT'||c.kind==='CONST'?{value:c.state.value}:c.kind==='CLOCK'?{period:c.state.period,paused:c.state.paused}:{}})),
         wires: [...wires.values()].map(w=>({id:w.id,from:w.from,to:w.to,points:w.points||[]})),
         junctions: [...junctions],
         nextId, nextIoId,
@@ -670,7 +672,7 @@ defineModule('engine', ['state'], (state) => {
         const c=components.get(id); if(!c||!BIT_WIDTH_KINDS.has(c.kind)) return;
         const width=Math.max(1,Math.min(32,Math.round(w)||1));
         c.bitWidth=width;
-        if (c.kind==='INPUT') c.state.value = maskVal(c.state.value||0, width);
+        if (c.kind==='INPUT' || c.kind==='CONST') c.state.value = maskVal(c.state.value||0, width);
         if (c.kind==='REG') c.state.q = maskVal(c.state.q||0, width);
       },
       setExtBitWidthIn(id,w){
@@ -682,7 +684,7 @@ defineModule('engine', ['state'], (state) => {
         c.bitWidthOut=Math.max(1,Math.min(32,Math.round(w)||1));
       },
       setDisplayMode(id,mode){
-        const c=components.get(id); if(!c||(c.kind!=='REG'&&c.kind!=='OUTPUT'&&c.kind!=='INPUT')) return;
+        const c=components.get(id); if(!c||(c.kind!=='REG'&&c.kind!=='OUTPUT'&&c.kind!=='INPUT'&&c.kind!=='CONST')) return;
         c.displayMode = mode==='hex' ? 'hex' : 'bin';
       },
       setShiftMode(id,mode){
@@ -749,6 +751,13 @@ defineModule('engine', ['state'], (state) => {
       toggleClock(id){const c=components.get(id);if(c&&c.kind==='CLOCK'){c.state.paused=!c.state.paused;if(!c.state.paused)c.state.lastTick=performance.now();}},
       setClockPeriod(id,p){const c=components.get(id);if(c&&c.kind==='CLOCK')c.state.period=p;},
       setIOLabel(id,l){const c=components.get(id);c.label=l;},
+      // Now bit-width aware (CONST used to be hard-limited to 0/1) — masks
+      // to the component's current bitWidth the same way toggling an
+      // INPUT's bits does, instead of alert()-rejecting anything but 0/1.
+      setConstValue(id,v){
+        const c=components.get(id); if(!c||c.kind!=='CONST') return;
+        c.state.value = maskVal(Math.max(0,Math.round(Number(v)||0)), c.bitWidth||1);
+      },
       setFacing(id,f){const c=components.get(id);c.facing=f;},
       setDelay(id,d){const c=components.get(id);c.delay=d;},
     };

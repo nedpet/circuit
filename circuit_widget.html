@@ -323,12 +323,43 @@ defineModule('gates', ['engine'], (engine) => {
     const key = n+(hex?'h':'b');
     return outputVisCache[key] || (outputVisCache[key]=buildOutputVis(n, hex));
   }
+  // CONST's multi-bit body deliberately does NOT reuse INPUT/OUTPUT's
+  // per-bit cell grid — that made a multi-bit CONST visually indistinguishable
+  // from a multi-bit INPUT/OUTPUT at a glance. Instead it's just one string
+  // (the same regValueText formatting REG's readout uses), echoing the
+  // plain single-digit look the 1-bit CONST circle already has. Digit count
+  // — and so box width — depends only on n/hex (regValueText zero-pads to a
+  // fixed length), not on the actual value, so it can be sized here same as
+  // bitsRowWidth is for the cell-grid components.
+  const CONST_CHAR_W=9, CONST_PAD=12;
+  function buildConstVis(n, hex) {
+    const digits = hex ? Math.ceil(n/4) : n;
+    const w=Math.max(40, digits*CONST_CHAR_W + CONST_PAD*2), h=40;
+    return { w, h, inputs:[], outputs:[{x:w,y:20}],
+      body:(f,comp)=>{
+        const text = regValueText(comp.state.value||0, n, hex?'hex':'bin');
+        return <g>
+          <rect x="2" y="7" width={w-4} height="26" rx="10" fill="#f3f3f1" stroke="var(--ink)" strokeWidth="2"/>
+          <text x={w/2} y="26" fontFamily="var(--mono)" fontSize="16" fontWeight="600" textAnchor="middle" fill="var(--ink)" opacity="0.8">{text}</text>
+        </g>;
+      }
+    };
+  }
+  const constVisCache={};
+  function constVis(bw, mode) {
+    const n=Math.max(1,Math.min(32,bw|0||1));
+    if (n<=1) return VIS.CONST;
+    const hex = mode==='hex';
+    const key = n+(hex?'h':'b');
+    return constVisCache[key] || (constVisCache[key]=buildConstVis(n, hex));
+  }
   // Single point every consumer (rendering, pin geometry, wiring) should go
-  // through instead of `VIS[comp.kind]` directly, since INPUT/OUTPUT, MUX
-  // and SPLIT no longer have a fixed size — everything else still does.
+  // through instead of `VIS[comp.kind]` directly, since INPUT/OUTPUT/CONST,
+  // MUX and SPLIT no longer have a fixed size — everything else still does.
   function visForComp(comp) {
     if (comp.kind==='INPUT') return inputVis(comp.bitWidth, comp.displayMode);
     if (comp.kind==='OUTPUT') return outputVis(comp.bitWidth, comp.displayMode);
+    if (comp.kind==='CONST') return constVis(comp.bitWidth, comp.displayMode);
     if (comp.kind==='MUX') return muxVis(comp.muxInputs, comp.muxSelectLocation);
     if (comp.kind==='SPLIT') return splitVis(comp.bits, comp.space, comp.splitType);
     return VIS[comp.kind];
@@ -345,6 +376,16 @@ defineModule('gates', ['engine'], (engine) => {
         </> : <path d="M 12 28 L 18 28 L 18 14 L 28 14 L 28 28 L 38 28 L 38 14 L 44 14"
               fill="none" stroke={on?'var(--high)':'var(--ink)'}
               strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>}
+      </g>;
+    }
+  };
+
+  VIS.CONST = { w:40,h:40, inputs:[], outputs:[{x:38,y:20}],
+    body:(f,comp)=>{
+      const on=comp.state.value;
+      return <g>
+        <circle cx="18" cy="20" r="13" fill={on==1?'#fde68a':'#f3f3f1'} stroke="var(--ink)" strokeWidth="2"/>
+        <text x="18" y="26" fontFamily="var(--mono)" fontSize="16" fontWeight="600" textAnchor="middle" fill="var(--ink)" opacity="0.8">{comp.state.value}</text>
       </g>;
     }
   };
@@ -916,16 +957,33 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
       </div>
     );
   })() : null;
-  const ioPanel = selComp?.kind==='INPUT' || selComp?.kind==='OUTPUT' ? (()=>{
+  // INPUT/OUTPUT/CONST share the same Bits/Format/Facing controls (CONST
+  // is bit-width-aware for the same reason INPUT is), and differ only in
+  // their very first row: INPUT/OUTPUT are named circuit ports (Label),
+  // while CONST is a fixed, unnamed tie-in value (Value) — everything else
+  // is identical, so one panel covers all three instead of two
+  // near-duplicates drifting apart.
+  const ioPanel = selComp?.kind==='INPUT' || selComp?.kind==='OUTPUT' || selComp?.kind==='CONST' ? (()=>{
+    const isConst = selComp.kind==='CONST';
+    const maxVal = (selComp.bitWidth||1) >= 32 ? 0xFFFFFFFF : (2**(selComp.bitWidth||1) - 1);
     return (
       <div className="prop-panel" onMouseDown={e=>e.stopPropagation()}>
-        <div className="prop-title">{selComp.kind} Properties</div>
-        <div className="prop-option">
-          <span className="prop-label">Label</span>
-          <input  className="prop-input"
-                  value={selComp.label}
-                  onChange={e=>{circuit.setIOLabel(selComp.id,e.target.value);onComponentChanged?.();}}/>
-        </div>
+        <div className="prop-title">{isConst ? 'Constant' : selComp.kind} Properties</div>
+        {isConst ? (
+          <div className="prop-option">
+            <span className="prop-label">Value</span>
+            <input  className="prop-input" type="number" min="0" max={maxVal}
+                    value={selComp.state.value||0}
+                    onChange={e=>{circuit.setConstValue(selComp.id,Number(e.target.value));onComponentChanged?.();}}/>
+          </div>
+        ) : (
+          <div className="prop-option">
+            <span className="prop-label">Label</span>
+            <input  className="prop-input"
+                    value={selComp.label}
+                    onChange={e=>{circuit.setIOLabel(selComp.id,e.target.value);onComponentChanged?.();}}/>
+          </div>
+        )}
         <div className="prop-option">
           <span className="prop-label">Bits</span>
           <input  className="prop-input" type="number" min="1" max="32"
@@ -1244,7 +1302,7 @@ defineModule('palette', ['engine', 'gates'], (engine, gates) => {
 const { GATE_DEFS } = engine;
 const { GATE_VIS, GateBody } = gates;
 const GROUPS=[
-  {title:'Sources',   kinds:['INPUT','CLOCK']},
+  {title:'Sources',   kinds:['INPUT','CLOCK','CONST']},
   {title:'Sinks',     kinds:['OUTPUT', 'SEVEN']},
   {title:'Logic',     kinds:['AND','OR','NOT','NAND','NOR','XOR','XNOR','MUX']},
   {title:'Flip-flops',kinds:['DFF','TFF','JKFF','SRFF']},
