@@ -64,22 +64,30 @@ defineModule('engine', ['state'], (state) => {
     if (comp.kind === 'EXTND') {
       return dir === 'in' ? (comp.bitWidthIn||1) : (comp.bitWidthOut||1);
     }
-    // SPLIT's single input carries the whole `bits`-wide bus; every output
-    // is always exactly 1 bit (also excluded from BIT_WIDTH_KINDS for the
-    // same reason EXTND is — there's no single shared comp.bitWidth here).
+    // SPLIT: in its default 'split' mode the single input carries the whole
+    // `bits`-wide bus and every output is 1 bit; 'merge' mode reverses the
+    // roles (many 1-bit inputs, one `bits`-wide output) rather than reusing
+    // the same pin for a different width. Also excluded from BIT_WIDTH_KINDS
+    // for the same reason EXTND is — there's no single shared comp.bitWidth.
     if (comp.kind === 'SPLIT') {
-      return dir === 'in' ? (comp.bits||2) : 1;
+      const wide = comp.bits||2, narrow = 1;
+      const merge = comp.splitType === 'merge';
+      return dir === 'in' ? (merge ? narrow : wide) : (merge ? wide : narrow);
     }
     const fixed = FIXED_WIDTH_PINS[comp.kind];
     if (fixed && fixed[dir] && fixed[dir].has(idx)) return 1;
     return BIT_WIDTH_KINDS.has(comp.kind) ? (comp.bitWidth||1) : 1;
   }
 
-  // MUX is the only kind whose *pin count* varies per instance (2-4 data
-  // lines + 1 select), so unlike bitWidth this changes the size of
-  // inputVals itself, not just how a slot's value is interpreted.
+  // MUX and SPLIT are the only kinds whose *pin count* varies per instance
+  // (MUX: 2-4 data lines + 1 select; SPLIT in 'merge' mode: 2-8 one-bit
+  // inputs instead of its default single wide one), so unlike bitWidth this
+  // changes the size of inputVals itself, not just how a slot's value is
+  // interpreted.
   function compInputCount(c) {
-    return c.kind === 'MUX' ? (c.muxInputs||2) + 1 : GATE_DEFS[c.kind].inputs;
+    if (c.kind === 'MUX') return (c.muxInputs||2) + 1;
+    if (c.kind === 'SPLIT') return c.splitType==='merge' ? (c.bits||2) : GATE_DEFS.SPLIT.inputs;
+    return GATE_DEFS[c.kind].inputs;
   }
 
   const GATE_DEFS = {
@@ -149,17 +157,26 @@ defineModule('engine', ['state'], (state) => {
                 const toW = (comp&&comp.bitWidthOut)||1;
                 return [signExtend(a||0, fromW, toW)];
               } } ,
-    // Fans a single `bits`-wide bus (2-8) out into that many 1-bit outputs.
-    // `outputs:8` is just the construction-time array size (the max — see
-    // addComponent); compute() itself returns exactly `comp.bits` values,
-    // and step() sizes its per-output bookkeeping off that returned array,
-    // not this def, so a smaller instance simply leaves the extra slots
-    // unused. Output i reads bit i of the input (0 = topmost pin = LSB),
-    // matching gates.js's buildSplitVis pin order.
+    // 'split' (default): fans a single `bits`-wide bus (2-8) out into that
+    // many 1-bit outputs, output i reading bit i of the input (0 = topmost
+    // pin = LSB). 'merge' is the reverse: `bits` 1-bit inputs combine into
+    // one `bits`-wide output, input i landing at bit i — same pin order,
+    // just with input/output swapped (matches gates.js's buildSplitVis,
+    // which mirrors the whole shape rather than keeping the pins in place).
+    // `inputs:1, outputs:8` are just the construction-time array sizes (see
+    // addComponent/compInputCount) for the default 'split' mode's max —
+    // compute() itself returns exactly as many values as the current
+    // mode+bits need, and step() sizes its per-output bookkeeping off that
+    // returned array, not this def, so unused slots are simply left alone.
     SPLIT:  { kind:'SPLIT', label:'SPLITTER', inputs:1, outputs:8, family:'misc',
-              compute:([a],s,w,comp) => {
+              compute:(inputVals,s,w,comp) => {
                 const n = (comp&&comp.bits)||2;
-                const v = a||0;
+                if (comp && comp.splitType === 'merge') {
+                  let v = 0;
+                  for (let i=0;i<n;i++) v |= (inputVals[i]?1:0) << i;
+                  return [v>>>0];
+                }
+                const v = inputVals[0]||0;
                 return Array.from({length:n}, (_,i)=>(v>>>i)&1);
               } } ,
   };
@@ -311,14 +328,20 @@ defineModule('engine', ['state'], (state) => {
     const wires = new Map();
     const junctions = new Set(); // {x, y, sourceWireId}
 
-    function addComponent(kind, x, y, facing = "right", delay = 0, label = "none", bitWidth, muxInputs, bitWidthIn, bitWidthOut, bits, space) {
+    function addComponent(kind, x, y, facing = "right", delay = 0, label = "none", bitWidth, muxInputs, bitWidthIn, bitWidthOut, bits, space, splitType) {
       const def = GATE_DEFS[kind];
       const id = 'c'+(nextId++);
       const ioId = kind==='INPUT' || kind==='OUTPUT' ? 'io'+(nextIoId++) : ''
       // MUX's pin count (unlike bitWidth) varies per instance, so its
-      // inputVals can't be sized off the kind's static def.inputs.
+      // inputVals can't be sized off the kind's static def.inputs. SPLIT in
+      // 'merge' mode is the same story — its variable pins are inputs
+      // instead of outputs, so it needs `bits` slots up front too.
       const muxN = kind==='MUX' ? Math.max(2,Math.min(4,Math.round(muxInputs||2))) : undefined;
-      const inputCount = kind==='MUX' ? muxN+1 : def.inputs;
+      const splitBitsN = kind==='SPLIT' ? Math.max(2,Math.min(8,Math.round(bits||2))) : undefined;
+      const splitTypeV = kind==='SPLIT' ? (splitType==='merge' ? 'merge' : 'split') : undefined;
+      const inputCount = kind==='MUX' ? muxN+1
+                        : (kind==='SPLIT' && splitTypeV==='merge') ? splitBitsN
+                        : def.inputs;
       const comp = {
         id, ioId, kind, x, y,
         state: kind==='INPUT' ? {value:0}
@@ -337,8 +360,9 @@ defineModule('engine', ['state'], (state) => {
         muxSelectLocation: kind==='MUX' ? 'top' : undefined,
         bitWidthIn:  kind==='EXTND' ? Math.max(1,Math.min(32,Math.round(bitWidthIn||1)))  : undefined,
         bitWidthOut: kind==='EXTND' ? Math.max(1,Math.min(32,Math.round(bitWidthOut||1))) : undefined,
-        bits:  kind==='SPLIT' ? Math.max(2,Math.min(8,Math.round(bits||2)))   : undefined,
+        bits:  splitBitsN,
         space: kind==='SPLIT' ? Math.max(1,Math.min(8,Math.round(space||1))) : undefined,
+        splitType: splitTypeV,
       };
       components.set(id, comp);
       if (ioId != '') {
@@ -576,7 +600,7 @@ defineModule('engine', ['state'], (state) => {
 
     function serialize() {
       return {
-        components: [...components.values()].map(c=>({id:c.id,ioId:c.ioId,kind:c.kind,x:c.x,y:c.y,facing:c.facing,delay:c.delay,label:c.label,bitWidth:c.bitWidth,displayMode:c.displayMode,shiftMode:c.shiftMode,muxInputs:c.muxInputs,muxSelectLocation:c.muxSelectLocation,bitWidthIn:c.bitWidthIn,bitWidthOut:c.bitWidthOut,bits:c.bits,space:c.space,
+        components: [...components.values()].map(c=>({id:c.id,ioId:c.ioId,kind:c.kind,x:c.x,y:c.y,facing:c.facing,delay:c.delay,label:c.label,bitWidth:c.bitWidth,displayMode:c.displayMode,shiftMode:c.shiftMode,muxInputs:c.muxInputs,muxSelectLocation:c.muxSelectLocation,bitWidthIn:c.bitWidthIn,bitWidthOut:c.bitWidthOut,bits:c.bits,space:c.space,splitType:c.splitType,
           state:c.kind==='INPUT'?{value:c.state.value}:c.kind==='CLOCK'?{period:c.state.period,paused:c.state.paused}:{}})),
         wires: [...wires.values()].map(w=>({id:w.id,from:w.from,to:w.to,points:w.points||[]})),
         junctions: [...junctions],
@@ -595,7 +619,7 @@ defineModule('engine', ['state'], (state) => {
       // temp id first, then assign real ids and populate the maps once.
       const builtComponents = [];
       for (const cd of data.components||[]) {
-        const c=addComponent(cd.kind,cd.x,cd.y,cd.facing,cd.delay,undefined,cd.bitWidth,cd.muxInputs,cd.bitWidthIn,cd.bitWidthOut,cd.bits,cd.space); components.delete(c.id); ioComponents.delete(c.ioId);
+        const c=addComponent(cd.kind,cd.x,cd.y,cd.facing,cd.delay,undefined,cd.bitWidth,cd.muxInputs,cd.bitWidthIn,cd.bitWidthOut,cd.bits,cd.space,cd.splitType); components.delete(c.id); ioComponents.delete(c.ioId);
         if(cd.label!==undefined) c.label=cd.label;
         if(cd.displayMode!==undefined) c.displayMode=cd.displayMode;
         if(cd.shiftMode!==undefined) c.shiftMode=cd.shiftMode;
@@ -692,17 +716,35 @@ defineModule('engine', ['state'], (state) => {
         const oldN=c.bits||2;
         if (newN===oldN) return;
         c.bits=newN;
-        // Output pins beyond the new bit count no longer exist — drop any
-        // wires still leaving from them, the same way setMuxInputs drops
-        // wires from data pins an arity shrink removed (mirrored here since
-        // SPLIT's variable pins are outputs rather than inputs).
+        // The variable pins beyond the new bit count no longer exist — drop
+        // any wires still attached to them, the same way setMuxInputs drops
+        // wires from data pins an arity shrink removed. Which side those
+        // pins are on depends on splitType: outputs in 'split' mode, inputs
+        // in 'merge' mode (mirrored here to match).
+        const merge = c.splitType==='merge';
         for (const [wid,w] of wires) {
-          if (w.from.compId===id && typeof w.from.pin==='number' && w.from.pin>=newN) wires.delete(wid);
+          const t = merge ? w.to : w.from;
+          if (t.compId===id && typeof t.pin==='number' && t.pin>=newN) wires.delete(wid);
         }
       },
       setSplitSpace(id,n){
         const c=components.get(id); if(!c||c.kind!=='SPLIT') return;
         c.space=Math.max(1,Math.min(8,Math.round(n)||1));
+      },
+      setSplitType(id,type){
+        const c=components.get(id); if(!c||c.kind!=='SPLIT') return;
+        const t = type==='merge' ? 'merge' : 'split';
+        if (t===c.splitType) return;
+        c.splitType=t;
+        // Flipping type swaps which pins are inputs vs outputs entirely —
+        // any wire already attached no longer connects the same kind of
+        // thing it did (a wire feeding what was the single input might now
+        // be sitting on an output), so drop them all rather than leave
+        // dangling or semantically-inverted connections, same as
+        // removeComponent does for a deleted component.
+        for (const [wid,w] of wires) {
+          if (w.from.compId===id || w.to.compId===id) wires.delete(wid);
+        }
       },
       toggleClock(id){const c=components.get(id);if(c&&c.kind==='CLOCK'){c.state.paused=!c.state.paused;if(!c.state.paused)c.state.lastTick=performance.now();}},
       setClockPeriod(id,p){const c=components.get(id);if(c&&c.kind==='CLOCK')c.state.period=p;},

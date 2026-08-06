@@ -146,54 +146,68 @@ defineModule('gates', ['engine'], (engine) => {
   }
   VIS.MUX = muxVis(2);
 
-  // SPLIT fans a single multi-bit bus out into `bits` (2-8) individual
-  // 1-bit pins. It's deliberately drawn as bare wire, not a gate body: a
-  // vertical "trunk" with each output tapped off it every `space` grid
-  // cells (reusing the standard 12px 'right' pin stub for each tap's
+  // SPLIT, in its default 'split' type, fans a single multi-bit bus out
+  // into `bits` (2-8) individual 1-bit pins. It's deliberately drawn as
+  // bare wire, not a gate body: a vertical "trunk" with each tap every
+  // `space` grid cells (reusing the standard 12px pin stub for each tap's
   // little leg), starting right where a one-grid-cell 45° lead-in from the
-  // single `bits`-wide input pin meets the trunk. Output i taps bit i of
-  // the input (0 = topmost, nearest the input = LSB) — arbitrary but
-  // fixed, so wiring is predictable; engine.js's SPLIT compute() matches
-  // this order, and each tap is labeled with its bit index (to the left of
-  // the trunk/pin) so it's readable straight off the diagram instead of
-  // just inferred.
-  // Both dimensions are per-instance like MUX's muxInputs, so geometry is
-  // built/cached the same way.
+  // single `bits`-wide pin meets the trunk. Tap i reads/writes bit i (0 =
+  // topmost, nearest the diagonal = LSB) — arbitrary but fixed, so wiring
+  // is predictable; engine.js's SPLIT compute() matches this order. Each
+  // tap is labeled with its bit index, on whichever side of the trunk its
+  // stub *isn't* on, so the label never sits under the pin's own leg.
+  // 'merge' type is the exact reverse in every sense: the taps become
+  // inputs (many 1-bit values combining into one) and the diagonal pin
+  // becomes the output, AND the whole shape mirrors horizontally (taps
+  // move to the left, diagonal to the right) — so a right-facing 'merge'
+  // reads as the mirror image of a right-facing 'split' (equivalently: the
+  // same picture a left-facing 'split' already draws), making the two
+  // types visually distinguishable at a glance even before you trace which
+  // way the pins point.
+  // All three of bits/space/type are per-instance like MUX's muxInputs, so
+  // geometry is built/cached the same way.
   const SPLIT_UNIT = 20; // matches Canvas' GRID (20px snap), so the diagonal lands on a clean cell and taps line up with the grid
-  function buildSplitVis(n, space) {
-    const tx = SPLIT_UNIT, topY = SPLIT_UNIT, gap = space*SPLIT_UNIT;
-    // Output 0 sits right at the diagonal/trunk junction (no lead-in
-    // segment before the first tap); the trunk then only needs to reach
-    // the last output.
-    const outputs = Array.from({length:n}, (_,i)=>({x:tx+12, y:topY+i*gap}));
+  function buildSplitVis(n, space, merge) {
+    const gap = space*SPLIT_UNIT, topY = SPLIT_UNIT;
+    const w = SPLIT_UNIT + 12; // total width is the same either way — just mirrored
+    // 'split': diagonal at (0,0), trunk at x=20, taps at x=32 (right).
+    // 'merge': the horizontal mirror of that (x -> w-x): diagonal at
+    // (32,0), trunk at x=12, taps at x=0 (left).
+    const trunkX = merge ? w-SPLIT_UNIT : SPLIT_UNIT;
+    const tapX   = merge ? 0 : w;
+    const diagX  = merge ? w : 0;
+    const taps = Array.from({length:n}, (_,i)=>({x:tapX, y:topY+i*gap}));
+    // The diagonal's far end is this pin's whole connector, drawn in full
+    // by body() below — GateBody's generic (cardinal-only) stub renderer
+    // is skipped for it (noStub) instead of adding a second, wrongly-angled leg.
+    const diagPin = {x:diagX, y:0, dir:'up', noStub:true};
     const lastY = topY + (n-1)*gap;
-    return { w: tx+12, h: lastY,
-      // noStub: the diagonal below is this pin's whole connector, drawn in
-      // full by body() — GateBody's generic (cardinal-only) stub renderer
-      // is skipped for it instead of adding a second, wrongly-angled leg.
-      inputs: [{x:0, y:0, dir:'up', noStub:true}],
-      outputs,
+    return { w, h: lastY,
+      inputs:  merge ? taps : [diagPin],
+      outputs: merge ? [diagPin] : taps,
       body:()=><g>
         {/* Invisible fat hit-area — the visible body is just two thin
             strokes with nothing to fill, so without this, clicking to
             select/drag the component anywhere off those exact pixels (the
             wire-like point of the whole design) would silently miss it. */}
-        <rect x="0" y="0" width={tx+12} height={lastY} fill="transparent"/>
-        <line x1={tx} y1={topY} x2="0" y2="0" stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>
-        <line x1={tx} y1={topY} x2={tx} y2={lastY} stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>
-        {outputs.map((p,i)=>(
-          <text key={i} x={tx-6} y={p.y+3} textAnchor="end" fontFamily="var(--mono)" fontSize="8" fontWeight="600" fill="var(--ink)" opacity="0.6">{i}</text>
+        <rect x="0" y="0" width={w} height={lastY} fill="transparent"/>
+        <line x1={trunkX} y1={topY} x2={diagX} y2="0" stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>
+        <line x1={trunkX} y1={topY} x2={trunkX} y2={lastY} stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>
+        {taps.map((p,i)=>(
+          <text key={i} x={merge ? trunkX+6 : trunkX-6} y={p.y+3} textAnchor={merge ? 'start' : 'end'}
+                fontFamily="var(--mono)" fontSize="8" fontWeight="600" fill="var(--ink)" opacity="0.6">{i}</text>
         ))}
       </g> };
   }
   const splitVisCache = {};
-  function splitVis(n, space) {
+  function splitVis(n, space, type) {
     const bits = Math.max(2, Math.min(8, n|0||2));
     const sp = Math.max(1, Math.min(8, space|0||1));
-    const key = bits+'_'+sp;
-    return splitVisCache[key] || (splitVisCache[key] = buildSplitVis(bits, sp));
+    const merge = type==='merge';
+    const key = bits+'_'+sp+'_'+(merge?'m':'s');
+    return splitVisCache[key] || (splitVisCache[key] = buildSplitVis(bits, sp, merge));
   }
-  VIS.SPLIT = splitVis(2, 1);
+  VIS.SPLIT = splitVis(2, 1, 'split');
 
 
   VIS.INPUT = { w:60,h:40, inputs:[], outputs:[{x:60,y:20}],
@@ -316,7 +330,7 @@ defineModule('gates', ['engine'], (engine) => {
     if (comp.kind==='INPUT') return inputVis(comp.bitWidth, comp.displayMode);
     if (comp.kind==='OUTPUT') return outputVis(comp.bitWidth, comp.displayMode);
     if (comp.kind==='MUX') return muxVis(comp.muxInputs, comp.muxSelectLocation);
-    if (comp.kind==='SPLIT') return splitVis(comp.bits, comp.space);
+    if (comp.kind==='SPLIT') return splitVis(comp.bits, comp.space, comp.splitType);
     return VIS[comp.kind];
   }
 
@@ -494,7 +508,7 @@ defineModule('gates', ['engine'], (engine) => {
                           ? `translate(${vis.w} 0) scale(-1 1)`
                           : `rotate(${comp.facing==='up'?270:comp.facing==='down'?90:0} ${vis.w/2} ${vis.h/2})`}>
       {vis.inputs.map((p,i)=>{if(p.noStub) return null; const s=pinStub(p,'left');return <line key={'i'+i} x1={s.x1} y1={s.y1} x2={s.x2} y2={s.y2} stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>;})}
-      {vis.outputs.map((p,i)=>{const s=pinStub(p,'right');return <line key={'o'+i} x1={s.x1} y1={s.y1} x2={s.x2} y2={s.y2} stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>;})}
+      {vis.outputs.map((p,i)=>{if(p.noStub) return null; const s=pinStub(p,'right');return <line key={'o'+i} x1={s.x1} y1={s.y1} x2={s.x2} y2={s.y2} stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>;})}
       {mirrored ? unmirrorText(body) : body}
     </g>;
   }
@@ -959,6 +973,15 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
                     onChange={e=>{circuit.setExtBitWidthOut(selComp.id,Number(e.target.value));onComponentChanged?.();}}/>
           </div>
         </> : selComp.kind==='SPLIT' ? <>
+          <div className="prop-option">
+            <span className="prop-label">Type</span>
+            <select className="prop-input"
+                    value={selComp.splitType||'split'}
+                    onChange={e=>{circuit.setSplitType(selComp.id,e.target.value);onComponentChanged?.();}}>
+              <option value="split">Split</option>
+              <option value="merge">Merge</option>
+            </select>
+          </div>
           <div className="prop-option">
             <span className="prop-label">Bits</span>
             <input  className="prop-input" type="number" min="2" max="8"
