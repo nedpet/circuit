@@ -649,6 +649,35 @@ const {
 const GRID = 20;
 const snap = (v, on=true) => on ? Math.round(v/GRID)*GRID : v;
 
+// A plain controlled `<input type="number" value={x} onChange={...}>` fights
+// the user mid-edit: clearing "1" to type "8" makes the field momentarily
+// empty, Number('')||fallback immediately clamps that back to a valid
+// number, and the resulting re-render snaps the field's text back before
+// the next keystroke lands — so e.g. going from 1 to 8 only works by typing
+// the 8 *before* deleting the 1, never the more natural backspace-then-type
+// order. This decouples the field's displayed text from the committed
+// value: keystrokes that don't yet parse to a number in [min,max] (empty
+// included) update the local text only, without calling onCommit, so nothing
+// snaps back until the user actually reaches a valid value. Blurring with an
+// invalid/abandoned edit still in progress reverts the display to the last
+// committed value rather than leaving it stuck looking invalid.
+function NumberField({ className, value, min, max, onCommit }) {
+  const [text, setText] = useState(String(value));
+  const focused = useRef(false);
+  useEffect(() => { if (!focused.current) setText(String(value)); }, [value]);
+  const inRange = (n) => !Number.isNaN(n) && (min==null || n>=min) && (max==null || n<=max);
+  return <input className={className} type="number" min={min} max={max}
+    value={text}
+    onFocus={()=>{focused.current=true;}}
+    onChange={e=>{
+      const t = e.target.value;
+      setText(t);
+      const n = Number(t);
+      if (t.trim()!=='' && inRange(n)) onCommit(n);
+    }}
+    onBlur={()=>{focused.current=false; setText(String(value));}}/>;
+}
+
 function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag, onComponentChanged, snapGrid=true }) {
   const svgRef = useRef(null);
   const [view, setView] = useState({x:0,y:0,zoom:1});
@@ -972,9 +1001,9 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
         {isConst ? (
           <div className="prop-option">
             <span className="prop-label">Value</span>
-            <input  className="prop-input" type="number" min="0" max={maxVal}
+            <NumberField className="prop-input" min={0} max={maxVal}
                     value={selComp.state.value||0}
-                    onChange={e=>{circuit.setConstValue(selComp.id,Number(e.target.value));onComponentChanged?.();}}/>
+                    onCommit={n=>{circuit.setConstValue(selComp.id,n);onComponentChanged?.();}}/>
           </div>
         ) : (
           <div className="prop-option">
@@ -986,9 +1015,9 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
         )}
         <div className="prop-option">
           <span className="prop-label">Bits</span>
-          <input  className="prop-input" type="number" min="1" max="32"
+          <NumberField className="prop-input" min={1} max={32}
                   value={selComp.bitWidth||1}
-                  onChange={e=>{circuit.setBitWidth(selComp.id,Number(e.target.value));onComponentChanged?.();}}/>
+                  onCommit={n=>{circuit.setBitWidth(selComp.id,n);onComponentChanged?.();}}/>
         </div>
         <div className="prop-option">
           <span className="prop-label">Format</span>
@@ -1020,15 +1049,15 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
         {selComp.kind==='EXTND' ? <>
           <div className="prop-option">
             <span className="prop-label">Bits In</span>
-            <input  className="prop-input" type="number" min="1" max="32"
+            <NumberField className="prop-input" min={1} max={32}
                     value={selComp.bitWidthIn||1}
-                    onChange={e=>{circuit.setExtBitWidthIn(selComp.id,Number(e.target.value));onComponentChanged?.();}}/>
+                    onCommit={n=>{circuit.setExtBitWidthIn(selComp.id,n);onComponentChanged?.();}}/>
           </div>
           <div className="prop-option">
             <span className="prop-label">Bits Out</span>
-            <input  className="prop-input" type="number" min="1" max="32"
+            <NumberField className="prop-input" min={1} max={32}
                     value={selComp.bitWidthOut||1}
-                    onChange={e=>{circuit.setExtBitWidthOut(selComp.id,Number(e.target.value));onComponentChanged?.();}}/>
+                    onCommit={n=>{circuit.setExtBitWidthOut(selComp.id,n);onComponentChanged?.();}}/>
           </div>
         </> : selComp.kind==='SPLIT' ? <>
           <div className="prop-option">
@@ -1042,21 +1071,21 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
           </div>
           <div className="prop-option">
             <span className="prop-label">Bits</span>
-            <input  className="prop-input" type="number" min="2" max="8"
+            <NumberField className="prop-input" min={2} max={8}
                     value={selComp.bits||2}
-                    onChange={e=>{circuit.setSplitBits(selComp.id,Number(e.target.value));onComponentChanged?.();}}/>
+                    onCommit={n=>{circuit.setSplitBits(selComp.id,n);onComponentChanged?.();}}/>
           </div>
           <div className="prop-option">
             <span className="prop-label">Space</span>
-            <input  className="prop-input" type="number" min="1" max="8"
+            <NumberField className="prop-input" min={1} max={8}
                     value={selComp.space||1}
-                    onChange={e=>{circuit.setSplitSpace(selComp.id,Number(e.target.value));onComponentChanged?.();}}/>
+                    onCommit={n=>{circuit.setSplitSpace(selComp.id,n);onComponentChanged?.();}}/>
           </div>
         </> : <div className="prop-option">
           <span className="prop-label">Bits</span>
-          <input  className="prop-input" type="number" min="1" max="32"
+          <NumberField className="prop-input" min={1} max={32}
                   value={selComp.bitWidth||1}
-                  onChange={e=>{circuit.setBitWidth(selComp.id,Number(e.target.value));onComponentChanged?.();}}/>
+                  onCommit={n=>{circuit.setBitWidth(selComp.id,n);onComponentChanged?.();}}/>
         </div>}
         {selComp.kind==='MUX' && <div className="prop-option">
           <span className="prop-label">Inputs</span>
@@ -1116,9 +1145,9 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
         <div className="prop-title">REG Properties</div>
         <div className="prop-option">
           <span className="prop-label">Bits</span>
-          <input  className="prop-input" type="number" min="1" max="32"
+          <NumberField className="prop-input" min={1} max={32}
                   value={selComp.bitWidth||1}
-                  onChange={e=>{circuit.setBitWidth(selComp.id,Number(e.target.value));onComponentChanged?.();}}/>
+                  onCommit={n=>{circuit.setBitWidth(selComp.id,n);onComponentChanged?.();}}/>
         </div>
         <div className="prop-option">
           <span className="prop-label">Format</span>
