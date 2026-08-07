@@ -1046,6 +1046,11 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
     insertBranchPoint(wire,snap(w.x,snapGrid),snap(w.y,snapGrid));
     onComponentChanged?.();
   };
+  // Whether (pt.x,pt.y) is a registered junction sourced from `wire` —
+  // shared by the drag/right-click handlers below and by the junction/
+  // endpoint dots' powered-fill check in the render, so all three agree on
+  // exactly the same point.
+  const junctionAt = (wire, pt) => [...circuit.junctions].some(j=>j.sourceWireId===wire.id && Math.abs(j.x-pt.x)<1e-6 && Math.abs(j.y-pt.y)<1e-6);
   const onWaypointMouseDown=(e,wire,idx,pt)=>{
     if (e.button!==0) return;
     e.stopPropagation();
@@ -1058,8 +1063,7 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
     // leaving this point (and anything already branching from it) exactly
     // where it is. insertBranchPoint (run at drop) won't insert a
     // duplicate waypoint here since one already exists.
-    const isJunction = [...circuit.junctions].some(j=>j.sourceWireId===wire.id && Math.abs(j.x-pt.x)<1e-6 && Math.abs(j.y-pt.y)<1e-6);
-    if (isJunction) {
+    if (junctionAt(wire,pt)) {
       const wf={type:'branch',wireId:wire.id,x:pt.x,y:pt.y,startX:w.x,startY:w.y,startSX:e.clientX,startSY:e.clientY};
       wiringFromRef.current=wf;
       setWiringFrom(wf);
@@ -1082,8 +1086,7 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
     // (computeEndpointRoute/finalizeEndpointRoute) — never by themselves.
     // A plain, non-junction corner is unaffected and stays deletable on
     // its own.
-    const isJunction = [...circuit.junctions].some(j=>j.sourceWireId===wire.id && Math.abs(j.x-pt.x)<1e-6 && Math.abs(j.y-pt.y)<1e-6);
-    if (isJunction) { circuit.removeWire(wire.id); onComponentChanged?.(); return; }
+    if (junctionAt(wire,pt)) { circuit.removeWire(wire.id); onComponentChanged?.(); return; }
     wire.points.splice(idx,1); onComponentChanged?.();
   };
 
@@ -1343,12 +1346,19 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
               return <InflightPulse a={a} b={b} pts={pts} pendingValue={w.pendingValue}
                                     pendingStart={w.pendingStart} delayMs={wireDelay}/>;
             })()}
-            {/* Free endpoint handles */}
-            {!w.from.compId&&<circle cx={a.x} cy={a.y} r="6" fill="white" stroke="var(--border-md)" strokeWidth="1.5"
-                      style={{cursor:'move'}}
+            {/* Free endpoint handles — light up with their wire like a pin
+                does, junction or not; only the idle color differs (white
+                here vs. bg for a waypoint) since that was already each
+                handle's own resting color before signals entered into it. */}
+            {!w.from.compId&&<circle cx={a.x} cy={a.y} r="6"
+                      fill={high?'var(--high)':'white'}
+                      stroke="var(--border-md)" strokeWidth="1.5"
+                      style={{cursor:'move', transition:'fill 100ms ease'}}
                       onMouseDown={e=>onWireEndpointMouseDown(e,w,'from',a)}/>}
-            {!w.to.compId&&<circle cx={b.x} cy={b.y} r="6" fill="white" stroke="var(--border-md)" strokeWidth="1.5"
-                      style={{cursor:'move'}}
+            {!w.to.compId&&<circle cx={b.x} cy={b.y} r="6"
+                      fill={high?'var(--high)':'white'}
+                      stroke="var(--border-md)" strokeWidth="1.5"
+                      style={{cursor:'move', transition:'fill 100ms ease'}}
                       onMouseDown={e=>onWireEndpointMouseDown(e,w,'to',b)}/>}
           </g>;
         })}
@@ -1362,11 +1372,16 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
             original wire's own waypoint permanently unreachable — so a
             junction could never gain a second branch. Keeping all waypoint
             handles in one later pass means they always win that overlap,
-            regardless of which wire they belong to or when it was made. */}
+            regardless of which wire they belong to or when it was made.
+            Every corner lights up the same way a pin does — bg when idle,
+            --high when its host wire is carrying a signal — junction or
+            plain corner alike; junctionAt is only for the drag/delete
+            behavior above, not for whether the dot lights up. */}
         {wires.map(w=>(w.points||[]).map((pt,idx)=>(
           <circle key={w.id+'_wp'+idx} cx={pt.x} cy={pt.y} r="5"
-                  fill="var(--bg)" stroke="var(--border-md)" strokeWidth="1.5"
-                  style={{cursor:'move'}}
+                  fill={w.value>0?'var(--high)':'var(--bg)'}
+                  stroke="var(--border-md)" strokeWidth="1.5"
+                  style={{cursor:'move', transition:'fill 100ms ease'}}
                   onMouseDown={e=>onWaypointMouseDown(e,w,idx,pt)}
                   onContextMenu={e=>onWaypointContext(e,w,idx)}/>
         )))}
