@@ -697,6 +697,7 @@ const {
   insertBranchPoint, routeManhattanPoints, pinAbs, wireDelayForLength,
   branchRouteFrom, syncWireEndCorners,
   segmentMoveSnapshot, computeSegmentMove, clampSegmentMoveDelta, finalizeSegmentMove,
+  truncateWireAtSegment, removeWireCascading,
 } = engine;
 
 // A selected wire segment is identified by a composite string distinct
@@ -1086,7 +1087,26 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
     onSelect(comp.id);
   };
   const onCompContext=(e,comp)=>{e.preventDefault();circuit.removeComponent(comp.id);onComponentChanged?.();};
-  const onWireContext=(e,wireId)=>{e.preventDefault();e.stopPropagation();circuit.removeWire(wireId);onComponentChanged?.();};
+  // Right-clicking a wire normally deletes the whole thing, taking every
+  // branch off of it (and every branch of THOSE branches, see
+  // removeWireCascading) along too. But if one of its OWN segments is
+  // already selected — the same two-step select gesture used to set up a
+  // segment drag, see onWireEdgeDown — right-clicking it instead deletes
+  // just that segment and every segment after it, toward wire.to, leaving
+  // everything before it, toward wire.from, untouched (see
+  // truncateWireAtSegment — it cascades the same way, just scoped to only
+  // the branches that were reading from the part actually being cut).
+  // Selecting a segment first is what scopes the delete down to it;
+  // right-clicking a wire with none of its segments selected still takes
+  // the whole thing, same as always.
+  const onWireContext=(e,wire)=>{
+    e.preventDefault();e.stopPropagation();
+    const selPrefix = wire.id+'#seg';
+    const selSeg = selectedId && selectedId.startsWith(selPrefix) ? Number(selectedId.slice(selPrefix.length)) : null;
+    if (selSeg!=null) { truncateWireAtSegment(wire, selSeg, circuit); onSelect(null); }
+    else removeWireCascading(wire.id, circuit);
+    onComponentChanged?.();
+  };
 
   const onOutputPinDown=(e,comp,idx)=>{
     e.stopPropagation();
@@ -1225,14 +1245,14 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
     e.preventDefault(); e.stopPropagation();
     // A corner can no longer be picked off by itself — junction or plain —
     // right-clicking its dot now falls through to the same "delete the
-    // whole wire" action as right-clicking anywhere else on the wire's
-    // body, rather than singling out just this point. A junction, in
-    // particular, only ever goes away as a side effect of removing
-    // whatever made it one — every branch reading from it (engine's
-    // pruneDeadJunctions, run from removeWire), this wire itself going
+    // whole wire (and every branch off of it)" action as right-clicking
+    // anywhere else on the wire's body, rather than singling out just this
+    // point. A junction, in particular, only ever goes away as a side
+    // effect of removing whatever made it one — every branch reading from
+    // it going with it here (removeWireCascading), this wire itself going
     // away, or a wire's own endpoint getting dragged back onto one
     // (computeEndpointRoute/finalizeEndpointRoute) — never by itself.
-    circuit.removeWire(wire.id); onComponentChanged?.();
+    removeWireCascading(wire.id, circuit); onComponentChanged?.();
   };
 
   const components=[...circuit.components.values()];
@@ -1493,7 +1513,7 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
             <path d={path} fill="none" stroke="transparent" strokeWidth="16"
                   style={{cursor:'cell'}}
                   onMouseDown={e=>onWireEdgeDown(e,w)}
-                  onContextMenu={e=>onWireContext(e,w.id)}/>
+                  onContextMenu={e=>onWireContext(e,w)}/>
             {/* Particles on HIGH */}
             {high&&<ParticleStream a={a} b={b} pts={pts}/>}
             {/* In-flight pulse */}
@@ -1847,11 +1867,20 @@ function App(){
         if(e.target.tagName==='INPUT')return;
         // selectedId is either a real component id, or (see segSelId) a
         // '<wireId>#seg<n>' composite naming a selected wire segment —
-        // deleting that deletes its whole host wire, same as right-clicking
-        // anywhere on the wire's body would.
+        // mirrors right-clicking that exact same target: a component just
+        // goes, a selected segment deletes itself and every segment after
+        // it (toward wire.to), leaving everything before it alone, and
+        // cascades to every branch reading from the part being cut (see
+        // onWireContext / truncateWireAtSegment) rather than taking the
+        // whole host wire.
         const hashIdx = selectedId.indexOf('#seg');
-        if (hashIdx===-1) circuit.removeComponent(selectedId);
-        else circuit.removeWire(selectedId.slice(0,hashIdx));
+        if (hashIdx===-1) {
+          circuit.removeComponent(selectedId);
+        } else {
+          const wire = circuit.wires.get(selectedId.slice(0,hashIdx));
+          const segIndex = Number(selectedId.slice(hashIdx+4));
+          if (wire) engine.truncateWireAtSegment(wire, segIndex, circuit);
+        }
         setSelectedId(null);refresh();
       }
     };

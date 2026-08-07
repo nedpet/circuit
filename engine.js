@@ -890,6 +890,87 @@ defineModule('engine', ['state'], (state) => {
     }
   }
 
+  // Deletes `wire` and, recursively, every OTHER wire branching off of it
+  // — directly, or via a chain of further branches off THOSE branches —
+  // rather than leaving them dangling in place, still drawn but reading
+  // from a junction that no longer exists. Whatever `wire` fed is gone
+  // too, all the way down the branch tree, same as it would be if there
+  // were nothing left of the parent for any of them to attach to.
+  //
+  // Collects the full set to remove *before* removing anything — walking
+  // circuit.junctions/circuit.wires as they stood at the start, breadth
+  // first — so an earlier removeWire call's own bookkeeping (it runs
+  // pruneDeadJunctions every time) never mutates the very junctions a
+  // later step in this same cascade still needs to check.
+  function removeWireCascading(wireId, circuit) {
+    const EPS = 1e-6;
+    const same = (a,b) => Math.abs(a.x-b.x)<EPS && Math.abs(a.y-b.y)<EPS;
+    const toDelete = [wireId];
+    const seen = new Set(toDelete);
+    for (let i=0; i<toDelete.length; i++) {
+      const id = toDelete[i];
+      const ownJunctions = [...circuit.junctions].filter(j=>j.sourceWireId===id);
+      if (!ownJunctions.length) continue;
+      for (const w of circuit.wires.values()) {
+        if (seen.has(w.id)) continue;
+        const wFrom = terminalCoords(w.from, circuit), wTo = terminalCoords(w.to, circuit);
+        const isBranch = ownJunctions.some(j =>
+          (!isWireTerminal(w.from) && same(wFrom, j)) || (!isWireTerminal(w.to) && same(wTo, j)));
+        if (isBranch) { seen.add(w.id); toDelete.push(w.id); }
+      }
+    }
+    for (const id of toDelete) circuit.removeWire(id);
+  }
+
+  // Deletes segment `segIndex` of `wire` and every segment after it —
+  // toward `wire.to` — leaving everything before it (toward `wire.from`)
+  // exactly as it was. The knot the deleted run starts from, knots[segIndex],
+  // becomes the wire's new free `to` endpoint; whatever `wire.to` used to be
+  // (a component pin or a further waypoint chain) goes with the rest.
+  //
+  // segIndex 0 has nothing "before" it to leave behind — deleting the
+  // first segment onward is deleting the whole wire — so that case just
+  // defers to removeWireCascading instead of producing a zero-length stub.
+  //
+  // Mirrors removeWire's own handling of the junctions it owns: any
+  // junction `wire` is the source of that sits strictly past the cut
+  // (knots[segIndex+1] onward) is deregistered right along with the
+  // geometry that carried it, exactly as removeWire drops every junction
+  // it owns when the whole wire goes. A junction sitting exactly at the
+  // cut (knots[segIndex] itself) survives — it's still on the wire, just
+  // at the tip instead of partway along it now, the same case
+  // pruneDeadJunctions already leaves alone for any other wire's own
+  // endpoint. Whatever was reading from a dropped junction is deleted
+  // right along with it — via removeWireCascading, so a branch of THAT
+  // branch goes too — rather than left behind disconnected.
+  function truncateWireAtSegment(wire, segIndex, circuit) {
+    if (segIndex === 0) { removeWireCascading(wire.id, circuit); return; }
+    const EPS = 1e-6;
+    const same = (a,b) => Math.abs(a.x-b.x)<EPS && Math.abs(a.y-b.y)<EPS;
+    const from = terminalCoords(wire.from, circuit), to = terminalCoords(wire.to, circuit);
+    const knots = wireKnots(from.x, from.y, to.x, to.y, wire.points || []);
+    if (!knots[segIndex] || !knots[segIndex+1]) return;
+    const cut = knots[segIndex];
+    const dropped = [];
+    for (const j of [...circuit.junctions]) {
+      if (j.sourceWireId !== wire.id) continue;
+      const idx = knots.findIndex(k => same(k, j));
+      if (idx > segIndex) dropped.push(j);
+    }
+    wire.points = (wire.points || []).slice(0, segIndex-1);
+    wire.to = {x: cut.x, y: cut.y};
+    for (const j of dropped) {
+      for (const w of [...circuit.wires.values()]) {
+        if (w.id === wire.id) continue;
+        const wFrom = terminalCoords(w.from, circuit), wTo = terminalCoords(w.to, circuit);
+        const isBranch = (!isWireTerminal(w.from) && same(wFrom, j)) || (!isWireTerminal(w.to) && same(wTo, j));
+        if (isBranch) removeWireCascading(w.id, circuit);
+      }
+      circuit.junctions.delete(j);
+    }
+    pruneDeadJunctions(circuit);
+  }
+
   // Absolute canvas position of one pin (input or output, by index) of a
   // component, accounting for its facing — rotated about its own center for
   // up/down, or mirrored horizontally for left (matching how GateBody
@@ -973,11 +1054,30 @@ defineModule('engine', ['state'], (state) => {
       if (component.ioId != ''){
         ioComponents.delete(component.ioId);
       }
-      // Routed through removeWire (rather than deleting from `wires`
-      // directly) so a component that anchored a branch's target, or a
-      // source wire's own endpoint, gets the same junction cleanup a
-      // manual wire deletion would.
-      for (const [wid,w] of [...wires]) { if (w.from.compId===id||w.to.compId===id) removeWire(wid); }
+      // A wire this component DROVE (its output pin is the wire's `from`)
+      // has nothing left feeding it, so it goes too — and, same as
+      // right-clicking it or deleting its first segment would,
+      // recursively takes every branch reading from it (and every branch
+      // of THOSE branches) along, rather than leaving them dangling on a
+      // junction whose source just vanished. See removeWireCascading.
+      //
+      // A wire this component only READ from (its input pin is the
+      // wire's `to`) is a completely different case: the wire itself,
+      // and whatever's feeding it, is still perfectly valid — only this
+      // one end has nowhere left to plug into. So it's detached rather
+      // than deleted, at the exact spot the pin used to be (captured via
+      // `component`, still held here even though it's already gone from
+      // `components`), leaving it hanging exactly where the component
+      // used to sit instead of taking it, and anything behind it, out
+      // over a change that's entirely on the other end.
+      for (const [wid,w] of [...wires]) {
+        if (w.from.compId===id) {
+          removeWireCascading(wid, {components, wires, junctions, removeWire});
+        } else if (w.to.compId===id) {
+          const p = pinAbs(component, w.to.type || 'in', w.to.pin);
+          w.to = {x: p.x, y: p.y};
+        }
+      }
     }
 
     // Connects two wire terminals
@@ -1405,5 +1505,6 @@ defineModule('engine', ['state'], (state) => {
     findNearestWirePoint, insertBranchPoint, routeManhattanPoints, pinAbs,
     branchRouteFrom, isWireTerminal, syncEndCorner, syncWireEndCorners,
     segmentMoveSnapshot, computeSegmentMove, clampSegmentMoveDelta, finalizeSegmentMove,
+    truncateWireAtSegment, removeWireCascading,
   };
 });
