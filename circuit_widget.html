@@ -755,7 +755,6 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
   // Drag state in refs to avoid stale closures
   const panRef         = useRef(null); // {sx,sy,vx,vy}
   const compDragRef    = useRef(null); // {id,ox,oy,startSX,startSY,moved}
-  const wpDragRef      = useRef(null); // {wireId,idx,ox,oy}
   const endpointDragRef= useRef(null); // {wireId,side,ox,oy}
 
   // Stable refs for values needed in effects
@@ -806,14 +805,6 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
           d.moved=true;
           const c=circuit.components.get(d.id);
           if(c){c.x=snap(w.x-d.ox,snapGridRef.current);c.y=snap(w.y-d.oy,snapGridRef.current);onChangedRef.current?.();}
-        }
-      }
-      if (wpDragRef.current) {
-        const d=wpDragRef.current, wire=circuit.wires.get(d.wireId);
-        if(wire?.points?.[d.idx]){
-          wire.points[d.idx].x=snap(w.x+d.ox,snapGridRef.current);
-          wire.points[d.idx].y=snap(w.y+d.oy,snapGridRef.current);
-          onChangedRef.current?.();
         }
       }
       if (endpointDragRef.current) {
@@ -900,7 +891,7 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
         }
         compDragRef.current=null;
       }
-      panRef.current=null; wpDragRef.current=null; endpointDragRef.current=null;
+      panRef.current=null; endpointDragRef.current=null;
       setIsPanning(false);
     };
 
@@ -1046,48 +1037,34 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
     insertBranchPoint(wire,snap(w.x,snapGrid),snap(w.y,snapGrid));
     onComponentChanged?.();
   };
-  // Whether (pt.x,pt.y) is a registered junction sourced from `wire` —
-  // shared by the drag/right-click handlers below and by the junction/
-  // endpoint dots' powered-fill check in the render, so all three agree on
-  // exactly the same point.
-  const junctionAt = (wire, pt) => [...circuit.junctions].some(j=>j.sourceWireId===wire.id && Math.abs(j.x-pt.x)<1e-6 && Math.abs(j.y-pt.y)<1e-6);
   const onWaypointMouseDown=(e,wire,idx,pt)=>{
     if (e.button!==0) return;
     e.stopPropagation();
     const w=screenToWorld(e.clientX,e.clientY);
-    // A waypoint that's also a registered junction (another wire already
-    // branches from this exact point) shouldn't be draggable-to-move —
-    // moving it would silently orphan that branch, since the junction's
-    // own {x,y} doesn't follow the waypoint. Start a NEW branch from it
-    // instead — same as dragging off a wire's body via onWireEdgeDown —
-    // leaving this point (and anything already branching from it) exactly
-    // where it is. insertBranchPoint (run at drop) won't insert a
-    // duplicate waypoint here since one already exists.
-    if (junctionAt(wire,pt)) {
-      const wf={type:'branch',wireId:wire.id,x:pt.x,y:pt.y,startX:w.x,startY:w.y,startSX:e.clientX,startSY:e.clientY};
-      wiringFromRef.current=wf;
-      setWiringFrom(wf);
-      return;
-    }
-    wpDragRef.current={wireId:wire.id,idx,ox:pt.x-w.x,oy:pt.y-w.y};
+    // A corner is never draggable-to-relocate anymore, junction or not —
+    // dragging one instead starts a NEW branch from it, same as dragging
+    // off a wire's body via onWireEdgeDown, just already pinned exactly to
+    // this corner instead of needing findNearestWirePoint to locate it.
+    // Leaves this point (and anything already branching from it, if it's
+    // already a junction) exactly where it is; insertBranchPoint (run at
+    // drop) won't insert a duplicate waypoint here since one already
+    // exists.
+    const wf={type:'branch',wireId:wire.id,x:pt.x,y:pt.y,startX:w.x,startY:w.y,startSX:e.clientX,startSY:e.clientY};
+    wiringFromRef.current=wf;
+    setWiringFrom(wf);
   };
   const onWaypointContext=(e,wire,idx)=>{
     e.preventDefault(); e.stopPropagation();
-    const pt = wire.points[idx];
-    // A junction can't be picked off by itself anymore — right-clicking
-    // its dot falls through to the same "delete the whole wire" action as
-    // right-clicking anywhere else on the wire's body, rather than
-    // singling out just this point (which used to leave the rest of the
-    // wire behind, minus its junction, as if the branch had never been
-    // there). Junctions only ever go away as a side effect of removing
-    // whatever made them one — every branch reading from them (engine's
+    // A corner can no longer be picked off by itself — junction or plain —
+    // right-clicking its dot now falls through to the same "delete the
+    // whole wire" action as right-clicking anywhere else on the wire's
+    // body, rather than singling out just this point. A junction, in
+    // particular, only ever goes away as a side effect of removing
+    // whatever made it one — every branch reading from it (engine's
     // pruneDeadJunctions, run from removeWire), this wire itself going
     // away, or a wire's own endpoint getting dragged back onto one
-    // (computeEndpointRoute/finalizeEndpointRoute) — never by themselves.
-    // A plain, non-junction corner is unaffected and stays deletable on
-    // its own.
-    if (junctionAt(wire,pt)) { circuit.removeWire(wire.id); onComponentChanged?.(); return; }
-    wire.points.splice(idx,1); onComponentChanged?.();
+    // (computeEndpointRoute/finalizeEndpointRoute) — never by itself.
+    circuit.removeWire(wire.id); onComponentChanged?.();
   };
 
   const components=[...circuit.components.values()];
@@ -1375,8 +1352,9 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
             regardless of which wire they belong to or when it was made.
             Every corner lights up the same way a pin does — bg when idle,
             --high when its host wire is carrying a signal — junction or
-            plain corner alike; junctionAt is only for the drag/delete
-            behavior above, not for whether the dot lights up. */}
+            plain corner alike; neither dragging nor right-clicking a
+            corner distinguishes the two anymore either — see
+            onWaypointMouseDown/onWaypointContext. */}
         {wires.map(w=>(w.points||[]).map((pt,idx)=>(
           <circle key={w.id+'_wp'+idx} cx={pt.x} cy={pt.y} r="5"
                   fill={w.value>0?'var(--high)':'var(--bg)'}
