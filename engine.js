@@ -169,21 +169,14 @@ defineModule('engine', ['state'], (state) => {
     return {x:a.x,y:a.y};
   }
 
-  // Resolves one end of a wire — either a {compId,pin} reference or a free
-  // {x,y} point (a dangling endpoint being dragged, or one still mid-route)
-  // — down to an absolute canvas coordinate.
+  // Returns the absolute canvas coordinate of the end of a wire
+  // Either a {compId,pin} reference, in which it calls pinAbs,
+  // or a free {x,y} point (being dragged or left dangling)
   function terminalCoords(term, circuit) {
     if (!term) return {x:0,y:0};
     if (typeof term.compId==='string') {
       const comp = circuit.components.get(term.compId);
       if (!comp) return {x:term.x||0,y:term.y||0};
-      // GATE_VIS lives in the 'gates' module, which itself depends on
-      // 'engine' (for createCircuit/GATE_DEFS) — a real cycle. gates.js only
-      // finishes registering after this factory returns, but pinAbs/
-      // terminalCoords are never *called* until later, at simulation time,
-      // by which point Modules.gates exists. So this one lookup deliberately
-      // bypasses the declared-deps pattern and reaches into the registry
-      // directly, instead of receiving 'gates' as a constructor argument.
       const vis = window.Modules.gates.visForComp(comp);
       const kind = term.type || (typeof term.pin==='number' && term.pin < (vis.inputs.length||0) ? 'in' : 'out');
       return pinAbs(comp, kind, term.pin);
@@ -191,16 +184,14 @@ defineModule('engine', ['state'], (state) => {
     return {x:term.x||0,y:term.y||0};
   }
 
-  // Assembles a wire's full point list: its two pin endpoints with any
-  // user-added waypoints in between, in order.
+  // Assembles a wire's full point list in the correct order: 
+  // its startpoint, then any user-added waypoints, then its endpoint 
   function wireKnots(x1,y1,x2,y2,pts=[]) {
     return [{x:x1,y:y1},...pts,{x:x2,y:y2}];
   }
 
-  // Turns a wire's raw endpoint+waypoint list into an orthogonal
-  // (Manhattan) path, inserting an elbow point wherever two consecutive
-  // knots aren't already aligned on one axis — so freely-placed waypoints
-  // still render/route as right-angle wire segments.
+  // Turns a wire's raw endpoint+waypoint list into an orthogonal path by inserting
+  // an elbow point wherever two consecutive knots aren't already aligned on one axis
   function resolveWire(x1,y1,x2,y2,pts=[]) {
     const knots=wireKnots(x1,y1,x2,y2,pts);
     const out=[knots[0]];
@@ -215,14 +206,14 @@ defineModule('engine', ['state'], (state) => {
     return out;
   }
 
-  // Renders resolveWire()'s resolved point list as an SVG path `d` string.
+  // Renders resolveWire()'s resolved point list as an SVG path `d` string
   function wirePath(x1,y1,x2,y2,pts=[]) {
     const p=resolveWire(x1,y1,x2,y2,pts);
     return p.map((v,i)=>(i?'L ':'M ')+v.x+' '+v.y).join('');
   }
 
-  // The point at fraction `t` (0-1) along a wire's resolved, orthogonal
-  // path — used to place the animated in-flight signal pulse.
+  // Returns the point at fraction `t` (0-1) along a wire's resolved, orthogonal path
+  // Used to place the animated in-flight signal pulse
   function sampleWire(x1,y1,x2,y2,pts=[],t) {
     const p=resolveWire(x1,y1,x2,y2,pts);
     let total=0; const lens=[];
@@ -282,20 +273,36 @@ defineModule('engine', ['state'], (state) => {
     return best;
   }
 
-  // Splits a wire at the point nearest (x,y) by inserting a waypoint there.
+  // Splits a wire at the point nearest (x,y) by inserting a waypoint there
+  // — unless that nearest point is already an existing knot (a prior
+  // waypoint, or one of the wire's own endpoints), in which case there's
+  // nothing to insert: multiple wires can already share one junction just
+  // fine (wireSourceValue matches by coordinate, not by count), so this
+  // only avoids piling up redundant, visually-identical duplicate waypoints
+  // when several branches start from the exact same spot — e.g. dragging a
+  // new branch off a waypoint that's already a junction.
   function insertBranchPoint(wire, x, y, circuit) {
     const nearest = findNearestWirePoint(wire, x, y, circuit);
     if (!nearest.point) return null;
     const pt = nearest.point;
     const pts = wire.points || [];
-    const idx = Math.max(0, nearest.index);
-    const newPts = [...pts];
-    newPts.splice(idx, 0, {x: pt.x, y: pt.y});
-    wire.points = newPts;
-    // Register this as an explicit junction so wireSourceValue
-    // can find it without geometry scanning, and won't confuse
-    // visual crossings with real connections.
-    circuit.junctions.add({x: pt.x, y: pt.y, sourceWireId: wire.id});
+    const EPS = 1e-6;
+    const samePoint = (a,b) => Math.abs(a.x-b.x)<EPS && Math.abs(a.y-b.y)<EPS;
+    const alreadyExists = pts.some(p=>samePoint(p,pt))
+      || samePoint(terminalCoords(wire.from,circuit), pt)
+      || samePoint(terminalCoords(wire.to,circuit), pt);
+    if (!alreadyExists) {
+      const idx = Math.max(0, nearest.index);
+      const newPts = [...pts];
+      newPts.splice(idx, 0, {x: pt.x, y: pt.y});
+      wire.points = newPts;
+    }
+    // Register this as an explicit junction so wireSourceValue can find it
+    // without geometry scanning, and won't confuse visual crossings with
+    // real connections. Skipped if one's already registered right here
+    // (same reasoning as above — this point may already be a junction).
+    const dup = [...circuit.junctions].some(j=>j.sourceWireId===wire.id && samePoint(j, pt));
+    if (!dup) circuit.junctions.add({x: pt.x, y: pt.y, sourceWireId: wire.id});
     return pt;
   }
 
@@ -385,7 +392,7 @@ defineModule('engine', ['state'], (state) => {
       return comp;
     }
 
-    // Deletes a component and every wire touching it.
+    // Deletes a component and every wire touching it
     function removeComponent(id) {
       const component = components.get(id);
       components.delete(id);
@@ -396,15 +403,14 @@ defineModule('engine', ['state'], (state) => {
     }
 
     // Returns true if `target` is a real component-pin reference, as opposed to a
-    // free-floating {x,y} endpoint (a dangling wire end, or a branch point).
+    // free-floating {x,y} endpoint (a dangling wire end, or a branch point)
     function isWireTerminal(target) {
       return target && typeof target.compId==='string' && typeof target.pin==='number';
     }
 
-    // Connects two wire terminals, defaulting an unlabeled pin terminal's
-    // `type` to 'out'/'in' by which side of the wire it's on. Refuses (and
-    // returns null instead of) creating an exact duplicate of an
-    // already-existing pin-to-pin wire.
+    // Connects two wire terminals
+    // Defaults an unlabeled pin terminal's `type` to 'out'/'in' by which side of the wire it's on 
+    // Refuses (and returns null instead of) creating an exact duplicate of an already-existing pin-to-pin wire
     function addWire(from, to) {
       if (isWireTerminal(from) && isWireTerminal(to)) {
         for (const w of wires.values()) {
@@ -420,7 +426,7 @@ defineModule('engine', ['state'], (state) => {
       return wire;
     }
 
-    // Deletes a wire and any junction that was branching off of it.
+    // Deletes a wire and every junction branching off of it
     function removeWire(id) {
       wires.delete(id);
       for (const j of junctions) {
@@ -428,11 +434,8 @@ defineModule('engine', ['state'], (state) => {
       }
     }
 
-    // Walks a wire back through branch junctions to the component pin that
-    // ultimately drives it, so a branched wire is checked against the same
-    // source width as the wire it forked from. Returns null when the chain
-    // doesn't (yet) reach a real output pin — e.g. mid-drag or a dangling
-    // free endpoint — since there's nothing to compare a width against.
+    // Walks a wire back through branch junctions to find its source component pin, then returns its bit width
+    // Returns null when the chain doesn't reach a real output pin, e.g. a dangling point
     function wireSourceBitWidth(wire, circuit, seen) {
       seen = seen || new Set();
       if (seen.has(wire.id)) return null;
@@ -451,9 +454,8 @@ defineModule('engine', ['state'], (state) => {
       return null;
     }
 
-    // A wire only has a meaningful width mismatch once both ends are real
-    // pins — a branch-routing wire whose far end is still a free point isn't
-    // flagged; the leaf wire that eventually lands on a pin is.
+    // Return whether the bit widths of the wire's out and in terminals don't match
+    // If the wire doesn't end at a component, return false
     function wireBitMismatch(wire, circuit) {
       if (!isWireTerminal(wire.to)) return false;
       const dst = circuit.components.get(wire.to.compId);

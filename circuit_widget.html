@@ -678,6 +678,40 @@ function NumberField({ className, value, min, max, onCommit }) {
     onBlur={()=>{focused.current=false; setText(String(value));}}/>;
 }
 
+// Dragging a wire's endpoint should never disturb the rest of the wire —
+// only the one segment at the dragged end. `d` (built once at drag-start by
+// onWireEndpointMouseDown, before anything is touched) captures that
+// original shape: `neighbor` is the fixed point just before this endpoint
+// (the nearest existing waypoint, or the wire's other end if it has none),
+// `axis` is which way ('h'/'v') the segment leading into this endpoint
+// already ran, and `basePoints` is every other point on the wire, left
+// completely alone. Moving `newPos` along that same axis just slides the
+// endpoint — extend/shorten, no new point. Moving it off that axis appends
+// exactly one corner point beyond `neighbor` (new segment), and nothing
+// before `neighbor` is ever touched either way.
+function computeEndpointRoute(d, newPos) {
+  const aligned = d.axis==='h' ? Math.abs(newPos.y-d.neighbor.y)<1e-6 : Math.abs(newPos.x-d.neighbor.x)<1e-6;
+  if (aligned) return { points: d.basePoints, corner: null };
+  const corner = d.axis==='h' ? {x:newPos.x, y:d.neighbor.y} : {x:d.neighbor.x, y:newPos.y};
+  const points = d.side==='to' ? [...d.basePoints, corner] : [corner, ...d.basePoints];
+  return { points, corner };
+}
+
+// Commits computeEndpointRoute's result to `wire` and, only if it actually
+// produced a new corner, registers a junction there (skipping if an
+// equivalent one is already registered) so that corner is immediately
+// branchable — same reasoning as before, just now scoped to the one new
+// corner this drag may have added, since everything else about the wire is
+// left alone and any junctions elsewhere on it are therefore still valid.
+function finalizeEndpointRoute(wire, d, newPos, circuit) {
+  const {points, corner} = computeEndpointRoute(d, newPos);
+  wire.points = points;
+  if (corner) {
+    const dup = [...circuit.junctions].some(j=>j.sourceWireId===wire.id && Math.abs(j.x-corner.x)<1e-6 && Math.abs(j.y-corner.y)<1e-6);
+    if (!dup) circuit.junctions.add({x:corner.x, y:corner.y, sourceWireId:wire.id});
+  }
+}
+
 function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag, onComponentChanged, snapGrid=true }) {
   const svgRef = useRef(null);
   const [view, setView] = useState({x:0,y:0,zoom:1});
@@ -753,6 +787,11 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
         const d=endpointDragRef.current, wire=circuit.wires.get(d.wireId);
         if (wire) {
           const coord={x:snap(w.x+d.ox,snapGridRef.current),y:snap(w.y+d.oy,snapGridRef.current)};
+          // Live preview only — points, not junctions, so a fast drag
+          // doesn't thrash circuit.junctions every frame. The real
+          // (junction-registering) commit happens once at drop, in onUp /
+          // onInputPinUp / onOutputPinUp via finalizeEndpointRoute.
+          wire.points = computeEndpointRoute(d, coord).points;
           wire[d.side]=coord;
           onChangedRef.current?.();
         }
@@ -784,6 +823,13 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
             const wire=circuit.addWire({compId:wf.compId,pin:wf.pin,type:'out'},target);
             if(wire) wire.points=routeManhattanPoints(terminalCoords(wire.from,circuit),terminalCoords(wire.to,circuit),wf.dir||'h');
             onChangedRef.current?.();
+          } else if (wf.type==='endpoint' && dist>6) {
+            // Endpoint released on empty canvas (still free) rather than
+            // dropped onto a new pin — those cases already ran
+            // finalizeEndpointRoute inside onInputPinUp/onOutputPinUp and
+            // marked wf.handled, so this only fires here.
+            const wire=circuit.wires.get(wf.wireId), d=endpointDragRef.current;
+            if (wire && d) { finalizeEndpointRoute(wire, d, wire[d.side], circuit); onChangedRef.current?.(); }
           }
           wiringFromRef.current=null;
           setWiringFrom(null);
@@ -884,7 +930,7 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
       const wire=circuit.wires.get(wf.wireId);
       if (wire) {
         wire.to={compId:comp.id,pin:idx,type:'in'};
-        wire.points = routeManhattanPoints(terminalCoords(wire.from,circuit), terminalCoords(wire.to,circuit), wf.dir||'h');
+        if (endpointDragRef.current) finalizeEndpointRoute(wire, endpointDragRef.current, terminalCoords(wire.to,circuit), circuit);
         endpointDragRef.current=null;
         wiringFromRef.current={...wf, handled:true};
         onComponentChanged?.(); setWiringFrom(null); return;
@@ -894,7 +940,7 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
       const wire=circuit.wires.get(wf.wireId);
       if (wire) {
         wire.from={compId:comp.id,pin:idx,type:'out'};
-        wire.points = routeManhattanPoints(terminalCoords(wire.from,circuit), terminalCoords(wire.to,circuit), wf.dir||'h');
+        if (endpointDragRef.current) finalizeEndpointRoute(wire, endpointDragRef.current, terminalCoords(wire.from,circuit), circuit);
         endpointDragRef.current=null;
         wiringFromRef.current={...wf, handled:true};
         onComponentChanged?.(); setWiringFrom(null); return;
@@ -915,7 +961,7 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
         const wire=circuit.wires.get(wf.wireId);
         if (wire) {
           wire.from={compId:comp.id,pin:idx,type:'out'};
-          wire.points = routeManhattanPoints(terminalCoords(wire.from,circuit), terminalCoords(wire.to,circuit), wf.dir||'h');
+          if (endpointDragRef.current) finalizeEndpointRoute(wire, endpointDragRef.current, terminalCoords(wire.from,circuit), circuit);
           endpointDragRef.current=null;
           wiringFromRef.current={...wf, handled:true};
           onComponentChanged?.(); setWiringFrom(null); return;
@@ -935,7 +981,15 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
     if (e.button!==0) return;
     e.stopPropagation();
     const w=screenToWorld(e.clientX,e.clientY);
-    endpointDragRef.current={wireId:wire.id,side,ox:pt.x-w.x,oy:pt.y-w.y};
+    // Snapshot the wire's shape *before* this drag touches it — see
+    // computeEndpointRoute's comment for what neighbor/axis/basePoints mean.
+    const otherSide = side==='to' ? 'from' : 'to';
+    const basePoints = wire.points ? [...wire.points] : [];
+    const neighbor = basePoints.length
+      ? (side==='to' ? basePoints[basePoints.length-1] : basePoints[0])
+      : terminalCoords(wire[otherSide], circuit);
+    const axis = Math.abs(pt.y-neighbor.y) < 1e-6 ? 'h' : (Math.abs(pt.x-neighbor.x) < 1e-6 ? 'v' : 'h');
+    endpointDragRef.current={wireId:wire.id,side,ox:pt.x-w.x,oy:pt.y-w.y,neighbor,axis,basePoints};
     const wf={type:'endpoint',wireId:wire.id,side,x:pt.x,y:pt.y,startX:pt.x,startY:pt.y};
     wiringFromRef.current=wf;
     setWiringFrom(wf);
@@ -950,8 +1004,24 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
     onComponentChanged?.();
   };
   const onWaypointMouseDown=(e,wire,idx,pt)=>{
+    if (e.button!==0) return;
     e.stopPropagation();
     const w=screenToWorld(e.clientX,e.clientY);
+    // A waypoint that's also a registered junction (another wire already
+    // branches from this exact point) shouldn't be draggable-to-move —
+    // moving it would silently orphan that branch, since the junction's
+    // own {x,y} doesn't follow the waypoint. Start a NEW branch from it
+    // instead — same as dragging off a wire's body via onWireEdgeDown —
+    // leaving this point (and anything already branching from it) exactly
+    // where it is. insertBranchPoint (run at drop) won't insert a
+    // duplicate waypoint here since one already exists.
+    const isJunction = [...circuit.junctions].some(j=>j.sourceWireId===wire.id && Math.abs(j.x-pt.x)<1e-6 && Math.abs(j.y-pt.y)<1e-6);
+    if (isJunction) {
+      const wf={type:'branch',wireId:wire.id,x:pt.x,y:pt.y,startX:w.x,startY:w.y,startSX:e.clientX,startSY:e.clientY};
+      wiringFromRef.current=wf;
+      setWiringFrom(wf);
+      return;
+    }
     wpDragRef.current={wireId:wire.id,idx,ox:pt.x-w.x,oy:pt.y-w.y};
   };
   const onWaypointContext=(e,wire,idx)=>{
@@ -1222,16 +1292,26 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
             {!w.to.compId&&<circle cx={b.x} cy={b.y} r="6" fill="white" stroke="var(--border-md)" strokeWidth="1.5"
                       style={{cursor:'move'}}
                       onMouseDown={e=>onWireEndpointMouseDown(e,w,'to',b)}/>}
-            {/* Waypoint handles */}
-            {pts.map((pt,idx)=>(
-              <circle key={'wp'+idx} cx={pt.x} cy={pt.y} r="5"
-                      fill="var(--bg)" stroke="var(--border-md)" strokeWidth="1.5"
-                      style={{cursor:'move'}}
-                      onMouseDown={e=>onWaypointMouseDown(e,w,idx,pt)}
-                      onContextMenu={e=>onWaypointContext(e,w,idx)}/>
-            ))}
           </g>;
         })}
+
+        {/* Waypoint handles — a separate pass over every wire, rendered
+            after (so painted on top of) every wire's free-endpoint handles
+            above. A waypoint that's also a junction sits at the exact same
+            point as the branch wire's free `from` endpoint; when both were
+            rendered together per-wire, whichever wire was created later
+            painted on top and silently ate every click there, making the
+            original wire's own waypoint permanently unreachable — so a
+            junction could never gain a second branch. Keeping all waypoint
+            handles in one later pass means they always win that overlap,
+            regardless of which wire they belong to or when it was made. */}
+        {wires.map(w=>(w.points||[]).map((pt,idx)=>(
+          <circle key={w.id+'_wp'+idx} cx={pt.x} cy={pt.y} r="5"
+                  fill="var(--bg)" stroke="var(--border-md)" strokeWidth="1.5"
+                  style={{cursor:'move'}}
+                  onMouseDown={e=>onWaypointMouseDown(e,w,idx,pt)}
+                  onContextMenu={e=>onWaypointContext(e,w,idx)}/>
+        )))}
 
         {/* Components */}
         {components.map(comp=>{
@@ -1279,9 +1359,19 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
           </g>;
         })}
 
-        {/* Wiring preview */}
-        {wiringFrom&&
-          <path d={wirePath(wiringFrom.x,wiringFrom.y,mousePos.x,mousePos.y)}
+        {/* Wiring preview — routed with the same routeManhattanPoints(...,
+            wf.dir||'h') call every onXxxUp handler uses to actually set
+            wire.points on drop, so the corner shown while dragging is the
+            one that will really result instead of always defaulting to
+            horizontal-first regardless of which way the drag went.
+            Skipped for type==='endpoint': that drag moves a real existing
+            wire, which is already being live-updated (via
+            computeEndpointRoute in onMove) and rendered in its actual
+            colors below — this generic dashed overlay would just be a
+            second, wrongly-routed line drawn on top of it. */}
+        {wiringFrom&&wiringFrom.type!=='endpoint'&&
+          <path d={wirePath(wiringFrom.x,wiringFrom.y,mousePos.x,mousePos.y,
+                             routeManhattanPoints({x:wiringFrom.x,y:wiringFrom.y},{x:mousePos.x,y:mousePos.y},wiringFrom.dir||'h'))}
                 fill="none" stroke="var(--high)" strokeWidth="2"
                 strokeDasharray="6 4" opacity="0.7" pointerEvents="none"/>}
 
