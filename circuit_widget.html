@@ -216,10 +216,21 @@ defineModule('gates', ['engine'], (engine) => {
       return <g>
         <rect x="4" y="4" width="52" height="32" rx="16" fill={on?'#fef3c7':'#f3f3f1'} stroke="var(--ink)" strokeWidth="2"/>
         <circle cx={on?40:20} cy="20" r="11" fill="white" stroke="var(--ink)" strokeWidth="1.5"/>
-        <text x={on?18:38} y="24" fontFamily="var(--mono)" fontSize="11" fontWeight="600" textAnchor="middle" fill="var(--ink)" opacity="0.45">{on?'1':'0'}</text>
-        <text x="-15" y="26" fontFamily="var(--mono)" fontSize="16" fontWeight="600" textAnchor="end" fill="var(--ink)" opacity="0.8">{comp.label}</text>
       </g>;
-    }
+    },
+    // Rendered directly by GateBody (see mirrorTexts there) instead of
+    // through vis.body, so a facing:'left' INPUT doesn't pay
+    // unmirrorText's recursive walk-and-clone cost across its whole body
+    // just to keep these two upright — with many INPUTs on screen (e.g.
+    // one per bit of a wide bus, all facing left for a tidy layout) that
+    // cost multiplies badly, frame after frame.
+    mirrorTexts:(comp)=>{
+      const on=comp.state.value;
+      return [
+        {x:on?18:38, y:24, anchor:'middle', fontSize:11, opacity:0.45, text:on?'1':'0'},
+        {x:-15, y:26, anchor:'end', fontSize:16, opacity:0.8, text:comp.label},
+      ];
+    },
   };
 
   // Multi-bit INPUT/OUTPUT: each pin still carries exactly one bus value (an
@@ -291,8 +302,9 @@ defineModule('gates', ['engine'], (engine) => {
       body:(f,comp)=><g>
         <rect x="2" y="4" width={w-4} height="32" rx="8" fill="#f3f3f1" stroke="var(--ink)" strokeWidth="2"/>
         {stableBlock(comp, w, hex ? HexCells({n, value:comp.state.value||0, editable:true}) : BitCells({n, value:comp.state.value||0, editable:true}))}
-        <text x="-15" y="26" fontFamily="var(--mono)" fontSize="16" fontWeight="600" textAnchor="end" fill="var(--ink)" opacity="0.8">{comp.label}</text>
-      </g>
+      </g>,
+      // See VIS.INPUT's mirrorTexts comment.
+      mirrorTexts:(comp)=>[{x:-15, y:26, anchor:'end', fontSize:16, opacity:0.8, text:comp.label}],
     };
   }
   // Same hex/binary cell-count split as buildInputVis. The input pin sits at
@@ -304,8 +316,9 @@ defineModule('gates', ['engine'], (engine) => {
       body:(f,comp)=><g>
         <rect x="2" y="4" width={w-4} height="32" rx="8" fill="#f3f3f1" stroke="var(--ink)" strokeWidth="2"/>
         {stableBlock(comp, w, hex ? HexCells({n, value:comp.inputVals[0]||0}) : BitCells({n, value:comp.inputVals[0]||0, editable:false}))}
-        <text x={w+15} y="26" fontFamily="var(--mono)" fontSize="16" fontWeight="600" textAnchor="start" fill="var(--ink)" opacity="0.8">{comp.label}</text>
-      </g>
+      </g>,
+      // See VIS.OUTPUT's mirrorTexts comment.
+      mirrorTexts:(comp)=>[{x:w+15, y:26, anchor:'start', fontSize:16, opacity:0.8, text:comp.label}],
     };
   }
   const inputVisCache={}, outputVisCache={};
@@ -397,15 +410,26 @@ defineModule('gates', ['engine'], (engine) => {
         {on?<circle cx="22" cy="20" r="20" fill="#fef3c7" opacity="0.55"/>:null}
         <circle cx="22" cy="20" r="13" fill={on?'#fde68a':'#f3f3f1'} stroke="var(--ink)" strokeWidth="2"/>
         <path d="M 17 26 L 17 30 L 27 30 L 27 26" fill="none" stroke="var(--ink)" strokeWidth="1.5" strokeLinecap="round"/>
-        <text x="55" y="26" fontFamily="var(--mono)" fontSize="16" fontWeight="600" textAnchor="start" fill="var(--ink)" opacity="0.8">{comp.label}</text>
-        <text x="22" y="24" fontFamily="var(--mono)" fontSize="11" fontWeight="600" textAnchor="middle" fill="var(--ink)" opacity="0.45">{on?'1':'0'}</text>
         {on?<g stroke="#d97706" strokeWidth="1.5" strokeLinecap="round">
           <line x1="22" y1="3"  x2="22" y2="6"/><line x1="37" y1="20" x2="40" y2="20"/>
           <line x1="4"  y1="20" x2="7"  y2="20"/><line x1="33" y1="9"  x2="35" y2="7"/>
           <line x1="11" y1="9"  x2="9"  y2="7"/>
         </g>:null}
       </g>;
-    }
+    },
+    // Rendered directly by GateBody (see mirrorTexts there) instead of
+    // through vis.body, so a facing:'left' OUTPUT doesn't pay
+    // unmirrorText's recursive walk-and-clone cost across its whole body
+    // just to keep these two upright — with many OUTPUTs on screen (e.g.
+    // one per bit of a wide bus, all facing left for a tidy layout) that
+    // cost multiplies badly, frame after frame.
+    mirrorTexts:(comp)=>{
+      const on=comp.inputVals[0];
+      return [
+        {x:55, y:26, anchor:'start', fontSize:16, opacity:0.8, text:comp.label},
+        {x:22, y:24, anchor:'middle', fontSize:11, opacity:0.45, text:on?'1':'0'},
+      ];
+    },
   };
 
   VIS.SEVEN = { w:W, h:H*1.5, inputs:[{x:W*0.2,y:0,dir:'up'}, {x:W*0.4,y:0,dir:'up'}, {x:W*0.6,y:0,dir:'up'}, {x:W*0.8,y:0,dir:'up'}, {x:W*0.2,y:H*1.5,dir:'down'}, {x:W*0.4,y:H*1.5,dir:'down'}, {x:W*0.6,y:H*1.5,dir:'down'}], outputs:[],
@@ -504,6 +528,15 @@ defineModule('gates', ['engine'], (engine) => {
   // Fragments — real components (e.g. <PendingBar/>) are opaque here since
   // their output doesn't exist until they render, so they're left under the
   // ordinary mirror transform, same as before.
+  //
+  // A recursive walk-and-clone of the *entire* body, run fresh every
+  // frame, is fine for gates that show up a handful at a time, but INPUT
+  // and OUTPUT are routinely placed dozens deep (one per bus bit) — so
+  // they skip this altogether and apply the exact same wrapper directly,
+  // to just their own known label text, via vis.mirrorTexts (see
+  // GateBody). This still runs for whatever's left in their body (a rect,
+  // some circles), which is why it needs to stay correct in general, not
+  // just fast for the common case.
   function unmirrorText(node) {
     if (Array.isArray(node)) return node.map(unmirrorText);
     if (!React.isValidElement(node)) return node;
@@ -551,6 +584,24 @@ defineModule('gates', ['engine'], (engine) => {
       {vis.inputs.map((p,i)=>{if(p.noStub) return null; const s=pinStub(p,'left');return <line key={'i'+i} x1={s.x1} y1={s.y1} x2={s.x2} y2={s.y2} stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>;})}
       {vis.outputs.map((p,i)=>{if(p.noStub) return null; const s=pinStub(p,'right');return <line key={'o'+i} x1={s.x1} y1={s.y1} x2={s.x2} y2={s.y2} stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>;})}
       {mirrored ? unmirrorText(body) : body}
+      {/* Same glyphs-upright trick unmirrorText uses, but authored directly
+          for these known, fixed-position texts instead of discovered by
+          recursively walking and cloning the whole body every frame — see
+          vis.mirrorTexts on VIS.INPUT/VIS.OUTPUT/buildInputVis/
+          buildOutputVis, the kinds dense enough (one per bus bit, often
+          all facing left for a tidy layout) for that walk's cost to
+          actually add up frame over frame. When facing isn't 'left'
+          there's nothing to correct — GateBody's outer transform is a
+          rotation there, not a mirror — so the text renders plain. */}
+      {vis.mirrorTexts && vis.mirrorTexts(comp).map((t,i)=>{
+        const text = <text x={t.x} y={t.y}
+              textAnchor={mirrored ? (t.anchor==='start'?'end':t.anchor==='end'?'start':t.anchor) : t.anchor}
+              fontFamily="var(--mono)" fontSize={t.fontSize} fontWeight={t.fontWeight||600}
+              fill="var(--ink)" opacity={t.opacity}>{t.text}</text>;
+        return mirrored
+          ? <g key={i} transform={`translate(${t.x} 0) scale(-1 1) translate(${-t.x} 0)`}>{text}</g>
+          : <React.Fragment key={i}>{text}</React.Fragment>;
+      })}
     </g>;
   }
 
@@ -644,8 +695,15 @@ const {
   projectOrthogonalPoint, terminalCoords, wireKnots, resolveWire, wirePath,
   sampleWire, distToSeg, wireSegmentPoints, findNearestWirePoint,
   insertBranchPoint, routeManhattanPoints, pinAbs, wireDelayForLength,
-  branchRouteFrom,
+  branchRouteFrom, syncWireEndCorners,
+  segmentMoveSnapshot, computeSegmentMove, clampSegmentMoveDelta, finalizeSegmentMove,
 } = engine;
+
+// A selected wire segment is identified by a composite string distinct
+// from any component id (which are plain 'c<n>'), so it can travel
+// through the same single selectedId/onSelect prop components already use
+// without the two ever colliding.
+const segSelId = (wireId, segIndex) => `${wireId}#seg${segIndex}`;
 
 const GRID = 20;
 const snap = (v, on=true) => on ? Math.round(v/GRID)*GRID : v;
@@ -756,6 +814,7 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
   const panRef         = useRef(null); // {sx,sy,vx,vy}
   const compDragRef    = useRef(null); // {id,ox,oy,startSX,startSY,moved}
   const endpointDragRef= useRef(null); // {wireId,side,ox,oy}
+  const segDragRef     = useRef(null); // {snapshot (engine's segmentMoveSnapshot), startWX, startWY}
 
   // Stable refs for values needed in effects
   const viewRef          = useRef(view);
@@ -784,6 +843,22 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
 
   // Global mouse move / up
   useEffect(()=>{
+    // The (dx,dy) for a segment drag at world point `w` — snapped so the
+    // segment's own FINAL position lands on the grid (matching every other
+    // drag in this file, e.g. component drag's `snap(w.x-d.ox,...)`),
+    // rather than snapping the raw mouse delta itself, which could still
+    // leave an off-grid result if the original position wasn't already a
+    // grid multiple. Shared by the live-preview and finalize handlers below
+    // so they can't drift apart from computing this two different ways.
+    const segMoveDelta = (d, w) => {
+      const orig = d.snapshot.knots[d.snapshot.segIndex];
+      if (d.snapshot.axis==='h') {
+        const perp = snap(orig.y+(w.y-d.startWY), snapGridRef.current) - orig.y;
+        return {dx:0, dy:perp};
+      }
+      const perp = snap(orig.x+(w.x-d.startWX), snapGridRef.current) - orig.x;
+      return {dx:perp, dy:0};
+    };
     const onMove=(e)=>{
       const w=screenToWorld(e.clientX,e.clientY);
       setMousePos(w);
@@ -817,6 +892,40 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
           // onInputPinUp / onOutputPinUp via finalizeEndpointRoute.
           wire.points = computeEndpointRoute(d, coord).points;
           wire[d.side]=coord;
+          onChangedRef.current?.();
+        }
+      }
+      if (segDragRef.current) {
+        const d=segDragRef.current, wire=circuit.wires.get(d.snapshot.wireId);
+        if (wire) {
+          // Live preview only — this wire's own shape, not the junction
+          // carry-along other wires might need (finalizeSegmentMove, at
+          // drop) — same "don't thrash the junction registry every frame"
+          // reasoning as the endpoint drag above. computeSegmentMove is
+          // always relative to the frozen drag-start snapshot, never to
+          // this wire's current (already-live-updated) shape, so calling
+          // it repeatedly here with a growing delta never compounds.
+          //
+          // The delta is clamped *before* computeSegmentMove, not after —
+          // computeSegmentMove always moves a segment's two knots by
+          // exactly the same amount, so a branch anchor that can't take
+          // the full move has to be reflected in the delta itself, or the
+          // segment's other knot still travels the full distance and the
+          // branch ends up reaching just as far as if nothing had been
+          // clamped at all.
+          const raw = segMoveDelta(d, w);
+          const {dx,dy} = clampSegmentMoveDelta(d.snapshot, raw.dx, raw.dy, circuit);
+          const {points, from, to, segIndex} = computeSegmentMove(d.snapshot, dx, dy);
+          wire.points = points;
+          if (from) wire.from = from;
+          if (to) wire.to = to;
+          // A stub grown out to a pinned end shifts this same segment's
+          // own index up by one (see computeSegmentMove) — keep the
+          // selection (and thus the bounding box) pointed at it either
+          // way. Re-asserting the unchanged value when nothing shifted is
+          // a no-op React bails out of, so this is safe to call every
+          // frame rather than only on the transition.
+          onSelectRef.current?.(segSelId(d.snapshot.wireId, segIndex));
           onChangedRef.current?.();
         }
       }
@@ -859,6 +968,14 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
             // marked wf.handled, so this only fires here.
             const wire=circuit.wires.get(wf.wireId), d=endpointDragRef.current;
             if (wire && d) { finalizeEndpointRoute(wire, d, wire[d.side], circuit); onChangedRef.current?.(); }
+          } else if (wf.type==='branch' && wf.segIndex!=null) {
+            // The press went back up as a plain click rather than a drag
+            // (dist<=6, so no branch got created above) — *now* the
+            // segment it landed on selects, per onWireEdgeDown's comment.
+            // wf.segIndex is only set there — a branch drag started from a
+            // waypoint dot instead (onWaypointMouseDown) has no segment of
+            // its own to select, so it's left alone here.
+            onSelectRef.current?.(segSelId(wf.wireId, wf.segIndex));
           }
           wiringFromRef.current=null;
           setWiringFrom(null);
@@ -888,8 +1005,45 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
             onChangedRef.current?.();
           }
           if (comp?.kind==='CLOCK')  { circuit.toggleClock(comp.id);  onChangedRef.current?.(); }
+        } else {
+          // The component actually moved — any wire attached to one of
+          // its pins may need its near-pin corner reconciled: added,
+          // removed, or shifted to a new position if it was already a
+          // corner but not this one anymore (see syncWireEndCorners,
+          // which loops both ends to convergence rather than fixing each
+          // once — needed since e.g. an OUTPUT, only ever a wire's `to`,
+          // is fixed second, and a single pass never rechecks whatever
+          // `from` resolved to earlier in that same pass).
+          for (const w of circuit.wires.values()) {
+            if (w.from.compId===d.id || w.to.compId===d.id) syncWireEndCorners(w, circuit);
+          }
+          onChangedRef.current?.();
         }
         compDragRef.current=null;
+      }
+      // Segment move end — geometry's already live-committed above every
+      // frame; this just runs the one thing deferred to drop, same as an
+      // endpoint drag's junction registration: carrying along whatever
+      // was reading from a junction at either end that actually moved.
+      if (segDragRef.current) {
+        const d=segDragRef.current, wire=circuit.wires.get(d.snapshot.wireId);
+        if (wire) {
+          const raw = segMoveDelta(d, w);
+          const {dx,dy} = clampSegmentMoveDelta(d.snapshot, raw.dx, raw.dy, circuit);
+          // Re-commit the geometry for this exact final (dx,dy) — usually
+          // identical to what the last onMove frame already wrote, but a
+          // mouseup isn't guaranteed to be preceded by a mousemove at the
+          // very same point, so this is the one guaranteed-fresh
+          // computation to key the final selection off.
+          const {points, from, to, segIndex} = computeSegmentMove(d.snapshot, dx, dy);
+          wire.points = points;
+          if (from) wire.from = from;
+          if (to) wire.to = to;
+          onSelectRef.current?.(segSelId(d.snapshot.wireId, segIndex));
+          finalizeSegmentMove(wire, d.snapshot, dx, dy, circuit);
+          onChangedRef.current?.();
+        }
+        segDragRef.current=null;
       }
       panRef.current=null; endpointDragRef.current=null;
       setIsPanning(false);
@@ -1007,7 +1161,21 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
     e.stopPropagation();
     const w=screenToWorld(e.clientX,e.clientY);
     const nearest=findNearestWirePoint(wire,w.x,w.y,circuit);
-    const wf={type:'branch',wireId:wire.id,x:nearest.point.x,y:nearest.point.y,startX:w.x,startY:w.y,startSX:e.clientX,startSY:e.clientY};
+    const segIndex=nearest.index;
+    // Unlike a component (which selects immediately on mousedown, drag or
+    // not), a segment only selects once the press goes back up as a plain
+    // click — see the wf.type==='branch' (no dist>6) case in onUp below —
+    // so a drag that turns into a branch doesn't also select the segment
+    // it came from. The one exception is a SECOND press on an ALREADY
+    // selected segment: that starts a move immediately (constrained to
+    // its own perpendicular axis), same as before.
+    const wasSelected = selectedId===segSelId(wire.id,segIndex);
+    if (wasSelected) {
+      const snapshot = segmentMoveSnapshot(wire, segIndex, circuit);
+      if (snapshot) segDragRef.current={snapshot, startWX:w.x, startWY:w.y};
+      return;
+    }
+    const wf={type:'branch',wireId:wire.id,segIndex,x:nearest.point.x,y:nearest.point.y,startX:w.x,startY:w.y,startSX:e.clientX,startSY:e.clientY};
     wiringFromRef.current=wf;
     setWiringFrom(wf);
   };
@@ -1293,7 +1461,23 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
           const path=wirePath(a.x,a.y,b.x,b.y,pts);
           const high=w.value>0;
           const mismatch=w.bitMismatch;
+          // Which of this wire's segments (if any) selectedId names — a
+          // composite id ('<wireId>#seg<index>', see segSelId), distinct
+          // from any component id, so it rides the same selectedId prop
+          // components use without colliding with one.
+          const selPrefix = w.id+'#seg';
+          const selSeg = selectedId && selectedId.startsWith(selPrefix) ? Number(selectedId.slice(selPrefix.length)) : null;
+          const selKnots = selSeg!=null ? wireKnots(a.x,a.y,b.x,b.y,pts) : null;
+          const selA = selKnots && selKnots[selSeg], selB = selKnots && selKnots[selSeg+1];
           return <g key={w.id}>
+            {/* Selection bounding box — same dashed-rect language as a
+                selected component, padded around just the one selected
+                segment (not the whole wire) since selection is per-segment. */}
+            {selA && selB && <rect
+                  x={Math.min(selA.x,selB.x)-8} y={Math.min(selA.y,selB.y)-8}
+                  width={Math.abs(selB.x-selA.x)+16} height={Math.abs(selB.y-selA.y)+16}
+                  rx="6" fill="none" stroke="var(--ink)" strokeWidth="1.5"
+                  strokeDasharray="4 3" opacity="0.35"/>}
             {/* Shadow */}
             <path d={path} fill="none" stroke="var(--ink)" strokeWidth="3.5"
                   strokeLinejoin="round" strokeLinecap="round" opacity="0.07"/>
@@ -1661,7 +1845,14 @@ function App(){
     const fn=(e)=>{
       if((e.key==='Delete'||e.key==='Backspace')&&selectedId){
         if(e.target.tagName==='INPUT')return;
-        circuit.removeComponent(selectedId);setSelectedId(null);refresh();
+        // selectedId is either a real component id, or (see segSelId) a
+        // '<wireId>#seg<n>' composite naming a selected wire segment —
+        // deleting that deletes its whole host wire, same as right-clicking
+        // anywhere on the wire's body would.
+        const hashIdx = selectedId.indexOf('#seg');
+        if (hashIdx===-1) circuit.removeComponent(selectedId);
+        else circuit.removeWire(selectedId.slice(0,hashIdx));
+        setSelectedId(null);refresh();
       }
     };
     window.addEventListener('keydown',fn);return()=>window.removeEventListener('keydown',fn);

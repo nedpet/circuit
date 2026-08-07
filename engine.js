@@ -169,6 +169,16 @@ defineModule('engine', ['state'], (state) => {
     return {x:a.x,y:a.y};
   }
 
+  // Returns true if `target` is a real component-pin reference, as opposed to a
+  // free-floating {x,y} endpoint (a dangling wire end, or a branch point).
+  // Module-level (rather than nested in createCircuit, where it originally
+  // lived) so the segment-move helpers below — pure geometry, same as
+  // everything else in this section — can use it without needing a live
+  // circuit instance.
+  function isWireTerminal(target) {
+    return target && typeof target.compId==='string' && typeof target.pin==='number';
+  }
+
   // Returns the absolute canvas coordinate of the end of a wire
   // Either a {compId,pin} reference, in which it calls pinAbs,
   // or a free {x,y} point (being dragged or left dangling)
@@ -204,6 +214,89 @@ defineModule('engine', ['state'], (state) => {
       }
     }
     return out;
+  }
+
+  // Keeps `wire`'s end nearest `side` ('from' or 'to') truthful to
+  // whatever component is driving it, after that component's just been
+  // dragged. Handles all three ways a pin's move can leave that one
+  // waypoint out of date: it needs a corner it didn't have before (the
+  // pin moved off the axis it used to share with the next knot in), it
+  // needs to shift (still a corner, just not the same one — the earlier,
+  // narrower version of this only ever *added* a fresh point in this
+  // case, leaving the stale one behind as a redundant duplicate instead
+  // of replacing it), or it doesn't need one anymore (the pin moved back
+  // onto that axis). Only the ONE waypoint nearest `side` is ever in
+  // play — an interior waypoint's relationship to its OWN neighbors never
+  // changes just because a pin elsewhere moved — and it's computed at the
+  // exact position resolveWire's own implicit-elbow convention would
+  // already draw, so a fix here never changes how the wire actually
+  // renders, just whether that bend is a real, interactive waypoint.
+  //
+  // Left untouched if anything else still needs that waypoint exactly
+  // where it is (a junction, or another wire's own endpoint) — moving or
+  // deleting it out from under that would disconnect it, so the pin's
+  // implicit elbow is just left for resolveWire to draw on top of it
+  // instead, same conservative rule removeRedundantWaypoint follows.
+  function syncEndCorner(wire, side, circuit) {
+    const EPS = 1e-6;
+    const same = (a,b) => Math.abs(a.x-b.x)<EPS && Math.abs(a.y-b.y)<EPS;
+    const otherSide = side==='from' ? 'to' : 'from';
+    const anchor = terminalCoords(wire[side], circuit);
+    const pts = wire.points || [];
+    const hasNear = pts.length > 0;
+    const nearIdx = side==='from' ? 0 : pts.length-1;
+    const nearPt = hasNear ? pts[nearIdx] : null;
+    const farNeighbor = pts.length>=2
+      ? (side==='from' ? pts[1] : pts[pts.length-2])
+      : terminalCoords(wire[otherSide], circuit);
+
+    if (hasNear) {
+      const stillNeeded = [...circuit.junctions].some(j=>same(j,nearPt)) ||
+        [...circuit.wires.values()].some(w=>w.id!==wire.id &&
+          ((!isWireTerminal(w.from) && same(terminalCoords(w.from,circuit),nearPt)) ||
+           (!isWireTerminal(w.to)   && same(terminalCoords(w.to,circuit),  nearPt))));
+      if (stillNeeded) return;
+    }
+
+    if (anchor.x===farNeighbor.x || anchor.y===farNeighbor.y) {
+      if (hasNear) wire.points = pts.filter((_,i)=>i!==nearIdx);
+      return;
+    }
+    const corner = side==='from'
+      ? {x:farNeighbor.x, y:anchor.y}
+      : {x:anchor.x, y:farNeighbor.y};
+    wire.points = hasNear
+      ? pts.map((p,i)=>i===nearIdx ? corner : p)
+      : (side==='from' ? [corner, ...pts] : [...pts, corner]);
+  }
+
+  // Runs syncEndCorner for both ends of `wire` — repeatedly, until neither
+  // makes a further change, rather than once each.
+  //
+  // A single from-then-to pass isn't enough: fixing one end reads (as its
+  // "farNeighbor") whatever the wire's OTHER near-end waypoint currently
+  // is, and fixing it can *change* that waypoint — which may leave the
+  // end fixed earlier in the very same pass stale again, now that its own
+  // farNeighbor has moved out from under it. That only bites the end
+  // fixed FIRST, since the one fixed second always sees the other's
+  // latest value — so with a single from-then-to pass, corners left
+  // behind on `from` never get a second look. Concretely, an INPUT
+  // (which — having no input pin of its own — is always a wire's `from`)
+  // looks fixed after one pass; an OUTPUT (always a wire's `to`, for the
+  // same reason) looks fixed too, but whatever `from` had already
+  // resolved to that same pass can be left stale, since nothing revisits
+  // it once `to` moves it out from under it. Looping both ends until
+  // stable catches that on the next go-around instead of leaving it
+  // behind. Bounded generously past what any real wire could need —
+  // cascades run at most as deep as the wire has waypoints, and those
+  // number in the single digits in practice.
+  function syncWireEndCorners(wire, circuit) {
+    for (let guard=0; guard<8; guard++) {
+      const before = wire.points;
+      syncEndCorner(wire, 'from', circuit);
+      syncEndCorner(wire, 'to', circuit);
+      if (wire.points === before) break; // neither call changed anything — stable
+    }
   }
 
   // Renders resolveWire()'s resolved point list as an SVG path `d` string
@@ -429,6 +522,374 @@ defineModule('engine', ['state'], (state) => {
     return { start, points: route.slice(leg, route.length-1) };
   }
 
+  // Snapshot of one wire segment's shape, captured once at drag-start so a
+  // multi-frame drag can recompute the whole move fresh every frame from a
+  // fixed baseline instead of compounding small changes onto whatever the
+  // previous frame already wrote — same reason computeEndpointRoute's `d`
+  // (in the widget) freezes basePoints/neighbor rather than re-reading the
+  // wire live. Returns null if segIndex doesn't land on a real segment.
+  //
+  // fromPinned/toPinned mark wire.from/wire.to specifically as anchored to
+  // a component pin — used only to decide whether computeSegmentMove is
+  // allowed to write a new value back into those two fields at all (never,
+  // for a pin — it stays a component reference, not a plain point).
+  //
+  // startPinned/endPinned mark the segment's own two boundary knots —
+  // whichever knots `segIndex` actually spans, which may or may not be
+  // the wire's overall from/to — as unable to move with the drag at all.
+  // Two different things can pin a knot this way: it's one of the pin
+  // ends above, or the wire is itself the SOURCE of a junction sitting
+  // exactly there (another wire branches off it at this point). Moving a
+  // branchpoint would drag that other wire along with it exactly the way
+  // dragging a component would tear its wire loose — a junction splits
+  // what looks like one wire into two conceptually separate segments
+  // meeting there, same as a component does, so it gets the same
+  // treatment: the knot stays put and computeSegmentMove grows a stub out
+  // to it instead of moving it. A branch's own free end sitting on
+  // ANOTHER wire's junction is a different kind of anchoring — not owned
+  // by this wire, so it doesn't pin anything here — and is handled
+  // separately, by dragging the junction along within its parent's own
+  // extent instead (see clampSegmentMoveDelta / finalizeSegmentMove).
+  function segmentMoveSnapshot(wire, segIndex, circuit) {
+    const from = terminalCoords(wire.from, circuit), to = terminalCoords(wire.to, circuit);
+    const knots = wireKnots(from.x, from.y, to.x, to.y, wire.points || []);
+    if (!knots[segIndex] || !knots[segIndex+1]) return null;
+    const n = knots.length;
+    const axis = Math.abs(knots[segIndex].y-knots[segIndex+1].y) < 1e-6 ? 'h' : 'v';
+    const fromPinned = isWireTerminal(wire.from), toPinned = isWireTerminal(wire.to);
+    const EPS = 1e-6;
+    const ownsJunctionAt = p => {
+      for (const j of circuit.junctions) {
+        if (j.sourceWireId===wire.id && Math.abs(j.x-p.x)<EPS && Math.abs(j.y-p.y)<EPS) return true;
+      }
+      return false;
+    };
+    const pinnedAt = k => (k===0 && fromPinned) || (k===n-1 && toPinned) || ownsJunctionAt(knots[k]);
+    return {
+      wireId: wire.id, segIndex, axis, knots,
+      fromPinned, toPinned,
+      startPinned: pinnedAt(segIndex),
+      endPinned: pinnedAt(segIndex+1),
+    };
+  }
+
+  // Computes wire's new points (and, for whichever end is free, its new
+  // from/to) for segment `d.segIndex` shifted by (dx,dy) from its ORIGINAL
+  // (drag-start) position in `d.knots` — always relative to that frozen
+  // baseline, never to the wire's current, possibly-already-moved shape,
+  // so it's safe to call every frame of a live drag with the same
+  // growing-from-zero delta and get a correct, non-compounding result
+  // every time, exactly like computeEndpointRoute.
+  //
+  // A knot that startPinned/endPinned marks as anchored — either it's the
+  // wire's own pin-attached endpoint, or the wire is the source of a
+  // junction sitting exactly there — can't move; instead a brand-new
+  // point is added at the shifted position once there's an actual
+  // (dx,dy) to add it at, growing the wire a perpendicular "stub" out to
+  // it and leaving the anchored knot (and everything on its far side)
+  // untouched. This is the ONLY thing that moves for this drag — every
+  // other knot keeps its exact original position, so "moving a segment"
+  // never reaches past its own two ends, into whatever's on the other
+  // side of a pin or a branchpoint, exactly the way it already couldn't
+  // reach into a neighboring component. Skipped entirely at zero delta
+  // rather than unconditionally, so merely selecting an anchored segment
+  // (no real drag yet) doesn't leave a redundant zero-length stub behind.
+  // A free knot — an interior waypoint, a dangling (unattached) wire end,
+  // or a branch's own end anchored to ANOTHER wire's junction (see
+  // clampSegmentMoveDelta / finalizeSegmentMove; that's a different kind
+  // of anchoring, not one this wire owns, so it isn't pinned here) — just
+  // shifts in place; `from`/`to` come back non-null only for whichever
+  // end is both the wire's overall terminal AND not itself a component
+  // pin.
+  //
+  // A stub grown at the segment's start shifts its own index up by one —
+  // it's now one knot further into the (longer) knot list — so the
+  // segment this same drag should keep tracking is `segIndex`, returned
+  // fresh each call rather than the caller having to re-derive it. Comes
+  // back equal to `d.segIndex` whenever no stub grew there, so
+  // re-asserting it every frame (e.g. to keep a selection in sync) is
+  // always safe, even before any stub exists.
+  function computeSegmentMove(d, dx, dy) {
+    const knots = d.knots, n = knots.length;
+    const moved = dx!==0 || dy!==0;
+    const startK = d.segIndex, endK = d.segIndex+1;
+    const newKnots = [];
+    for (let i=0; i<startK; i++) newKnots.push({x:knots[i].x, y:knots[i].y});
+
+    if (d.startPinned) {
+      newKnots.push({x:knots[startK].x, y:knots[startK].y}); // the anchor itself, unmoved
+      if (moved) newKnots.push({x:knots[startK].x+dx, y:knots[startK].y+dy}); // stub out to the dragged segment
+    } else {
+      newKnots.push({x:knots[startK].x+dx, y:knots[startK].y+dy});
+    }
+    const segIndex = newKnots.length-1; // the dragged segment always starts at whatever was just pushed last
+
+    if (d.endPinned) {
+      if (moved) newKnots.push({x:knots[endK].x+dx, y:knots[endK].y+dy}); // dragged segment's moved end
+      newKnots.push({x:knots[endK].x, y:knots[endK].y}); // the anchor itself, unmoved
+    } else {
+      newKnots.push({x:knots[endK].x+dx, y:knots[endK].y+dy});
+    }
+
+    for (let i=endK+1; i<n; i++) newKnots.push({x:knots[i].x, y:knots[i].y});
+
+    const m = newKnots.length;
+    const from = d.fromPinned ? null : {x:newKnots[0].x, y:newKnots[0].y};
+    const to = d.toPinned ? null : {x:newKnots[m-1].x, y:newKnots[m-1].y};
+    const points = newKnots.slice(1, m-1);
+    return {points, from, to, segIndex};
+  }
+
+  // Reduces a segment drag's raw, requested (dx,dy) to whatever a
+  // branch's own anchor — if this segment touches one — can actually
+  // take, per clampAlongParentWire, so the WHOLE segment (both its
+  // knots) ends up moving by the SAME, consistent amount. Meant to run
+  // *before* computeSegmentMove, not after: computeSegmentMove has no
+  // way to only shift one of a segment's two knots part-way — both knots
+  // always move by exactly the (dx,dy) it's given — so clamping needs to
+  // happen to the delta itself, upfront, not patched onto one knot
+  // afterward once the segment's already been drawn with the other one
+  // full-length. (An earlier version tried the latter, in
+  // finalizeSegmentMove, by overwriting just the anchor's own endpoint
+  // after the fact — but computeSegmentMove had already moved the
+  // segment's OTHER knot the full, unclamped distance, so the branch
+  // still reached exactly as far as before, just with a diagonal kink
+  // where the anchor snapped back.)
+  //
+  // A no-op — returns (dx,dy) unchanged — whenever neither of the
+  // segment's two knots is a branch anchored to a DIFFERENT wire's
+  // junction (most segments, most of the time).
+  function clampSegmentMoveDelta(d, dx, dy, circuit) {
+    if (dx===0 && dy===0) return {dx, dy};
+    const n = d.knots.length;
+    const ends = [
+      {pos: d.knots[d.segIndex],   isAnchorEnd: d.segIndex===0 && !d.fromPinned},
+      {pos: d.knots[d.segIndex+1], isAnchorEnd: d.segIndex+1===n-1 && !d.toPinned},
+    ];
+    for (const end of ends) {
+      if (!end.isAnchorEnd) continue;
+      let parentJ = null;
+      for (const j of circuit.junctions) {
+        if (j.sourceWireId===d.wireId) continue; // this wire is the SOURCE here, not anchored to it
+        if (Math.abs(j.x-end.pos.x)<1e-6 && Math.abs(j.y-end.pos.y)<1e-6) { parentJ = j; break; }
+      }
+      if (!parentJ) continue;
+      const parentWire = circuit.wires.get(parentJ.sourceWireId);
+      if (!parentWire) continue;
+      const target = {x: end.pos.x+dx, y: end.pos.y+dy};
+      const finalPos = clampAlongParentWire(parentWire, end.pos, target, circuit, d.wireId);
+      dx = finalPos.x - end.pos.x;
+      dy = finalPos.y - end.pos.y;
+    }
+    return {dx, dy};
+  }
+
+  // Grid step wire geometry snaps to — mirrors the widget's own GRID
+  // constant. Used below purely as the margin kept clear of a parent
+  // wire's own boundary and of anything else along it, not for snapping
+  // itself (the widget already snaps whatever target it asks for).
+  const SNAP_GRID = 20;
+
+  // Where a junction currently at `oldPos` on `wire` can move to, pulled
+  // toward `target` along a straight line — used when the branch reading
+  // from it moves (see attachBranchToJunction). `wire` itself never
+  // budges — only the branch's own end does — so this can land on an
+  // INTERIOR point of `wire`, not just its from/to.
+  //
+  // Deliberately never extends `wire` — the result always stays within
+  // its EXISTING geometry, on the same straight run `oldPos` is already
+  // on. Two things it also always keeps clear of, stepping back one grid
+  // unit at a time until it does:
+  //  - the run's own boundary in that direction (wire's own endpoint, or
+  //    a genuine corner where it bends) — the junction never reaches all
+  //    the way out to it, even if `target` asks for exactly that point;
+  //  - any position along the same line that another junction, or
+  //    another wire's own free endpoint, already occupies — landing
+  //    exactly on top of one of those would conflate the two.
+  // If there's no room to satisfy both (`oldPos` is already right up
+  // against one), the junction just stays put. A junction sitting
+  // exactly on a component pin never moves either, full stop, same
+  // reasoning as everywhere else a wire meets a component — walking
+  // outward from a pin has nowhere further to go anyway, so this falls
+  // out of the general case rather than needing its own check.
+  //
+  // `movingWireId` is the id of the branch being dragged (NOT `wire`,
+  // which is its parent) — excluded from the "another wire's free
+  // endpoint" check below for the same reason `wire.id` is already
+  // excluded from the junction one: the branch's own anchor is exactly
+  // the point being moved, not something it could ever "collide" with.
+  // Omitting this exclusion doesn't just misfire occasionally — the
+  // branch's own endpoint is on this line on *every* call, so every call
+  // saw a "collision" and stepped back from it, and since the position
+  // it stepped back from was wherever the branch happened to be sitting
+  // from the previous frame rather than anything fixed, the two
+  // alternated: full move, see the branch's now-updated position as
+  // blocking the next one, step back, see THAT position as clear again
+  // next frame, move the full distance again — back and forth every
+  // frame rather than settling anywhere.
+  function clampAlongParentWire(wire, oldPos, target, circuit, movingWireId) {
+    const EPS = 1e-6;
+    const same = (a,b) => Math.abs(a.x-b.x)<EPS && Math.abs(a.y-b.y)<EPS;
+    const horiz = Math.abs(target.y-oldPos.y) < EPS;
+    if (!horiz && Math.abs(target.x-oldPos.x) > EPS) return oldPos; // not an axis-aligned request
+    const along = p => horiz ? p.x : p.y, off = p => horiz ? p.y : p.x;
+    const mk = a => horiz ? {x:a, y:oldPos.y} : {x:oldPos.x, y:a};
+    const delta = along(target) - along(oldPos);
+    if (Math.abs(delta) < EPS) return oldPos;
+    const sign = delta > 0 ? 1 : -1;
+
+    const from = terminalCoords(wire.from, circuit), to = terminalCoords(wire.to, circuit);
+    const knots = wireKnots(from.x, from.y, to.x, to.y, wire.points || []);
+    const segs = [];
+    for (let k=0; k<knots.length-1; k++) segs.push([knots[k], knots[k+1]]);
+    // The run's true boundary in this direction, independent of `target`
+    // — probed far past anything realistic so overlapRunEnd's own
+    // "never run past the requested point" clamp can't mistake some
+    // ordinary point along the way for the wall itself.
+    const farProbe = mk(along(oldPos) + sign*1e9);
+    const wall = overlapRunEnd(oldPos, farProbe, segs);
+    const limit = along(wall) - sign*SNAP_GRID;
+
+    const blocked = new Set();
+    for (const j of circuit.junctions) {
+      if (j.sourceWireId===wire.id && same(j, oldPos)) continue; // the one being moved
+      if (Math.abs(off(j)-off(oldPos)) < EPS) blocked.add(along(j));
+    }
+    for (const w of circuit.wires.values()) {
+      if (w.id===movingWireId) continue; // its own endpoint, not a collision
+      for (const side of ['from','to']) {
+        if (isWireTerminal(w[side])) continue;
+        const p = terminalCoords(w[side], circuit);
+        if (Math.abs(off(p)-off(oldPos)) < EPS) blocked.add(along(p));
+      }
+    }
+
+    let a = along(target);
+    if ((a-limit)*sign > EPS) a = limit;
+    while ((a-along(oldPos))*sign > EPS && [...blocked].some(b => Math.abs(b-a)<EPS)) {
+      a -= sign*SNAP_GRID;
+    }
+    if ((a-along(oldPos))*sign <= EPS) return oldPos;
+    return mk(a);
+  }
+
+  // Drops the waypoint at `pos` on `wire` if it's safe to — collinear
+  // with its own neighbors (not a real corner shaping the wire) and
+  // nothing else still needs it there (a junction, or another wire's own
+  // endpoint). Run after a junction that used to sit at `pos` has already
+  // moved elsewhere, to clean up the now-purposeless point it leaves
+  // behind — pruneDeadJunctions doesn't catch this on its own, since by
+  // then there's no junction left registered at `pos` for it to notice.
+  function removeRedundantWaypoint(wire, pos, circuit) {
+    const EPS = 1e-6;
+    const same = (a,b) => Math.abs(a.x-b.x)<EPS && Math.abs(a.y-b.y)<EPS;
+    const from = terminalCoords(wire.from, circuit), to = terminalCoords(wire.to, circuit);
+    const knots = wireKnots(from.x, from.y, to.x, to.y, wire.points || []);
+    const idx = knots.findIndex(k => same(k, pos));
+    if (idx<=0 || idx>=knots.length-1) return; // not an interior waypoint at all
+    const prev = knots[idx-1], cur = knots[idx], next = knots[idx+1];
+    const straight = (prev.x===cur.x && cur.x===next.x) || (prev.y===cur.y && cur.y===next.y);
+    if (!straight) return; // a real corner — still shapes the wire
+    const stillNeeded = [...circuit.junctions].some(j => same(j, pos)) ||
+      [...circuit.wires.values()].some(w => w.id!==wire.id &&
+        ((!isWireTerminal(w.from) && same(terminalCoords(w.from,circuit), pos)) ||
+         (!isWireTerminal(w.to)   && same(terminalCoords(w.to,circuit),   pos))));
+    if (stillNeeded) return;
+    wire.points = wire.points.filter((p,i) => i!==idx-1);
+  }
+
+  // Attaches branch-point junction `j` (on `parentWire`) to wherever the
+  // branch reading from it drags toward `targetPos`, staying within
+  // parentWire's own existing shape the whole time — never extending it,
+  // never reaching its boundary or another junction/endpoint along it,
+  // never merging the two into one wire — see clampAlongParentWire for
+  // exactly what that rules out and why.
+  //
+  // If `j` is the only thing anchored there, it relocates in place — the
+  // old waypoint it sat on is dropped once it's safe to
+  // (removeRedundantWaypoint) and `j` itself moves. If other wires still
+  // read from `j`, moving it would disconnect THEM, so it — and its
+  // waypoint — are left exactly where they are, and a brand new junction
+  // is split off on parentWire at the reached position for just this
+  // branch.
+  //
+  // Returns the position actually reached, which the caller commits back
+  // to the branch's own endpoint — it may fall short of targetPos, and
+  // the branch must agree with wherever the junction actually ended up,
+  // not where it was asked to go, or the two snap apart again.
+  //
+  // `branchWireId` is the branch's own wire id — passed through to
+  // clampAlongParentWire purely so it can exclude the branch's own
+  // (about-to-be-overwritten) endpoint from its "clear of other wires'
+  // endpoints" check; see that function's comment for why skipping this
+  // isn't optional.
+  function attachBranchToJunction(parentWire, j, targetPos, hasOtherReaders, circuit, branchWireId) {
+    const EPS = 1e-6;
+    const same = (a,b) => Math.abs(a.x-b.x)<EPS && Math.abs(a.y-b.y)<EPS;
+    const oldPos = {x:j.x, y:j.y};
+    const finalPos = clampAlongParentWire(parentWire, oldPos, targetPos, circuit, branchWireId);
+    if (same(finalPos, oldPos)) return finalPos;
+    if (!hasOtherReaders) {
+      // Move `j` itself first — insertBranchPoint below only cares about
+      // the waypoint at this point, and its own junction-dedup check now
+      // correctly finds `j` already sitting at finalPos instead of
+      // registering a redundant second one there.
+      j.x = finalPos.x; j.y = finalPos.y;
+      removeRedundantWaypoint(parentWire, oldPos, circuit);
+    }
+    // Ensures a waypoint actually exists at finalPos — without this the
+    // junction would be a registry entry with nothing to show or select
+    // on parentWire's own path. In the shared case `j` never moved, so
+    // this registers a genuinely separate, new junction there instead.
+    insertBranchPoint(parentWire, finalPos.x, finalPos.y, circuit);
+    return finalPos;
+  }
+
+  // Runs once, at drop, after computeSegmentMove's result has already been
+  // committed to `wire` — carries along the one kind of anchoring
+  // computeSegmentMove can't grow a stub for on its own: `wire` being a
+  // branch itself, anchored to a junction on some OTHER wire at this
+  // segment's endpoint. That junction is dragged toward the same move
+  // instead (attachBranchToJunction), but only ever within the parent's
+  // own existing shape — never past it — and `wire`'s own endpoint is
+  // snapped to wherever it actually landed, in case that fell short of
+  // the full move.
+  //
+  // Skips any end startPinned/endPinned already marked as anchored —
+  // computeSegmentMove left it exactly where it was and grew a stub
+  // instead, whether that anchoring was a component pin or a junction
+  // `wire` itself is the SOURCE of, so there's nothing left to carry: a
+  // branchpoint `wire` owns never moves out from under the OTHER wires
+  // reading from it in the first place, same as dragging a segment can
+  // never reach into whatever's on the far side of a component. Nor does
+  // the remaining case apply to an end that isn't actually one of
+  // `wire`'s own from/to — an interior waypoint can't be the free end of
+  // a branch reading from someone else's junction, since a branch is
+  // always anchored at its own from or to.
+  function finalizeSegmentMove(wire, d, dx, dy, circuit) {
+    const EPS = 1e-6;
+    const same = (a,b) => Math.abs(a.x-b.x)<EPS && Math.abs(a.y-b.y)<EPS;
+    const n = d.knots.length;
+    const ends = [
+      {pos: d.knots[d.segIndex],   pinned: d.startPinned, side: d.segIndex===0     ? 'from' : null},
+      {pos: d.knots[d.segIndex+1], pinned: d.endPinned,   side: d.segIndex+1===n-1 ? 'to'   : null},
+    ];
+    for (const end of ends) {
+      if (end.pinned) continue;
+      if (!end.side) continue; // an interior point — can't be a branch's own anchor
+      const newPos = {x:end.pos.x+dx, y:end.pos.y+dy};
+      const parentJ = [...circuit.junctions].find(j=>j.sourceWireId!==wire.id && same(j, end.pos));
+      if (!parentJ) continue;
+      const parentWire = circuit.wires.get(parentJ.sourceWireId);
+      if (!parentWire) continue;
+      const hasOtherReaders = [...circuit.wires.values()].some(w => w.id!==wire.id &&
+        ((!isWireTerminal(w.from) && same(terminalCoords(w.from,circuit), end.pos)) ||
+         (!isWireTerminal(w.to)   && same(terminalCoords(w.to,circuit),   end.pos))));
+      const finalPos = attachBranchToJunction(parentWire, parentJ, newPos, hasOtherReaders, circuit, wire.id);
+      wire[end.side] = {x:finalPos.x, y:finalPos.y};
+    }
+  }
+
   // Absolute canvas position of one pin (input or output, by index) of a
   // component, accounting for its facing — rotated about its own center for
   // up/down, or mirrored horizontally for left (matching how GateBody
@@ -517,12 +978,6 @@ defineModule('engine', ['state'], (state) => {
       // source wire's own endpoint, gets the same junction cleanup a
       // manual wire deletion would.
       for (const [wid,w] of [...wires]) { if (w.from.compId===id||w.to.compId===id) removeWire(wid); }
-    }
-
-    // Returns true if `target` is a real component-pin reference, as opposed to a
-    // free-floating {x,y} endpoint (a dangling wire end, or a branch point)
-    function isWireTerminal(target) {
-      return target && typeof target.compId==='string' && typeof target.pin==='number';
     }
 
     // Connects two wire terminals
@@ -948,6 +1403,7 @@ defineModule('engine', ['state'], (state) => {
     projectOrthogonalPoint, terminalCoords, wireKnots, resolveWire, wirePath,
     sampleWire, distToSeg, wireSegmentPoints, wireDelayForLength,
     findNearestWirePoint, insertBranchPoint, routeManhattanPoints, pinAbs,
-    branchRouteFrom,
+    branchRouteFrom, isWireTerminal, syncEndCorner, syncWireEndCorners,
+    segmentMoveSnapshot, computeSegmentMove, clampSegmentMoveDelta, finalizeSegmentMove,
   };
 });
