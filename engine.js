@@ -306,6 +306,46 @@ defineModule('engine', ['state'], (state) => {
     return pt;
   }
 
+  // A junction never goes away by itself as a direct user action anymore
+  // (see onWaypointContext in the widget, which now deletes a junction's
+  // whole host wire rather than singling out just the junction) — this
+  // only cleans up what's left registered after every branch reading from
+  // a junction is actually gone. Called after every wire removal (explicit
+  // right-click delete, a junction's host wire going with it, or a branch
+  // dragged back onto its own branchpoint — see finalizeEndpointRoute) to
+  // sweep up any junction that's now branchless.
+  //
+  // A now-branchless junction is only actually deleted, along with its
+  // waypoint, when it sits at a plain pass-through on its source wire's path
+  // — i.e. removing it wouldn't change the wire's shape at all, because its
+  // neighbors on either side are already collinear with it. A junction at a
+  // real elbow stays registered (and thus still not directly deletable)
+  // even with zero branches, since deleting *that* would reshape the source
+  // wire itself — this function only ever cleans up redundant bookkeeping,
+  // never the source wire's own geometry. Same reasoning for a junction that
+  // sits at the source wire's own endpoint rather than partway along it:
+  // there's no "middle" for it to be in the middle of, so it's left alone.
+  function pruneDeadJunctions(circuit) {
+    const EPS = 1e-6;
+    const same = (a,b) => Math.abs(a.x-b.x)<EPS && Math.abs(a.y-b.y)<EPS;
+    for (const j of [...circuit.junctions]) {
+      const hasBranch = [...circuit.wires.values()].some(w => w.id!==j.sourceWireId &&
+        (same(terminalCoords(w.from,circuit), j) || same(terminalCoords(w.to,circuit), j)));
+      if (hasBranch) continue;
+      const src = circuit.wires.get(j.sourceWireId);
+      if (!src) { circuit.junctions.delete(j); continue; } // source wire is already gone too
+      const from = terminalCoords(src.from,circuit), to = terminalCoords(src.to,circuit);
+      const knots = wireKnots(from.x, from.y, to.x, to.y, src.points || []);
+      const idx = knots.findIndex(k => same(k, j));
+      if (idx <= 0 || idx >= knots.length-1) continue; // at the wire's own endpoint, not partway along it
+      const prev = knots[idx-1], cur = knots[idx], next = knots[idx+1];
+      const straight = (prev.x===cur.x && cur.x===next.x) || (prev.y===cur.y && cur.y===next.y);
+      if (!straight) continue; // a real elbow — still shapes the wire, so the junction stays
+      src.points.splice(idx-1, 1); // knots[1..len-2] map 1:1 onto src.points
+      circuit.junctions.delete(j);
+    }
+  }
+
   // Picks a single elbow corner for a new wire between two points that
   // don't already share an axis, going vertical-then-horizontal or
   // horizontal-then-vertical depending on firstDir. Points already sharing
@@ -314,6 +354,79 @@ defineModule('engine', ['state'], (state) => {
     if (from.x === to.x || from.y === to.y) return [];
     const corner = firstDir === 'v' ? {x:from.x, y:to.y} : {x:to.x, y:from.y};
     return [corner];
+  }
+
+  // How far a straight, axis-aligned move from `a` toward `b` can travel
+  // while staying on top of `segs` (consecutive point pairs of some wire's
+  // resolved path). Returns the furthest point from `a` toward `b` that's
+  // still covered by the wire — `a` itself if the move leaves it right away,
+  // `b` if the whole move runs along it. Coverage carries through abutting
+  // collinear segments, so a wire that turns a corner and comes back onto
+  // the same line still reads as one continuous run.
+  function overlapRunEnd(a, b, segs) {
+    const EPS = 1e-6;
+    const horiz = Math.abs(a.y - b.y) < EPS;
+    if (!horiz && Math.abs(a.x - b.x) > EPS) return a; // not axis-aligned — nothing to follow
+    const along = (p) => horiz ? p.x : p.y;  // coordinate the move varies
+    const off   = (p) => horiz ? p.y : p.x;  // coordinate it holds fixed
+    const start = along(a), end = along(b);
+    const sign = end >= start ? 1 : -1;
+    // Only wire segments sitting on the very same line can cover any of it.
+    const spans = [];
+    for (const [s,t] of segs) {
+      if ((Math.abs(s.y-t.y) < EPS) !== horiz) continue;
+      if (Math.abs(off(s) - off(a)) > EPS) continue;
+      spans.push([Math.min(along(s),along(t)), Math.max(along(s),along(t))]);
+    }
+    let reach = start;
+    for (;;) {
+      let next = reach;
+      for (const [lo,hi] of spans) {
+        if (reach < lo-EPS || reach > hi+EPS) continue;   // span doesn't touch how far we've got
+        const far = sign > 0 ? hi : lo;
+        if ((far-next)*sign > EPS) next = far;
+      }
+      if ((next-reach)*sign <= EPS) break;                // nothing extends the run any further
+      reach = next;
+    }
+    if ((reach-end)*sign > 0) reach = end;                // never run past the move's own end
+    return horiz ? {x:reach, y:a.y} : {x:a.x, y:reach};
+  }
+
+  // Where a branch dragged off `wire` should actually start, and what's left
+  // of its route once the part that merely retraces `wire` is dropped.
+  //
+  // A branch drag often opens by running *along* the wire it came from —
+  // grab a horizontal wire, pull right then up, and that entire first leg
+  // lies on top of the wire, drawing a second copy of a connection that's
+  // already there. Rather than that, the junction slides forward to the
+  // corner where the route genuinely diverges off the wire, and only the
+  // part beyond that corner becomes the new wire.
+  //
+  // Returns {start, points}: the junction position, and the branch's
+  // waypoint list measured from it. Returns null when the route never leaves
+  // the wire at all — then the "branch" is pure duplicate, so callers should
+  // create nothing.
+  function branchRouteFrom(wire, from, to, firstDir, circuit) {
+    const EPS = 1e-6;
+    const route = [from, ...routeManhattanPoints(from, to, firstDir), to];
+    const a = terminalCoords(wire.from, circuit), b = terminalCoords(wire.to, circuit);
+    // The *resolved* path, so we compare against the wire as actually drawn
+    // (elbows included) rather than its raw knot list.
+    const path = resolveWire(a.x, a.y, b.x, b.y, wire.points || []);
+    const segs = [];
+    for (let i=1;i<path.length;i++) segs.push([path[i-1], path[i]]);
+
+    // Follow the route leg by leg for as long as it stays on the wire. The
+    // first leg to get cut short is the one carrying the branch away, and
+    // where it got cut short is the corner the junction belongs at.
+    let start = from, leg = 1;
+    for (; leg < route.length; leg++) {
+      start = overlapRunEnd(start, route[leg], segs);
+      if (Math.abs(start.x-route[leg].x) > EPS || Math.abs(start.y-route[leg].y) > EPS) break;
+    }
+    if (leg >= route.length) return null; // every leg ran along the wire
+    return { start, points: route.slice(leg, route.length-1) };
   }
 
   // Absolute canvas position of one pin (input or output, by index) of a
@@ -399,7 +512,11 @@ defineModule('engine', ['state'], (state) => {
       if (component.ioId != ''){
         ioComponents.delete(component.ioId);
       }
-      for (const [wid,w] of wires) { if (w.from.compId===id||w.to.compId===id) wires.delete(wid); }
+      // Routed through removeWire (rather than deleting from `wires`
+      // directly) so a component that anchored a branch's target, or a
+      // source wire's own endpoint, gets the same junction cleanup a
+      // manual wire deletion would.
+      for (const [wid,w] of [...wires]) { if (w.from.compId===id||w.to.compId===id) removeWire(wid); }
     }
 
     // Returns true if `target` is a real component-pin reference, as opposed to a
@@ -426,12 +543,16 @@ defineModule('engine', ['state'], (state) => {
       return wire;
     }
 
-    // Deletes a wire and every junction branching off of it
+    // Deletes a wire and every junction branching off of it, then sweeps up
+    // any OTHER junction this removal just left branchless (e.g. deleting
+    // the last branch off some other wire's junction) — see
+    // pruneDeadJunctions.
     function removeWire(id) {
       wires.delete(id);
       for (const j of junctions) {
         if (j.sourceWireId === id) junctions.delete(j);
       }
+      pruneDeadJunctions({components, wires, ioComponents, junctions});
     }
 
     // Walks a wire back through branch junctions to find its source component pin, then returns its bit width
@@ -827,5 +948,6 @@ defineModule('engine', ['state'], (state) => {
     projectOrthogonalPoint, terminalCoords, wireKnots, resolveWire, wirePath,
     sampleWire, distToSeg, wireSegmentPoints, wireDelayForLength,
     findNearestWirePoint, insertBranchPoint, routeManhattanPoints, pinAbs,
+    branchRouteFrom,
   };
 });

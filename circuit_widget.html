@@ -644,6 +644,7 @@ const {
   projectOrthogonalPoint, terminalCoords, wireKnots, resolveWire, wirePath,
   sampleWire, distToSeg, wireSegmentPoints, findNearestWirePoint,
   insertBranchPoint, routeManhattanPoints, pinAbs, wireDelayForLength,
+  branchRouteFrom,
 } = engine;
 
 const GRID = 20;
@@ -690,8 +691,30 @@ function NumberField({ className, value, min, max, onCommit }) {
 // exactly one corner point beyond `neighbor` (new segment), and nothing
 // before `neighbor` is ever touched either way.
 function computeEndpointRoute(d, newPos) {
-  const aligned = d.axis==='h' ? Math.abs(newPos.y-d.neighbor.y)<1e-6 : Math.abs(newPos.x-d.neighbor.x)<1e-6;
-  if (aligned) return { points: d.basePoints, corner: null };
+  const EPS = 1e-6;
+  const aligned = d.axis==='h' ? Math.abs(newPos.y-d.neighbor.y)<EPS : Math.abs(newPos.x-d.neighbor.x)<EPS;
+  if (aligned) {
+    // Dragged all the way back onto the fixed point behind it (both
+    // coordinates, not just the on-axis one) — the final segment has
+    // shrunk to nothing. If that point was one of the wire's own
+    // waypoints, it's now a redundant duplicate of the endpoint sitting
+    // right on top of it, so it's dropped and that point becomes the
+    // endpoint outright — case (b): if it was already a junction, the
+    // junction stays put, now doubling as the endpoint. If there was no
+    // waypoint there at all — the fixed point was the wire's *other*
+    // end — the whole wire has collapsed to zero length; flagged via
+    // collapsedToZero rather than acted on here, since a live preview
+    // frame shouldn't delete anything — only finalizeEndpointRoute, at
+    // drop, does that (case (c) when the fixed point is a branch's own
+    // branchpoint junction).
+    const collapsed = Math.abs(newPos.x-d.neighbor.x)<EPS && Math.abs(newPos.y-d.neighbor.y)<EPS;
+    if (collapsed) {
+      if (d.basePoints.length===0) return { points: [], corner: null, collapsedToZero: true };
+      const points = d.side==='to' ? d.basePoints.slice(0,-1) : d.basePoints.slice(1);
+      return { points, corner: null };
+    }
+    return { points: d.basePoints, corner: null };
+  }
   const corner = d.axis==='h' ? {x:newPos.x, y:d.neighbor.y} : {x:d.neighbor.x, y:newPos.y};
   const points = d.side==='to' ? [...d.basePoints, corner] : [corner, ...d.basePoints];
   return { points, corner };
@@ -704,12 +727,22 @@ function computeEndpointRoute(d, newPos) {
 // corner this drag may have added, since everything else about the wire is
 // left alone and any junctions elsewhere on it are therefore still valid.
 function finalizeEndpointRoute(wire, d, newPos, circuit) {
-  const {points, corner} = computeEndpointRoute(d, newPos);
+  const {points, corner, collapsedToZero} = computeEndpointRoute(d, newPos);
+  if (collapsedToZero) {
+    // Both ends now sit on the same point — nothing left to draw. Going
+    // through circuit.removeWire (rather than just leaving an empty-points
+    // wire in place) runs its junction cleanup too, so retracting a
+    // branch back onto its own branchpoint takes that junction down with
+    // it if it was the last branch there (case (c)).
+    circuit.removeWire(wire.id);
+    return true;
+  }
   wire.points = points;
   if (corner) {
     const dup = [...circuit.junctions].some(j=>j.sourceWireId===wire.id && Math.abs(j.x-corner.x)<1e-6 && Math.abs(j.y-corner.y)<1e-6);
     if (!dup) circuit.junctions.add({x:corner.x, y:corner.y, sourceWireId:wire.id});
   }
+  return false;
 }
 
 function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag, onComponentChanged, snapGrid=true }) {
@@ -812,11 +845,16 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
           if (wf.type==='branch' && dist>6) {
             const wire=circuit.wires.get(wf.wireId);
             if (wire) {
-              const branchPoint = insertBranchPoint(wire,wf.x,wf.y,circuit);
               const target={x:snap(w.x,snapGridRef.current),y:snap(w.y,snapGridRef.current)};
-              const branch = branchPoint ? circuit.addWire({x:branchPoint.x,y:branchPoint.y},target) : null;
-              if(branch) branch.points = routeManhattanPoints(terminalCoords(branch.from,circuit), terminalCoords(branch.to,circuit), wf.dir||'h');
-              onChangedRef.current?.();
+              // Junction goes wherever the route stops retracing the wire; a
+              // null route retraces it the whole way, so there's nothing to add.
+              const route = branchRouteFrom(wire,{x:wf.x,y:wf.y},target,wf.dir||'h',circuit);
+              if (route) {
+                const branchPoint = insertBranchPoint(wire,route.start.x,route.start.y,circuit);
+                const branch = branchPoint ? circuit.addWire({x:branchPoint.x,y:branchPoint.y},target) : null;
+                if(branch) branch.points = route.points;
+                onChangedRef.current?.();
+              }
             }
           } else if (wf.type==='pin' && dist>6) {
             const target={x:snap(w.x,snapGridRef.current),y:snap(w.y,snapGridRef.current)};
@@ -919,9 +957,14 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
     if (wf.type==='branch') {
       const wire=circuit.wires.get(wf.wireId);
       if (wire) {
-        const branchPoint = insertBranchPoint(wire,wf.x,wf.y,circuit);
-        const branch = branchPoint ? circuit.addWire({x:branchPoint.x,y:branchPoint.y}, {compId:comp.id,pin:idx,type:'in'}) : null;
-        if (branch) branch.points=routeManhattanPoints(terminalCoords(branch.from,circuit),terminalCoords(branch.to,circuit),wf.dir||'h');
+        const to={compId:comp.id,pin:idx,type:'in'};
+        // Same trimming as a drop on empty canvas — see the onUp branch case.
+        const route = branchRouteFrom(wire,{x:wf.x,y:wf.y},terminalCoords(to,circuit),wf.dir||'h',circuit);
+        if (route) {
+          const branchPoint = insertBranchPoint(wire,route.start.x,route.start.y,circuit);
+          const branch = branchPoint ? circuit.addWire({x:branchPoint.x,y:branchPoint.y}, to) : null;
+          if (branch) branch.points=route.points;
+        }
         wiringFromRef.current=null;
         onComponentChanged?.(); setWiringFrom(null); return;
       }
@@ -1026,6 +1069,21 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
   };
   const onWaypointContext=(e,wire,idx)=>{
     e.preventDefault(); e.stopPropagation();
+    const pt = wire.points[idx];
+    // A junction can't be picked off by itself anymore — right-clicking
+    // its dot falls through to the same "delete the whole wire" action as
+    // right-clicking anywhere else on the wire's body, rather than
+    // singling out just this point (which used to leave the rest of the
+    // wire behind, minus its junction, as if the branch had never been
+    // there). Junctions only ever go away as a side effect of removing
+    // whatever made them one — every branch reading from them (engine's
+    // pruneDeadJunctions, run from removeWire), this wire itself going
+    // away, or a wire's own endpoint getting dragged back onto one
+    // (computeEndpointRoute/finalizeEndpointRoute) — never by themselves.
+    // A plain, non-junction corner is unaffected and stays deletable on
+    // its own.
+    const isJunction = [...circuit.junctions].some(j=>j.sourceWireId===wire.id && Math.abs(j.x-pt.x)<1e-6 && Math.abs(j.y-pt.y)<1e-6);
+    if (isJunction) { circuit.removeWire(wire.id); onComponentChanged?.(); return; }
     wire.points.splice(idx,1); onComponentChanged?.();
   };
 
