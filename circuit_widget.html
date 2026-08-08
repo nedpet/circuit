@@ -949,7 +949,8 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
               const target={x:snap(w.x,snapGridRef.current),y:snap(w.y,snapGridRef.current)};
               // Junction goes wherever the route stops retracing the wire; a
               // null route retraces it the whole way, so there's nothing to add.
-              const route = branchRouteFrom(wire,{x:wf.x,y:wf.y},target,wf.dir||'h',circuit);
+              // Grid-snapped the same way `target` is, per snapGridRef.
+              const route = branchRouteFrom(wire,{x:wf.x,y:wf.y},target,wf.dir||'h',circuit,snapGridRef.current);
               if (route) {
                 const branchPoint = insertBranchPoint(wire,route.start.x,route.start.y,circuit);
                 const branch = branchPoint ? circuit.addWire({x:branchPoint.x,y:branchPoint.y},target) : null;
@@ -1123,8 +1124,9 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
       const wire=circuit.wires.get(wf.wireId);
       if (wire) {
         const to={compId:comp.id,pin:idx,type:'in'};
-        // Same trimming as a drop on empty canvas — see the onUp branch case.
-        const route = branchRouteFrom(wire,{x:wf.x,y:wf.y},terminalCoords(to,circuit),wf.dir||'h',circuit);
+        // Same trimming (and junction snapping) as a drop on empty canvas
+        // — see the onUp branch case / branchRouteFrom.
+        const route = branchRouteFrom(wire,{x:wf.x,y:wf.y},terminalCoords(to,circuit),wf.dir||'h',circuit,snapGridRef.current);
         if (route) {
           const branchPoint = insertBranchPoint(wire,route.start.x,route.start.y,circuit);
           const branch = branchPoint ? circuit.addWire({x:branchPoint.x,y:branchPoint.y}, to) : null;

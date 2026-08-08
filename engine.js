@@ -500,7 +500,29 @@ defineModule('engine', ['state'], (state) => {
   // waypoint list measured from it. Returns null when the route never leaves
   // the wire at all — then the "branch" is pure duplicate, so callers should
   // create nothing.
-  function branchRouteFrom(wire, from, to, firstDir, circuit) {
+  //
+  // `start` always lands exactly ON one of `wire`'s own resolved segments
+  // (that's the whole point of walking along it below), so one of its two
+  // coordinates is pinned to that segment's own line and the other is
+  // wherever along it the divergence happened to land — free-floating,
+  // continuous, and not necessarily grid-aligned, since it can come
+  // straight from an unsnapped mouse position (`from`, when the route
+  // diverges immediately with no retrace at all). When `snapToGrid` is on,
+  // that second coordinate gets rounded to SNAP_GRID — the same treatment
+  // the branch's OTHER end already gets, dropped on empty canvas or a pin,
+  // from the caller — while the pinned one is left alone, since rounding
+  // it too could nudge the junction off the wire it's meant to sit on.
+  //
+  // Rounding that coordinate can detach `start` from `points[0]` — the
+  // branch's own first waypoint — if the two happened to share it (which
+  // they do exactly when the route diverges immediately, perpendicular to
+  // the wire, with `points[0]` still carrying that same raw, unsnapped
+  // value straight from `from`). Detected by comparing against `start`'s
+  // OWN pre-snap value rather than assumed unconditionally, since a route
+  // that instead retraced partway along the wire before diverging shares
+  // a *different* coordinate with `points[0]` (the wire's own, already
+  // fixed one) — nudging that one to match would be wrong, not corrective.
+  function branchRouteFrom(wire, from, to, firstDir, circuit, snapToGrid) {
     const EPS = 1e-6;
     const route = [from, ...routeManhattanPoints(from, to, firstDir), to];
     const a = terminalCoords(wire.from, circuit), b = terminalCoords(wire.to, circuit);
@@ -519,7 +541,30 @@ defineModule('engine', ['state'], (state) => {
       if (Math.abs(start.x-route[leg].x) > EPS || Math.abs(start.y-route[leg].y) > EPS) break;
     }
     if (leg >= route.length) return null; // every leg ran along the wire
-    return { start, points: route.slice(leg, route.length-1) };
+    const points = route.slice(leg, route.length-1);
+    if (!snapToGrid) return { start, points };
+
+    // Which of wire's OWN segments start sits on — deliberately re-derived
+    // from wire's geometry rather than inferred from the route (the
+    // route's own legs run in whatever direction the mouse moved, which
+    // isn't necessarily the same axis as the wire underneath them at that
+    // exact point).
+    let alongAxis = null;
+    for (const [s,t] of segs) {
+      const segHoriz = Math.abs(s.y-t.y) < EPS;
+      const onSeg = segHoriz
+        ? Math.abs(start.y-s.y) < EPS && start.x > Math.min(s.x,t.x)-EPS && start.x < Math.max(s.x,t.x)+EPS
+        : Math.abs(start.x-s.x) < EPS && start.y > Math.min(s.y,t.y)-EPS && start.y < Math.max(s.y,t.y)+EPS;
+      if (onSeg) { alongAxis = segHoriz ? 'x' : 'y'; break; }
+    }
+    if (!alongAxis) return { start, points };
+
+    const original = start[alongAxis];
+    const snapped = Math.round(original/SNAP_GRID)*SNAP_GRID;
+    if (points.length && Math.abs(points[0][alongAxis]-original) < EPS) {
+      points[0] = Object.assign({}, points[0], {[alongAxis]: snapped});
+    }
+    return { start: Object.assign({}, start, {[alongAxis]: snapped}), points };
   }
 
   // Snapshot of one wire segment's shape, captured once at drag-start so a
