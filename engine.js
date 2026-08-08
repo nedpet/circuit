@@ -319,6 +319,56 @@ defineModule('engine', ['state'], (state) => {
     return [p[p.length-1].x,p[p.length-1].y];
   }
 
+  // Splits a wire's resolved path into two SVG path `d` strings — the
+  // "before" part already reached by fraction `t` (0-1) of its length,
+  // and the "after" part not yet reached — cut at whichever of the
+  // wire's OWN corners is the furthest one *entirely* covered, never
+  // partway through a straight segment. That's the difference from
+  // sampleWire, which places a single point at the exact fractional
+  // distance regardless of where it falls: this is for lighting a wire
+  // up segment by segment as its signal arrives, where a segment should
+  // only ever show as fully in its new color once the signal has crossed
+  // the whole way to its far end — not a partial fill sweeping through
+  // it, which would suggest a segment can be "half powered."
+  //
+  // `before`/`after` share their cut point exactly, so drawing both back
+  // to back (as two differently-colored <path> strokes) reads as one
+  // continuous line with no gap or overlap.
+  function splitWirePathAtSegment(x1,y1,x2,y2,pts=[],t) {
+    const EPS = 1e-6;
+    const p=resolveWire(x1,y1,x2,y2,pts);
+    let total=0; const lens=[];
+    for (let i=1;i<p.length;i++){const dx=p[i].x-p[i-1].x,dy=p[i].y-p[i-1].y,l=Math.hypot(dx,dy);lens.push(l);total+=l;}
+    const target=t*total;
+    let reached=0, k=0;
+    for (let i=0;i<lens.length;i++) {
+      if (reached+lens[i] > target+EPS) break;
+      reached += lens[i];
+      k = i+1;
+    }
+    const toD = pp => pp.map((v,i)=>(i?'L ':'M ')+v.x+' '+v.y).join('');
+    return { before: toD(p.slice(0,k+1)), after: toD(p.slice(k)) };
+  }
+
+  // Cumulative distance from `a` to each of a wire's own RAW knots — from,
+  // then every waypoint in order, then to — one entry per wireKnots()
+  // entry, at the same index. Used to tell whether a specific waypoint or
+  // endpoint has already been reached by an in-flight signal, the same
+  // way splitWirePathAtSegment tells it for the path itself, without
+  // needing resolveWire's implicit-corner insertion: every consecutive
+  // pair of a wire's own knots is already axis-aligned by construction
+  // (that's what makes it a valid Manhattan wire), so raw and resolved
+  // distances agree — resolveWire only ever matters as a safety net for
+  // a wire mid-reconciliation, not for one actually being drawn.
+  function wireKnotDistances(x1,y1,x2,y2,pts=[]) {
+    const knots = wireKnots(x1,y1,x2,y2,pts);
+    const dists = [0];
+    for (let i=1;i<knots.length;i++) {
+      dists.push(dists[i-1] + Math.hypot(knots[i].x-knots[i-1].x, knots[i].y-knots[i-1].y));
+    }
+    return dists;
+  }
+
   // Shortest distance from point (px,py) to the segment (ax,ay)-(bx,by) —
   // a general (not axis-restricted) point-to-segment distance, used for
   // wire-hover/click hit-testing.
@@ -1582,7 +1632,7 @@ defineModule('engine', ['state'], (state) => {
   return {
     GATE_DEFS, BIT_WIDTH_KINDS, createCircuit,
     projectOrthogonalPoint, terminalCoords, wireKnots, resolveWire, wirePath,
-    sampleWire, distToSeg, wireSegmentPoints, wireDelayForLength,
+    sampleWire, splitWirePathAtSegment, wireKnotDistances, distToSeg, wireSegmentPoints, wireDelayForLength,
     findNearestWirePoint, insertBranchPoint, routeManhattanPoints, pinAbs,
     branchRouteFrom, isWireTerminal, syncEndCorner, syncWireEndCorners,
     segmentMoveSnapshot, computeSegmentMove, clampSegmentMoveDelta, finalizeSegmentMove,

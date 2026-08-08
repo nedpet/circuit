@@ -693,7 +693,7 @@ const { GATE_VIS, GateBody, visForComp } = gates;
 const {
   GATE_DEFS,
   projectOrthogonalPoint, terminalCoords, wireKnots, resolveWire, wirePath,
-  sampleWire, distToSeg, wireSegmentPoints, findNearestWirePoint,
+  sampleWire, splitWirePathAtSegment, wireKnotDistances, distToSeg, wireSegmentPoints, findNearestWirePoint,
   insertBranchPoint, routeManhattanPoints, pinAbs, wireDelayForLength,
   branchRouteFrom, syncWireEndCorners,
   segmentMoveSnapshot, computeSegmentMove, clampSegmentMoveDelta, finalizeSegmentMove,
@@ -1284,6 +1284,40 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
   const wires=[...circuit.wires.values()];
   const tx=view.x*view.zoom, ty=view.y*view.zoom;
 
+  // Per-wire signal-arrival info, computed once and shared by the wire
+  // path/particle rendering below AND the separate waypoint-handle pass
+  // further down, which doesn't otherwise have easy access to this wire's
+  // shape or pending state — so a waypoint, junction, or free endpoint
+  // lights up the moment the signal actually reaches IT, not whenever the
+  // whole wire finishes settling. `distances[i]` is knot i's (wireKnots
+  // order: from, then every waypoint, then to) distance from `from`, so a
+  // waypoint at index `idx` in `wire.points` sits at `distances[idx+1]`.
+  const wireProgress = new Map();
+  for (const w of wires) {
+    const a = terminalCoords(w.from,circuit), b = terminalCoords(w.to,circuit);
+    const distances = wireKnotDistances(a.x,a.y,b.x,b.y,w.points||[]);
+    const wireLen = distances[distances.length-1];
+    const pending = !w.bitMismatch && typeof w.pendingValue!=='undefined';
+    let pendingT=0, wireDelay=0;
+    if (pending) {
+      wireDelay = wireDelayForLength(wireLen, state.widgetState.delayMs);
+      pendingT = Math.min(1, (performance.now()-(w.pendingStart||performance.now()))/wireDelay);
+    }
+    wireProgress.set(w.id, {
+      pending, pendingT, wireDelay, wireLen, distances,
+      reachedDist: pendingT*wireLen,
+      value: w.value, pendingValue: w.pendingValue,
+    });
+  }
+  // Whether the point `dist` away from a wire's own `.from` is CURRENTLY
+  // showing as high — the whole wire's settled value normally, or, mid-
+  // transition, whichever side of the signal's current position it falls
+  // on (see splitWirePathAtSegment, which does the same thing for the
+  // wire's own drawn path).
+  const isWireHighAt = (progress, dist) =>
+    progress.pending ? (dist<=progress.reachedDist ? progress.pendingValue>0 : progress.value>0)
+                      : progress.value>0;
+
   // While a segment drag is moving a branch's own anchor — its end reads
   // from a DIFFERENT wire's junction, see clampSegmentMoveDelta /
   // attachBranchToJunction — that junction doesn't actually move until
@@ -1535,6 +1569,16 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
           const path=wirePath(a.x,a.y,b.x,b.y,pts);
           const high=w.value>0;
           const mismatch=w.bitMismatch;
+          // A wire mid-transition lights up segment by segment as its
+          // signal actually reaches each corner, rather than the whole
+          // wire holding its old color until the full wire delay elapses
+          // — pending/wireDelay/pendingT come from wireProgress (above),
+          // shared with the free-endpoint/waypoint lighting and the
+          // traveling InflightPulse dot below so all of them track the
+          // exact same progress, computed once instead of several times.
+          const progress = wireProgress.get(w.id);
+          const {pending, wireDelay, pendingT} = progress;
+          const split = pending ? splitWirePathAtSegment(a.x,a.y,b.x,b.y,pts,pendingT) : null;
           // Which of this wire's segments (if any) selectedId names — a
           // composite id ('<wireId>#seg<index>', see segSelId), distinct
           // from any component id, so it rides the same selectedId prop
@@ -1557,41 +1601,72 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
                   strokeLinejoin="round" strokeLinecap="round" opacity="0.07"/>
             {/* Signal color — red instead of low/high when the pins on
                 either end disagree on bit width; the signal is held at 0
-                rather than crossing, so `high` is never true here too. */}
-            <path d={path} fill="none"
-                  stroke={mismatch?'var(--err)':(high?'var(--high)':'var(--low)')}
-                  strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round"
-                  strokeDasharray={mismatch?'5 4':undefined}
-                  style={{transition:'stroke 100ms ease'}}/>
+                rather than crossing, so `high` is never true here too.
+                Mid-transition (split!=null), drawn as two strokes instead
+                of one: the part already reached, in the color it's
+                arriving AT, and the rest, still in the color it's coming
+                FROM — each a whole run of fully-crossed segments, per
+                splitWirePathAtSegment, not a smooth partial fill. No CSS
+                transition on either piece; the geometry itself already
+                animates frame to frame; a color transition on top would
+                just blur the two together. */}
+            {split
+              ? <>
+                  <path d={split.before} fill="none" stroke={w.pendingValue>0?'var(--high)':'var(--low)'}
+                        strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round"/>
+                  <path d={split.after} fill="none" stroke={high?'var(--high)':'var(--low)'}
+                        strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round"/>
+                </>
+              : <path d={path} fill="none"
+                      stroke={mismatch?'var(--err)':(high?'var(--high)':'var(--low)')}
+                      strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round"
+                      strokeDasharray={mismatch?'5 4':undefined}
+                      style={{transition:'stroke 100ms ease'}}/>}
             {/* Fat hit target — click to add branch */}
             <path d={path} fill="none" stroke="transparent" strokeWidth="16"
                   style={{cursor:'cell'}}
                   onMouseDown={e=>onWireEdgeDown(e,w)}
                   onContextMenu={e=>onWireContext(e,w)}/>
-            {/* Particles on HIGH */}
-            {high&&<ParticleStream a={a} b={b} pts={pts}/>}
-            {/* In-flight pulse */}
-            {typeof w.pendingValue!=='undefined'&&(()=>{
-              const knots = wireSegmentPoints(w, circuit);
-              let wireLen = 0;
-              for (let i = 0; i < knots.length - 1; i++) {
-                wireLen += Math.hypot(knots[i+1].x - knots[i].x, knots[i+1].y - knots[i].y);
-              }
-              const wireDelay = wireDelayForLength(wireLen, state.widgetState.delayMs);
-              return <InflightPulse a={a} b={b} pts={pts} pendingValue={w.pendingValue}
-                                    pendingStart={w.pendingStart} delayMs={wireDelay}/>;
-            })()}
+            {/* Particles — confined to whichever part of the wire is
+                CURRENTLY actually high. Settled, that's simply the whole
+                wire when `high`. Mid-transition, `high` alone isn't
+                enough: it still reads true for the entire duration of a
+                high-to-low transition (w.value doesn't drop until the
+                full delay elapses), which used to let particles keep
+                flowing across a stretch that's already visually turned
+                off, per the segment-by-segment split above — so here
+                they're confined to just the not-yet-reached suffix
+                instead, shrinking in step with it. Arriving at high
+                (pendingValue>0) is the mirror case: nothing's actually
+                high yet except the already-reached prefix, which is
+                where they start instead of waiting for the whole wire to
+                settle. */}
+            {pending
+              ? (w.pendingValue>0
+                  ? <ParticleStream a={a} b={b} pts={pts} range={[0,pendingT]}/>
+                  : high && <ParticleStream a={a} b={b} pts={pts} range={[pendingT,1]}/>)
+              : high && <ParticleStream a={a} b={b} pts={pts}/>}
+            {/* In-flight pulse — the exact leading edge, finer-grained
+                than the segment-by-segment coloring above (which only
+                ever stops at a real corner). */}
+            {pending&&<InflightPulse a={a} b={b} pts={pts} pendingValue={w.pendingValue}
+                                  pendingStart={w.pendingStart} delayMs={wireDelay}/>}
             {/* Free endpoint handles — light up with their wire like a pin
                 does, junction or not; only the idle color differs (white
                 here vs. bg for a waypoint) since that was already each
-                handle's own resting color before signals entered into it. */}
+                handle's own resting color before signals entered into it.
+                `from` sits at distance 0 (where the signal originates, so
+                it flips to the new value almost the instant a transition
+                starts) and `to` at the full wireLen (so it only flips
+                once the signal has actually arrived there) — same
+                isWireHighAt every other per-point light-up below uses. */}
             {!w.from.compId&&<circle cx={a.x} cy={a.y} r="6"
-                      fill={high?'var(--high)':'white'}
+                      fill={isWireHighAt(progress,0)?'var(--high)':'white'}
                       stroke="var(--border-md)" strokeWidth="1.5"
                       style={{cursor:'move', transition:'fill 100ms ease'}}
                       onMouseDown={e=>onWireEndpointMouseDown(e,w,'from',a)}/>}
             {!w.to.compId&&<circle cx={b.x} cy={b.y} r="6"
-                      fill={high?'var(--high)':'white'}
+                      fill={isWireHighAt(progress,progress.wireLen)?'var(--high)':'white'}
                       stroke="var(--border-md)" strokeWidth="1.5"
                       style={{cursor:'move', transition:'fill 100ms ease'}}
                       onMouseDown={e=>onWireEndpointMouseDown(e,w,'to',b)}/>}
@@ -1618,8 +1693,15 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
           // away from — see draggedBranchAnchor above.
           if (draggedBranchAnchor && w.id===draggedBranchAnchor.parentWireId &&
               Math.abs(pt.x-draggedBranchAnchor.x)<1e-6 && Math.abs(pt.y-draggedBranchAnchor.y)<1e-6) return null;
+          // Lights up the moment the signal actually reaches THIS corner
+          // — pt is wire.points[idx], which sits at distances[idx+1] in
+          // wireProgress (knot 0 is `from`) — rather than waiting for the
+          // whole wire to finish settling, same as the free endpoints
+          // above and the wire's own path (splitWirePathAtSegment).
+          const progress = wireProgress.get(w.id);
+          const pointHigh = isWireHighAt(progress, progress.distances[idx+1]);
           return <circle key={w.id+'_wp'+idx} cx={pt.x} cy={pt.y} r="5"
-                  fill={w.value>0?'var(--high)':'var(--bg)'}
+                  fill={pointHigh?'var(--high)':'var(--bg)'}
                   stroke="var(--border-md)" strokeWidth="1.5"
                   style={{cursor:'move', transition:'fill 100ms ease'}}
                   onMouseDown={e=>onWaypointMouseDown(e,w,idx,pt)}
@@ -1705,12 +1787,22 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
   </>;
 }
 
-function ParticleStream({a,b,pts=[]}) {
+// `range` (default [0,1]) confines the particles to whichever fraction of
+// the wire is CURRENTLY actually high — the whole thing when it's simply
+// settled high, but only part of it mid-transition (see the render site):
+// the already-reached prefix while arriving at high, or the not-yet-
+// reached suffix while leaving it, matching the same segment-by-segment
+// split the wire's own color already follows. `tt` (each particle's own
+// 0-1 cycle position) gets remapped into that sub-range rather than
+// sampled directly, so particles never wander onto a stretch that's
+// already visually turned off.
+function ParticleStream({a,b,pts=[],range}) {
   const [t,setT]=useState(0);
   useEffect(()=>{let r,l=performance.now();const fn=(now)=>{setT(p=>(p+(now-l)*.0006)%1);l=now;r=requestAnimationFrame(fn);};r=requestAnimationFrame(fn);return()=>cancelAnimationFrame(r);},[]);
   const N=state.widgetState.particleDensity??4; if(N===0)return null;
+  const [t0,t1]=range||[0,1];
   return <g pointerEvents="none">{Array.from({length:N},(_,i)=>{
-    const tt=(t+i/N)%1,[x,y]=sampleWire(a.x,a.y,b.x,b.y,pts,tt);
+    const tt=(t+i/N)%1,[x,y]=sampleWire(a.x,a.y,b.x,b.y,pts,t0+tt*(t1-t0));
     return <circle key={i} cx={x} cy={y} r="2.4" fill="var(--high)" opacity=".8"/>;
   })}</g>;
 }
