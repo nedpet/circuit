@@ -1284,6 +1284,35 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
   const wires=[...circuit.wires.values()];
   const tx=view.x*view.zoom, ty=view.y*view.zoom;
 
+  // While a segment drag is moving a branch's own anchor — its end reads
+  // from a DIFFERENT wire's junction, see clampSegmentMoveDelta /
+  // attachBranchToJunction — that junction doesn't actually move until
+  // drop; only this branch's own line does, live, every frame. Nothing
+  // here changes circuit.junctions or the parent's own `.points`; this
+  // just tells the waypoint pass below to skip drawing the one dot that's
+  // still sitting at the anchor's pre-drag position on the PARENT wire,
+  // purely so it doesn't look like a stray leftover while the branch's
+  // line has already visibly pulled away from it.
+  const draggedBranchAnchor = (() => {
+    const d = segDragRef.current;
+    if (!d) return null;
+    const {snapshot} = d;
+    const n = snapshot.knots.length;
+    const ends = [
+      {pos: snapshot.knots[snapshot.segIndex],   pinned: snapshot.startPinned, side: snapshot.segIndex===0     ? 'from' : null},
+      {pos: snapshot.knots[snapshot.segIndex+1], pinned: snapshot.endPinned,   side: snapshot.segIndex+1===n-1 ? 'to'   : null},
+    ];
+    for (const end of ends) {
+      if (end.pinned || !end.side) continue;
+      for (const j of circuit.junctions) {
+        if (j.sourceWireId!==snapshot.wireId && Math.abs(j.x-end.pos.x)<1e-6 && Math.abs(j.y-end.pos.y)<1e-6) {
+          return {x: end.pos.x, y: end.pos.y, parentWireId: j.sourceWireId};
+        }
+      }
+    }
+    return null;
+  })();
+
   // Clock overlay
   const selComp = selectedId ? circuit.components.get(selectedId) : null;
   const clockPanel = selComp?.kind==='CLOCK' ? (()=>{
@@ -1584,14 +1613,18 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
             plain corner alike; neither dragging nor right-clicking a
             corner distinguishes the two anymore either — see
             onWaypointMouseDown/onWaypointContext. */}
-        {wires.map(w=>(w.points||[]).map((pt,idx)=>(
-          <circle key={w.id+'_wp'+idx} cx={pt.x} cy={pt.y} r="5"
+        {wires.map(w=>(w.points||[]).map((pt,idx)=>{
+          // Skip the one dot a branch drag has already visually pulled
+          // away from — see draggedBranchAnchor above.
+          if (draggedBranchAnchor && w.id===draggedBranchAnchor.parentWireId &&
+              Math.abs(pt.x-draggedBranchAnchor.x)<1e-6 && Math.abs(pt.y-draggedBranchAnchor.y)<1e-6) return null;
+          return <circle key={w.id+'_wp'+idx} cx={pt.x} cy={pt.y} r="5"
                   fill={w.value>0?'var(--high)':'var(--bg)'}
                   stroke="var(--border-md)" strokeWidth="1.5"
                   style={{cursor:'move', transition:'fill 100ms ease'}}
                   onMouseDown={e=>onWaypointMouseDown(e,w,idx,pt)}
-                  onContextMenu={e=>onWaypointContext(e,w,idx)}/>
-        )))}
+                  onContextMenu={e=>onWaypointContext(e,w,idx)}/>;
+        }))}
 
         {/* Components */}
         {components.map(comp=>{
