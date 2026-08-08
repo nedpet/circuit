@@ -539,17 +539,34 @@ defineModule('engine', ['state'], (state) => {
   // the wire's overall from/to — as unable to move with the drag at all.
   // Two different things can pin a knot this way: it's one of the pin
   // ends above, or the wire is itself the SOURCE of a junction sitting
-  // exactly there (another wire branches off it at this point). Moving a
-  // branchpoint would drag that other wire along with it exactly the way
-  // dragging a component would tear its wire loose — a junction splits
-  // what looks like one wire into two conceptually separate segments
-  // meeting there, same as a component does, so it gets the same
-  // treatment: the knot stays put and computeSegmentMove grows a stub out
-  // to it instead of moving it. A branch's own free end sitting on
-  // ANOTHER wire's junction is a different kind of anchoring — not owned
-  // by this wire, so it doesn't pin anything here — and is handled
-  // separately, by dragging the junction along within its parent's own
-  // extent instead (see clampSegmentMoveDelta / finalizeSegmentMove).
+  // exactly there that some OTHER wire still actually reads from. Moving
+  // a live branchpoint would drag that other wire along with it exactly
+  // the way dragging a component would tear its wire loose — a junction
+  // splits what looks like one wire into two conceptually separate
+  // segments meeting there, same as a component does, so it gets the
+  // same treatment: the knot stays put and computeSegmentMove grows a
+  // stub out to it instead of moving it.
+  //
+  // "Still actually reads from it" is the key qualifier — a junction
+  // registration can outlive every branch that ever justified it (its
+  // last branch retracted, or was deleted, without that specific corner
+  // happening to be collinear at the time — see pruneDeadJunctions for
+  // when it does and doesn't clean these up automatically), leaving a
+  // plain-looking corner secretly still flagged as a junction with
+  // nothing actually anchored to it. Pinning a knot for a branch that no
+  // longer exists doesn't protect anything — it just froze an ordinary
+  // corner in place and left a phantom stub behind on every drag, which
+  // is indistinguishable from a genuine leftover waypoint bug to anyone
+  // looking at the result. So this checks for an actual, live branch at
+  // that position, not just a registry entry — same "hasBranch" test
+  // pruneDeadJunctions itself uses to decide whether a junction still
+  // matters.
+  //
+  // A branch's own free end sitting on ANOTHER wire's junction is a
+  // different kind of anchoring — not owned by this wire, so it doesn't
+  // pin anything here — and is handled separately, by dragging the
+  // junction along within its parent's own extent instead (see
+  // clampSegmentMoveDelta / finalizeSegmentMove).
   function segmentMoveSnapshot(wire, segIndex, circuit) {
     const from = terminalCoords(wire.from, circuit), to = terminalCoords(wire.to, circuit);
     const knots = wireKnots(from.x, from.y, to.x, to.y, wire.points || []);
@@ -558,13 +575,17 @@ defineModule('engine', ['state'], (state) => {
     const axis = Math.abs(knots[segIndex].y-knots[segIndex+1].y) < 1e-6 ? 'h' : 'v';
     const fromPinned = isWireTerminal(wire.from), toPinned = isWireTerminal(wire.to);
     const EPS = 1e-6;
-    const ownsJunctionAt = p => {
+    const same = (a,b) => Math.abs(a.x-b.x)<EPS && Math.abs(a.y-b.y)<EPS;
+    const hasLiveBranchAt = p => [...circuit.wires.values()].some(w => w.id!==wire.id &&
+      ((!isWireTerminal(w.from) && same(terminalCoords(w.from,circuit), p)) ||
+       (!isWireTerminal(w.to)   && same(terminalCoords(w.to,circuit),   p))));
+    const ownsLiveJunctionAt = p => {
       for (const j of circuit.junctions) {
-        if (j.sourceWireId===wire.id && Math.abs(j.x-p.x)<EPS && Math.abs(j.y-p.y)<EPS) return true;
+        if (j.sourceWireId===wire.id && same(j, p)) return hasLiveBranchAt(p);
       }
       return false;
     };
-    const pinnedAt = k => (k===0 && fromPinned) || (k===n-1 && toPinned) || ownsJunctionAt(knots[k]);
+    const pinnedAt = k => (k===0 && fromPinned) || (k===n-1 && toPinned) || ownsLiveJunctionAt(knots[k]);
     return {
       wireId: wire.id, segIndex, axis, knots,
       fromPinned, toPinned,
@@ -874,7 +895,22 @@ defineModule('engine', ['state'], (state) => {
       {pos: d.knots[d.segIndex],   pinned: d.startPinned, side: d.segIndex===0     ? 'from' : null},
       {pos: d.knots[d.segIndex+1], pinned: d.endPinned,   side: d.segIndex+1===n-1 ? 'to'   : null},
     ];
+    const moved = dx!==0 || dy!==0;
     for (const end of ends) {
+      // A knot that moved away from a junction this wire owns leaves that
+      // junction's registration behind at the old, now off-geometry
+      // position — orphaned rather than cleaned up, since
+      // pruneDeadJunctions only ever sweeps a junction still sitting
+      // somewhere on its source wire's own path. It could only have moved
+      // here because segmentMoveSnapshot already confirmed no branch
+      // reads from it (a live one would have pinned it — see there), so
+      // there's nothing left this registration is doing; drop it now
+      // rather than leaving a phantom entry for some later drag to trip
+      // over again.
+      if (!end.pinned && moved) {
+        const ownJ = [...circuit.junctions].find(j=>j.sourceWireId===wire.id && same(j, end.pos));
+        if (ownJ) circuit.junctions.delete(ownJ);
+      }
       if (end.pinned) continue;
       if (!end.side) continue; // an interior point — can't be a branch's own anchor
       const newPos = {x:end.pos.x+dx, y:end.pos.y+dy};

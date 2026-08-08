@@ -1180,8 +1180,6 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
     if (e.button!==0) return;
     e.stopPropagation();
     const w=screenToWorld(e.clientX,e.clientY);
-    const nearest=findNearestWirePoint(wire,w.x,w.y,circuit);
-    const segIndex=nearest.index;
     // Unlike a component (which selects immediately on mousedown, drag or
     // not), a segment only selects once the press goes back up as a plain
     // click — see the wf.type==='branch' (no dist>6) case in onUp below —
@@ -1189,12 +1187,37 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
     // it came from. The one exception is a SECOND press on an ALREADY
     // selected segment: that starts a move immediately (constrained to
     // its own perpendicular axis), same as before.
-    const wasSelected = selectedId===segSelId(wire.id,segIndex);
-    if (wasSelected) {
-      const snapshot = segmentMoveSnapshot(wire, segIndex, circuit);
-      if (snapshot) segDragRef.current={snapshot, startWX:w.x, startWY:w.y};
-      return;
+    //
+    // "Already selected" is checked against the SELECTED segment's own
+    // line (within the same ~8px margin its fat hit-target already
+    // affords everywhere else on the wire), not by re-deriving "the
+    // nearest segment to THIS click" from scratch and requiring it to
+    // come back equal. A second press essentially never lands on the
+    // exact same pixel as the first, and right near the corner where two
+    // segments meet, that fresh "nearest" answer can flip to the
+    // NEIGHBORING segment from a difference of one or two pixels — so
+    // requiring an exact match there meant a second click aimed at
+    // continuing to grab the segment you'd just selected would, at the
+    // slightest drift, silently fall through to branch-creation instead:
+    // if that drag then exceeded the 6px threshold, it left a real stray
+    // waypoint (a junction where the accidental branch meets the wire)
+    // sitting right at that corner — exactly where the segment being
+    // moved touches its neighbor.
+    const selPrefix = wire.id+'#seg';
+    const selectedSegIndex = selectedId && selectedId.startsWith(selPrefix)
+      ? Number(selectedId.slice(selPrefix.length)) : null;
+    if (selectedSegIndex!=null) {
+      const snapshot = segmentMoveSnapshot(wire, selectedSegIndex, circuit);
+      if (snapshot) {
+        const a=snapshot.knots[snapshot.segIndex], b=snapshot.knots[snapshot.segIndex+1];
+        if (distToSeg(w.x,w.y,a.x,a.y,b.x,b.y) <= 8) {
+          segDragRef.current={snapshot, startWX:w.x, startWY:w.y};
+          return;
+        }
+      }
     }
+    const nearest=findNearestWirePoint(wire,w.x,w.y,circuit);
+    const segIndex=nearest.index;
     const wf={type:'branch',wireId:wire.id,segIndex,x:nearest.point.x,y:nearest.point.y,startX:w.x,startY:w.y,startSX:e.clientX,startSY:e.clientY};
     wiringFromRef.current=wf;
     setWiringFrom(wf);
