@@ -33,10 +33,7 @@ defineModule('engine-core', [], () => {
     return Math.max(1, Math.ceil(Math.log2(Math.max(1,bitWidth||1))));
   }
 
-  // Sign-extends (or truncates) v — read as a two's-complement number in
-  // fromWidth bits — into a toWidth-bit two's-complement reading. Going
-  // through a signed intermediate (instead of just re-masking) is what makes
-  // the top bits repeat the sign rather than zero-fill.
+  // Sign-extends (or truncates) v from fromWidth bits to toWidth bits, v being read as a 2's complement number
   function signExtend(v, fromWidth, toWidth) {
     const masked = maskVal(v, fromWidth);
     const half = Math.pow(2, fromWidth-1);

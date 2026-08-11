@@ -10,76 +10,38 @@ defineModule('engine-geometry', ['state'], (state) => {
 
   // ── Parametric component shape geometry ─────────────────────────────────
   // Pin layout and footprint for the components whose size varies per
-  // instance (MUX, SPLIT, and multi-bit INPUT/OUTPUT/CONST) — everything a
-  // consumer needs for wiring/hit-testing/pinAbs, without the JSX that
-  // actually draws each shape. Lives here (not in the GATES module) for the
-  // same reason the wire geometry section below does: pinAbs/terminalCoords
-  // need real pin positions to route wires and compute delay, and that has
-  // to work whether or not GATES' own rendering is even the thing asking.
-  // GATES' own buildXVis functions call these and just add a `body`.
-  //
-  // bounded (n|0||fallback, clamped min/max) the same way each corresponding
-  // gates.jsx cache-key function already did, so a caller can pass a raw,
-  // not-yet-validated instance field (comp.muxInputs, comp.bits, ...)
-  // straight through and get the same clamped result gates.jsx would have.
+  // instance (MUX, SPLIT, and multi-bit INPUT/OUTPUT/CONST)
 
-  // MUX's data-input count (2-4) is per-instance, unlike every other gate's
-  // fixed arity — the select pin always sits one slot past the last data
-  // pin, so it moves down as inputs are added. Vertical pin spacing (40px,
-  // matching a fixed 2-input layout) and the 20px top/bottom margin stay
-  // constant; only the body height grows to fit, with the output
-  // re-centered.
+  // Returns the width, height, input/output coords, and y-coord of the middle of the top/bottom edges 
+  // for a mux with n inputs and select pin location (top or bottom)
   function muxGeometry(n, selectLocation) {
-    const count = Math.max(2, Math.min(4, n|0||2));
+    const count = Math.max(2, Math.min(4, n|0||2)); // number of bits (2-4)
     const bottom = selectLocation==='bottom';
     const W=80, MUX_PIN_GAP=40, MUX_TOP_MARGIN=20;
-    const h = count*MUX_PIN_GAP; // 80 for count=2, matching the original fixed size
+    const h = count*MUX_PIN_GAP; // 80 for count=2 
     const inputs = Array.from({length:count},(_,i)=>({x:0,y:MUX_TOP_MARGIN+i*MUX_PIN_GAP}));
-    const outY = h/2, bt=6, bb=h-6;
-    // The body's top edge (drawn by gates.jsx) is the diagonal from
-    // (BX,bt) to (W-BX,bt+bb*.25); at x=W*0.5 (the select pin's x) that
-    // line sits at bt+bb/8. Placing the pin 12px above that (the same
-    // fixed stub length every other pin gets) makes its stub land exactly
-    // on the edge instead of a fixed offset that only happened to line up
-    // for the original 2-input size — without this, taller bodies (3-4
-    // inputs) pull the edge down but the stub stays put, opening a
-    // visible gap above the select pin. The bottom edge is the
-    // mirror-image diagonal, so by the same symmetry it sits at bb*7/8
-    // under the select pin's x, and since the pin now points 'down'
-    // (away from the body) the 12px stub sits *below* that edge instead
-    // of above.
+    const outY = h/2, bt=6, bb=h-6; 
     const selectY = bottom ? (bb*.75 + bb/8) + 12 : (bt + bb/8) - 12;
     inputs.push({x:W*0.5,y:selectY,dir: bottom ? 'down' : 'up'});
     return { w:W, h, inputs, outputs:[{x:W,y:outY}], bt, bb };
   }
 
-  // SPLIT fans a single multi-bit bus out into `bits` (2-8) individual
-  // 1-bit taps (or, merged, the reverse) — drawn as bare wire (a vertical
-  // "trunk" with each tap every `space` grid cells), not a gate body.
-  // 'merge' is the exact horizontal mirror of 'split': taps move to the
-  // opposite side, and the single wide pin (the "diagonal") swaps ends.
-  // Tap i reads/writes bit i (0 = nearest the diagonal = LSB) — arbitrary
-  // but fixed, so wiring is predictable; GATE_DEFS.SPLIT.compute matches
-  // this order.
-  const SPLIT_UNIT = 20; // matches the widget's own 20px grid snap, so the diagonal lands on a clean cell and taps line up with the grid
+  // Returns the width, height, input/output locations, 
+  // x-coords of the vertical trunk, 1-bit pins, and n-bit pin,
+  // coords of the 1-bit pins, and y-coords of the top and bottom 1-bit pins
+  // for a splitter of n bits, space units between the 1-bit pins, and type (merge or split)
+  const SPLIT_UNIT = 20; // matches the widget's own 20px grid snap
   function splitGeometry(n, space, type) {
     const bits = Math.max(2, Math.min(8, n|0||2));
     const sp = Math.max(1, Math.min(8, space|0||1));
     const merge = type==='merge';
     const gap = sp*SPLIT_UNIT, topY = SPLIT_UNIT;
-    const w = SPLIT_UNIT + 12; // total width is the same either way — just mirrored
-    // 'split': diagonal at (0,0), trunk at x=20, taps at x=32 (right).
-    // 'merge': the horizontal mirror of that (x -> w-x): diagonal at
-    // (32,0), trunk at x=12, taps at x=0 (left).
+    const w = SPLIT_UNIT + 12; 
     const trunkX = merge ? w-SPLIT_UNIT : SPLIT_UNIT;
     const tapX   = merge ? 0 : w;
     const diagX  = merge ? w : 0;
     const taps = Array.from({length:bits}, (_,i)=>({x:tapX, y:topY+i*gap}));
-    // The diagonal's far end is this pin's whole connector, drawn in full
-    // by gates.jsx's body() — GateBody's generic (cardinal-only) stub
-    // renderer is skipped for it (noStub) instead of adding a second,
-    // wrongly-angled leg.
-    const diagPin = {x:diagX, y:0, dir:'up', noStub:true};
+    const diagPin = {x:diagX, y:0, dir:'up', noStub:true};     // skips GateBody's generic (cardinal-only) stub renderer in favour of a diagonal pin
     const lastY = topY + (bits-1)*gap;
     return {
       w, h: lastY,
@@ -89,20 +51,13 @@ defineModule('engine-geometry', ['state'], (state) => {
     };
   }
 
-  // Shared by INPUT/OUTPUT's per-bit cell grid — both the box width below
-  // and, in gates.jsx, each individual cell's own position, so the two
-  // always agree.
+  // Returns the width of an input/output component with n cells
   const BIT_CELL_W=18, BIT_GAP=3, BIT_PAD=8;
   function bitsRowWidth(n) { return BIT_PAD*2 + n*BIT_CELL_W + Math.max(0,n-1)*BIT_GAP; }
 
-  // Multi-bit INPUT/OUTPUT: one cell per bit (or, in hex mode, one per
-  // nibble — hence cellCount, not n, feeding bitsRowWidth). Pin count never
-  // changes (still exactly one bus-wide pin) — only the box drawn around
-  // it grows to fit however many cells that takes. The 1-bit case uses a
-  // completely different fixed shape (VIS.INPUT/OUTPUT's rounded rect with
-  // a toggle circle, not a cell grid at all), so it's not handled here —
-  // gates.jsx's inputVis/outputVis fall back to that shape directly
-  // instead of calling this with n=1.
+  // Returns the width, height, and input/output locations
+  // for a multi-bit input/output component with n bits and mode (bin or hex)
+  // Doesn't handle the 1-bit case
   function inputOutputGeometry(n, mode, isOutput) {
     const cellCount = mode==='hex' ? Math.ceil(n/4) : n;
     const w = bitsRowWidth(cellCount), h = 40;
@@ -110,10 +65,8 @@ defineModule('engine-geometry', ['state'], (state) => {
                      : { w, h, inputs:[], outputs:[{x:w,y:20}] };
   }
 
-  // CONST's multi-bit box is sized off its digit count alone (regValueText
-  // zero-pads to a fixed length, so width never depends on the actual
-  // value) — same reasoning as bitsRowWidth, just with the CONST digit
-  // readout's own character width instead of a bit-cell's.
+  // Returns the width, height, and input/output locations
+  // for a multi-bit constant component with n bits and mode (bin or hex)
   const CONST_CHAR_W=9, CONST_PAD=12;
   function constGeometry(n, mode) {
     const digits = mode==='hex' ? Math.ceil(n/4) : n;
@@ -122,16 +75,9 @@ defineModule('engine-geometry', ['state'], (state) => {
   }
 
   // ── Pure wire geometry helpers ──────────────────────────────────────────
-  // Lives here (not in the CANVAS module) because ENGINE's step()/
-  // wireSourceValue() needs these for delay propagation, and CANVAS also
-  // needs them for rendering. CANVAS declares 'engine' as a dependency and
-  // gets these back through its factory argument.
 
-  // Projects (x,y) onto the axis-aligned segment a-b, clamped to the
-  // segment's extent — used to find the closest point on a wire for
-  // hit-testing and branch-point insertion. Wires are always Manhattan
-  // (axis-aligned) routed, so the "neither aligned" case just falls back to
-  // a's own point rather than needing a general point-to-line projection.
+  // Projects (x,y) onto the axis-aligned segment a-b, clamped to the segment's extent 
+  // Used to find the closest point on a wire for hit-testing and branch-point insertion
   function projectOrthogonalPoint(a,b,x,y) {
     if (a.x===b.x) return {x:a.x,y:Math.max(Math.min(y,Math.max(a.y,b.y)),Math.min(a.y,b.y))};
     if (a.y===b.y) return {x:Math.max(Math.min(x,Math.max(a.x,b.x)),Math.min(a.x,b.x)),y:a.y};
@@ -139,11 +85,7 @@ defineModule('engine-geometry', ['state'], (state) => {
   }
 
   // Returns true if `target` is a real component-pin reference, as opposed to a
-  // free-floating {x,y} endpoint (a dangling wire end, or a branch point).
-  // Module-level (rather than nested in createCircuit, where it originally
-  // lived) so the segment-move helpers in engine-routing.js — pure geometry,
-  // same as everything else in this section — can use it (imported from
-  // here) without needing a live circuit instance.
+  // free-floating {x,y} endpoint (a dangling wire end or a branch point)
   function isWireTerminal(target) {
     return target && typeof target.compId==='string' && typeof target.pin==='number';
   }
@@ -288,27 +230,14 @@ defineModule('engine-geometry', ['state'], (state) => {
     return [p[p.length-1].x,p[p.length-1].y];
   }
 
-  // Splits a wire's resolved path into two SVG path `d` strings — the
-  // "before" part already reached by fraction `t` (0-1) of its length, and
-  // the "after" part not yet reached. Two ways to do that cut, one
-  // function each, picked at the call site by the propagationStyle
-  // setting:
-  //  - splitWirePathAtSegment ("discrete"): cut at whichever of the wire's
-  //    OWN corners is the furthest one *entirely* covered, never partway
-  //    through a straight segment — a segment only ever shows as fully in
-  //    its new color once the signal has crossed the whole way to its far
-  //    end, not a partial fill sweeping through it, which would suggest a
-  //    segment can be "half powered."
+  // Splits a wire's resolved path into two SVG path `d` strings:
+  // "before" already reached by fraction t (0-1) of its length, and "after" part not yet reached
+  // Two ways to do that cut, by the propagationStyle setting:
+  //  - splitWirePathAtSegment ("discrete"): cut at the last corner the signal has reached
+  //    i.e., only turn on a segment once the signal has crossed it entirely
   //  - splitWirePath ("continuous"): cut at the exact fraction `t`,
-  //    interpolating within whichever segment it falls in, the same way
-  //    sampleWire places a single point there — so a wire's own lit
-  //    boundary always sits precisely where the in-flight pulse (see
-  //    InflightPulse) currently is, rather than lagging behind it to the
-  //    last corner crossed.
-  //
-  // Both return `{before, after}` sharing their cut point exactly, so
-  // drawing both back to back (as two differently-colored <path> strokes)
-  // reads as one continuous line with no gap or overlap.
+  //    interpolating within whichever segment it falls in
+  // Both return `{before, after}` sharing their cut point exactly
   function splitWirePathAtSegment(x1,y1,x2,y2,pts=[],t) {
     const EPS = 1e-6;
     const p=resolveWire(x1,y1,x2,y2,pts);
@@ -344,16 +273,8 @@ defineModule('engine-geometry', ['state'], (state) => {
     return { before: toD(p), after: toD([p[p.length-1]]) };
   }
 
-  // Cumulative distance from `a` to each of a wire's own RAW knots — from,
-  // then every waypoint in order, then to — one entry per wireKnots()
-  // entry, at the same index. Used to tell whether a specific waypoint or
-  // endpoint has already been reached by an in-flight signal, the same
-  // way splitWirePathAtSegment/splitWirePath tell it for the path itself,
-  // without needing resolveWire's implicit-corner insertion: every
-  // consecutive pair of a wire's own knots is already axis-aligned by
-  // construction (that's what makes it a valid Manhattan wire), so raw and
-  // resolved distances agree — resolveWire only ever matters as a safety
-  // net for a wire mid-reconciliation, not for one actually being drawn.
+  // Returns a list of the cumulative distances from the origin of a wire to each of its knots
+  // Used to tell if a specific waypoint has been reached by a propagating signal
   function wireKnotDistances(x1,y1,x2,y2,pts=[]) {
     const knots = wireKnots(x1,y1,x2,y2,pts);
     const dists = [0];
@@ -363,9 +284,8 @@ defineModule('engine-geometry', ['state'], (state) => {
     return dists;
   }
 
-  // Shortest distance from point (px,py) to the segment (ax,ay)-(bx,by) —
-  // a general (not axis-restricted) point-to-segment distance, used for
-  // wire-hover/click hit-testing.
+  // Shortest (non axis-restricted) distance from point (px,py) to the segment (ax,ay)-(bx,by)
+  // Used for wire-hover/click hit-testing
   function distToSeg(px,py,ax,ay,bx,by){
     const dx=bx-ax,dy=by-ay,l2=dx*dx+dy*dy;
     if(l2===0) return Math.hypot(px-ax,py-ay);
@@ -373,9 +293,8 @@ defineModule('engine-geometry', ['state'], (state) => {
     return Math.hypot(px-(ax+t*dx),py-(ay+t*dy));
   }
 
-  // A wire's full knot list in absolute canvas coordinates — its resolved
-  // pin endpoints plus any waypoints, unrouted (i.e. before resolveWire's
-  // elbow-insertion).
+  // Returns a wire's full list of endpoints+waypoints in absolute canvas coordinates
+  // Unrouted (i.e. before resolveWire's elbow-insertion)
   function wireSegmentPoints(wire, circuit) {
     const from = terminalCoords(wire.from, circuit);
     const to = terminalCoords(wire.to, circuit);
@@ -384,21 +303,16 @@ defineModule('engine-geometry', ['state'], (state) => {
 
   const WIRE_REF_LEN = 80; // roughly one gate width — reference length for length-based speed
 
-  // How long (ms) a wire of length `wireLen` takes to propagate a change,
-  // per the current propagation mode.
+  // How long (ms) a wire of length `wireLen` takes to propagate a change per the current propagation mode
+  // "component" mode: every wire takes exactly `delayMs` to propagate
+  // "length" mode (default): delay scales with wire length, at delayMs per WIRE_REF_LEN pixels
   function wireDelayForLength(wireLen, delayMs) {
-    // "component" mode: every wire takes exactly `delayMs` to propagate, so
-    // two wires of different lengths off the same output still arrive
-    // together. "length" mode (default): delay scales with wire length, at
-    // delayMs per WIRE_REF_LEN pixels.
     if (state.widgetState.propagationMode === 'component') return delayMs;
     return (wireLen / WIRE_REF_LEN) * delayMs;
   }
 
-  // Absolute canvas position of one pin (input or output, by index) of a
-  // component, accounting for its facing — rotated about its own center for
-  // up/down, or mirrored horizontally for left (matching how GateBody
-  // draws the component itself).
+  // Absolute canvas position of one pin (input or output, by index) of a component
+  // Accounts for its facing: rotated about its own center for up/down, mirrored horizontally for left 
   function pinAbs(comp,kind,idx){
     const vis=window.Modules.gates.visForComp(comp),p=kind==='in'?vis.inputs[idx]:vis.outputs[idx];
     const cx=vis.w/2, cy=vis.h/2;
