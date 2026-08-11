@@ -152,6 +152,119 @@ defineModule('engine', ['state'], (state) => {
               } } ,
   };
 
+  // ── Parametric component shape geometry ─────────────────────────────────
+  // Pin layout and footprint for the components whose size varies per
+  // instance (MUX, SPLIT, and multi-bit INPUT/OUTPUT/CONST) — everything a
+  // consumer needs for wiring/hit-testing/pinAbs, without the JSX that
+  // actually draws each shape. Lives here (not in the GATES module) for the
+  // same reason the wire geometry section below does: pinAbs/terminalCoords
+  // need real pin positions to route wires and compute delay, and that has
+  // to work whether or not GATES' own rendering is even the thing asking.
+  // GATES' own buildXVis functions call these and just add a `body`.
+  //
+  // bounded (n|0||fallback, clamped min/max) the same way each corresponding
+  // gates.jsx cache-key function already did, so a caller can pass a raw,
+  // not-yet-validated instance field (comp.muxInputs, comp.bits, ...)
+  // straight through and get the same clamped result gates.jsx would have.
+
+  // MUX's data-input count (2-4) is per-instance, unlike every other gate's
+  // fixed arity — the select pin always sits one slot past the last data
+  // pin, so it moves down as inputs are added. Vertical pin spacing (40px,
+  // matching a fixed 2-input layout) and the 20px top/bottom margin stay
+  // constant; only the body height grows to fit, with the output
+  // re-centered.
+  function muxGeometry(n, selectLocation) {
+    const count = Math.max(2, Math.min(4, n|0||2));
+    const bottom = selectLocation==='bottom';
+    const W=80, MUX_PIN_GAP=40, MUX_TOP_MARGIN=20;
+    const h = count*MUX_PIN_GAP; // 80 for count=2, matching the original fixed size
+    const inputs = Array.from({length:count},(_,i)=>({x:0,y:MUX_TOP_MARGIN+i*MUX_PIN_GAP}));
+    const outY = h/2, bt=6, bb=h-6;
+    // The body's top edge (drawn by gates.jsx) is the diagonal from
+    // (BX,bt) to (W-BX,bt+bb*.25); at x=W*0.5 (the select pin's x) that
+    // line sits at bt+bb/8. Placing the pin 12px above that (the same
+    // fixed stub length every other pin gets) makes its stub land exactly
+    // on the edge instead of a fixed offset that only happened to line up
+    // for the original 2-input size — without this, taller bodies (3-4
+    // inputs) pull the edge down but the stub stays put, opening a
+    // visible gap above the select pin. The bottom edge is the
+    // mirror-image diagonal, so by the same symmetry it sits at bb*7/8
+    // under the select pin's x, and since the pin now points 'down'
+    // (away from the body) the 12px stub sits *below* that edge instead
+    // of above.
+    const selectY = bottom ? (bb*.75 + bb/8) + 12 : (bt + bb/8) - 12;
+    inputs.push({x:W*0.5,y:selectY,dir: bottom ? 'down' : 'up'});
+    return { w:W, h, inputs, outputs:[{x:W,y:outY}], bt, bb };
+  }
+
+  // SPLIT fans a single multi-bit bus out into `bits` (2-8) individual
+  // 1-bit taps (or, merged, the reverse) — drawn as bare wire (a vertical
+  // "trunk" with each tap every `space` grid cells), not a gate body.
+  // 'merge' is the exact horizontal mirror of 'split': taps move to the
+  // opposite side, and the single wide pin (the "diagonal") swaps ends.
+  // Tap i reads/writes bit i (0 = nearest the diagonal = LSB) — arbitrary
+  // but fixed, so wiring is predictable; GATE_DEFS.SPLIT.compute matches
+  // this order.
+  const SPLIT_UNIT = 20; // matches the widget's own 20px grid snap, so the diagonal lands on a clean cell and taps line up with the grid
+  function splitGeometry(n, space, type) {
+    const bits = Math.max(2, Math.min(8, n|0||2));
+    const sp = Math.max(1, Math.min(8, space|0||1));
+    const merge = type==='merge';
+    const gap = sp*SPLIT_UNIT, topY = SPLIT_UNIT;
+    const w = SPLIT_UNIT + 12; // total width is the same either way — just mirrored
+    // 'split': diagonal at (0,0), trunk at x=20, taps at x=32 (right).
+    // 'merge': the horizontal mirror of that (x -> w-x): diagonal at
+    // (32,0), trunk at x=12, taps at x=0 (left).
+    const trunkX = merge ? w-SPLIT_UNIT : SPLIT_UNIT;
+    const tapX   = merge ? 0 : w;
+    const diagX  = merge ? w : 0;
+    const taps = Array.from({length:bits}, (_,i)=>({x:tapX, y:topY+i*gap}));
+    // The diagonal's far end is this pin's whole connector, drawn in full
+    // by gates.jsx's body() — GateBody's generic (cardinal-only) stub
+    // renderer is skipped for it (noStub) instead of adding a second,
+    // wrongly-angled leg.
+    const diagPin = {x:diagX, y:0, dir:'up', noStub:true};
+    const lastY = topY + (bits-1)*gap;
+    return {
+      w, h: lastY,
+      inputs:  merge ? taps : [diagPin],
+      outputs: merge ? [diagPin] : taps,
+      trunkX, tapX, diagX, taps, topY, lastY,
+    };
+  }
+
+  // Shared by INPUT/OUTPUT's per-bit cell grid — both the box width below
+  // and, in gates.jsx, each individual cell's own position, so the two
+  // always agree.
+  const BIT_CELL_W=18, BIT_GAP=3, BIT_PAD=8;
+  function bitsRowWidth(n) { return BIT_PAD*2 + n*BIT_CELL_W + Math.max(0,n-1)*BIT_GAP; }
+
+  // Multi-bit INPUT/OUTPUT: one cell per bit (or, in hex mode, one per
+  // nibble — hence cellCount, not n, feeding bitsRowWidth). Pin count never
+  // changes (still exactly one bus-wide pin) — only the box drawn around
+  // it grows to fit however many cells that takes. The 1-bit case uses a
+  // completely different fixed shape (VIS.INPUT/OUTPUT's rounded rect with
+  // a toggle circle, not a cell grid at all), so it's not handled here —
+  // gates.jsx's inputVis/outputVis fall back to that shape directly
+  // instead of calling this with n=1.
+  function inputOutputGeometry(n, mode, isOutput) {
+    const cellCount = mode==='hex' ? Math.ceil(n/4) : n;
+    const w = bitsRowWidth(cellCount), h = 40;
+    return isOutput ? { w, h, inputs:[{x:0,y:20}], outputs:[] }
+                     : { w, h, inputs:[], outputs:[{x:w,y:20}] };
+  }
+
+  // CONST's multi-bit box is sized off its digit count alone (regValueText
+  // zero-pads to a fixed length, so width never depends on the actual
+  // value) — same reasoning as bitsRowWidth, just with the CONST digit
+  // readout's own character width instead of a bit-cell's.
+  const CONST_CHAR_W=9, CONST_PAD=12;
+  function constGeometry(n, mode) {
+    const digits = mode==='hex' ? Math.ceil(n/4) : n;
+    const w = Math.max(40, digits*CONST_CHAR_W + CONST_PAD*2), h = 40;
+    return { w, h, inputs:[], outputs:[{x:w,y:20}] };
+  }
+
   // ── Pure wire geometry helpers ──────────────────────────────────────────
   // Lives here (not in the CANVAS module) because ENGINE's step()/
   // wireSourceValue() needs these for delay propagation, and CANVAS also
@@ -642,12 +755,79 @@ defineModule('engine', ['state'], (state) => {
     return { start: Object.assign({}, start, {[alongAxis]: snapped}), points };
   }
 
+  // Dragging a wire's endpoint should never disturb the rest of the wire —
+  // only the one segment at the dragged end. `d` (built once at drag-start
+  // by the widget's onWireEndpointMouseDown, before anything is touched)
+  // captures that original shape: `neighbor` is the fixed point just
+  // before this endpoint (the nearest existing waypoint, or the wire's
+  // other end if it has none), `axis` is which way ('h'/'v') the segment
+  // leading into this endpoint already ran, and `basePoints` is every
+  // other point on the wire, left completely alone. Moving `newPos` along
+  // that same axis just slides the endpoint — extend/shorten, no new
+  // point. Moving it off that axis appends exactly one corner point
+  // beyond `neighbor` (new segment), and nothing before `neighbor` is
+  // ever touched either way.
+  function computeEndpointRoute(d, newPos) {
+    const EPS = 1e-6;
+    const aligned = d.axis==='h' ? Math.abs(newPos.y-d.neighbor.y)<EPS : Math.abs(newPos.x-d.neighbor.x)<EPS;
+    if (aligned) {
+      // Dragged all the way back onto the fixed point behind it (both
+      // coordinates, not just the on-axis one) — the final segment has
+      // shrunk to nothing. If that point was one of the wire's own
+      // waypoints, it's now a redundant duplicate of the endpoint sitting
+      // right on top of it, so it's dropped and that point becomes the
+      // endpoint outright — case (b): if it was already a junction, the
+      // junction stays put, now doubling as the endpoint. If there was no
+      // waypoint there at all — the fixed point was the wire's *other*
+      // end — the whole wire has collapsed to zero length; flagged via
+      // collapsedToZero rather than acted on here, since a live preview
+      // frame shouldn't delete anything — only finalizeEndpointRoute, at
+      // drop, does that (case (c) when the fixed point is a branch's own
+      // branchpoint junction).
+      const collapsed = Math.abs(newPos.x-d.neighbor.x)<EPS && Math.abs(newPos.y-d.neighbor.y)<EPS;
+      if (collapsed) {
+        if (d.basePoints.length===0) return { points: [], corner: null, collapsedToZero: true };
+        const points = d.side==='to' ? d.basePoints.slice(0,-1) : d.basePoints.slice(1);
+        return { points, corner: null };
+      }
+      return { points: d.basePoints, corner: null };
+    }
+    const corner = d.axis==='h' ? {x:newPos.x, y:d.neighbor.y} : {x:d.neighbor.x, y:newPos.y};
+    const points = d.side==='to' ? [...d.basePoints, corner] : [corner, ...d.basePoints];
+    return { points, corner };
+  }
+
+  // Commits computeEndpointRoute's result to `wire` and, only if it actually
+  // produced a new corner, registers a junction there (skipping if an
+  // equivalent one is already registered) so that corner is immediately
+  // branchable — same reasoning as before, just now scoped to the one new
+  // corner this drag may have added, since everything else about the wire is
+  // left alone and any junctions elsewhere on it are therefore still valid.
+  function finalizeEndpointRoute(wire, d, newPos, circuit) {
+    const {points, corner, collapsedToZero} = computeEndpointRoute(d, newPos);
+    if (collapsedToZero) {
+      // Both ends now sit on the same point — nothing left to draw. Going
+      // through circuit.removeWire (rather than just leaving an empty-points
+      // wire in place) runs its junction cleanup too, so retracting a
+      // branch back onto its own branchpoint takes that junction down with
+      // it if it was the last branch there (case (c)).
+      circuit.removeWire(wire.id);
+      return true;
+    }
+    wire.points = points;
+    if (corner) {
+      const dup = [...circuit.junctions].some(j=>j.sourceWireId===wire.id && Math.abs(j.x-corner.x)<1e-6 && Math.abs(j.y-corner.y)<1e-6);
+      if (!dup) circuit.junctions.add({x:corner.x, y:corner.y, sourceWireId:wire.id});
+    }
+    return false;
+  }
+
   // Snapshot of one wire segment's shape, captured once at drag-start so a
   // multi-frame drag can recompute the whole move fresh every frame from a
   // fixed baseline instead of compounding small changes onto whatever the
   // previous frame already wrote — same reason computeEndpointRoute's `d`
-  // (in the widget) freezes basePoints/neighbor rather than re-reading the
-  // wire live. Returns null if segIndex doesn't land on a real segment.
+  // freezes basePoints/neighbor rather than re-reading the wire live.
+  // Returns null if segIndex doesn't land on a real segment.
   //
   // fromPinned/toPinned mark wire.from/wire.to specifically as anchored to
   // a component pin — used only to decide whether computeSegmentMove is
@@ -1656,10 +1836,13 @@ defineModule('engine', ['state'], (state) => {
 
   return {
     GATE_DEFS, BIT_WIDTH_KINDS, createCircuit,
+    muxGeometry, splitGeometry, bitsRowWidth, inputOutputGeometry, constGeometry,
+    BIT_CELL_W, BIT_GAP, BIT_PAD,
     projectOrthogonalPoint, terminalCoords, wireKnots, resolveWire, wirePath,
     sampleWire, splitWirePathAtSegment, splitWirePath, wireKnotDistances, distToSeg, wireSegmentPoints, wireDelayForLength,
     findNearestWirePoint, insertBranchPoint, routeManhattanPoints, pinAbs,
     branchRouteFrom, isWireTerminal, syncEndCorner, syncWireEndCorners,
+    computeEndpointRoute, finalizeEndpointRoute,
     segmentMoveSnapshot, computeSegmentMove, clampSegmentMoveDelta, finalizeSegmentMove,
     truncateWireAtSegment, removeWireCascading,
   };

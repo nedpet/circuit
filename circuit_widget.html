@@ -40,7 +40,11 @@
 /* ═══ GATES ════════════════════════════════════════════════════════════════ */
 defineModule('gates', ['engine'], (engine) => {
   'use strict';
-  const { GATE_DEFS } = engine;
+  const {
+    GATE_DEFS,
+    muxGeometry, splitGeometry, bitsRowWidth, inputOutputGeometry, constGeometry,
+    BIT_CELL_W, BIT_GAP, BIT_PAD,
+  } = engine;
 
   const FAMILY_FILL = { and:'#fffae3', or:'#e8f5ee', not:'#ede8f7', xor:'#e4eef8', mux: '#fff1e3', seq:'#fce8ee', io:'#fefce8', misc:'#ede8f7' };
   const VIS = {};
@@ -106,35 +110,16 @@ defineModule('gates', ['engine'], (engine) => {
       <path d={`M ${BX} ${BT} Q ${BX+14} ${YO}, ${BX} ${BB} Q ${W*.45} ${BB}, ${W-12} ${YO} Q ${W*.45} ${BT}, ${BX} ${BT} Z`} fill={f} stroke="var(--ink)" strokeWidth="2" strokeLinejoin="round"/>
       <circle cx={W-7} cy={YO} r="5" fill={f} stroke="var(--ink)" strokeWidth="2"/>
     </g> };
-  // MUX's data-input count (2-4) is per-instance, unlike every other gate's
-  // fixed arity — the select pin always sits one slot past the last data
-  // pin, so it moves down as inputs are added. Vertical pin spacing (40px,
-  // matching YB-YT for the original 2-input layout) and the 20px top/bottom
-  // margin stay constant; only the body height grows to fit, with the
-  // output re-centered — never touching W, BX or the other gates' shared
-  // YT/YB/BT/BB constants.
-  const MUX_PIN_GAP=40, MUX_TOP_MARGIN=20;
+  // MUX's pin geometry (per-instance, since its data-input count is) comes
+  // from engine's muxGeometry — see there for what bt/bb (the body's own
+  // top/bottom edge y's, at the select pin's x) mean; this just adds the
+  // body that draws between them.
   function buildMuxVis(n, bottom) {
-    const h = n*MUX_PIN_GAP; // 80 for n=2, matching the original fixed H
-    const inputs = Array.from({length:n},(_,i)=>({x:0,y:MUX_TOP_MARGIN+i*MUX_PIN_GAP}));
-    const outY = h/2, bt=6, bb=h-6;
-    // The body's top edge is the diagonal from (BX,bt) to (W-BX,bt+bb*.25);
-    // at x=W*0.5 (the select pin's x) that line sits at bt+bb/8. Placing the
-    // pin 12px above that (the same fixed stub length pinStub uses for every
-    // other pin) makes its stub land exactly on the edge instead of the
-    // fixed y=5 that only happened to line up for the original 2-input size
-    // — without this, taller bodies (3-4 inputs) pull the edge down but the
-    // stub stayed put, opening a visible gap above the select pin.
-    // The bottom edge is the mirror-image diagonal, from (W-BX,bb*.75) to
-    // (BX,bb); by the same symmetry it sits at bb*7/8 under the select pin's
-    // x, and since the pin now points 'down' (away from the body, toward
-    // larger y) the 12px stub sits 12px *below* that edge instead of above.
-    const selectY = bottom ? (bb*.75 + bb/8) + 12 : (bt + bb/8) - 12;
-    inputs.push({x:W*0.5,y:selectY,dir: bottom ? 'down' : 'up'});
-    return { w:W, h, inputs, outputs:[{x:W,y:outY}],
+    const geo = muxGeometry(n, bottom ? 'bottom' : 'top');
+    return { ...geo,
       body:(f, comp)=><g>
         {pendingBar(comp)}
-        <path d={`M ${BX} ${bt} L ${W - BX} ${bt + bb*.25} V ${bb*.75} L ${BX} ${bb} Z`} fill={f} stroke="var(--ink)" strokeWidth="2" strokeLinejoin="round"/>
+        <path d={`M ${BX} ${geo.bt} L ${W - BX} ${geo.bt + geo.bb*.25} V ${geo.bb*.75} L ${BX} ${geo.bb} Z`} fill={f} stroke="var(--ink)" strokeWidth="2" strokeLinejoin="round"/>
       </g> };
   }
   const muxVisCache = {};
@@ -165,36 +150,22 @@ defineModule('gates', ['engine'], (engine) => {
   // types visually distinguishable at a glance even before you trace which
   // way the pins point.
   // All three of bits/space/type are per-instance like MUX's muxInputs, so
-  // geometry is built/cached the same way.
-  const SPLIT_UNIT = 20; // matches Canvas' GRID (20px snap), so the diagonal lands on a clean cell and taps line up with the grid
+  // geometry is built/cached the same way — see engine's splitGeometry for
+  // what trunkX/tapX/diagX/taps/topY/lastY mean; this just adds the body
+  // that draws the trunk, the diagonal lead-in, and each tap's label.
   function buildSplitVis(n, space, merge) {
-    const gap = space*SPLIT_UNIT, topY = SPLIT_UNIT;
-    const w = SPLIT_UNIT + 12; // total width is the same either way — just mirrored
-    // 'split': diagonal at (0,0), trunk at x=20, taps at x=32 (right).
-    // 'merge': the horizontal mirror of that (x -> w-x): diagonal at
-    // (32,0), trunk at x=12, taps at x=0 (left).
-    const trunkX = merge ? w-SPLIT_UNIT : SPLIT_UNIT;
-    const tapX   = merge ? 0 : w;
-    const diagX  = merge ? w : 0;
-    const taps = Array.from({length:n}, (_,i)=>({x:tapX, y:topY+i*gap}));
-    // The diagonal's far end is this pin's whole connector, drawn in full
-    // by body() below — GateBody's generic (cardinal-only) stub renderer
-    // is skipped for it (noStub) instead of adding a second, wrongly-angled leg.
-    const diagPin = {x:diagX, y:0, dir:'up', noStub:true};
-    const lastY = topY + (n-1)*gap;
-    return { w, h: lastY,
-      inputs:  merge ? taps : [diagPin],
-      outputs: merge ? [diagPin] : taps,
+    const geo = splitGeometry(n, space, merge ? 'merge' : 'split');
+    return { ...geo,
       body:()=><g>
         {/* Invisible fat hit-area — the visible body is just two thin
             strokes with nothing to fill, so without this, clicking to
             select/drag the component anywhere off those exact pixels (the
             wire-like point of the whole design) would silently miss it. */}
-        <rect x="0" y="0" width={w} height={lastY} fill="transparent"/>
-        <line x1={trunkX} y1={topY} x2={diagX} y2="0" stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>
-        <line x1={trunkX} y1={topY} x2={trunkX} y2={lastY} stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>
-        {taps.map((p,i)=>(
-          <text key={i} x={merge ? trunkX+6 : trunkX-6} y={p.y+3} textAnchor={merge ? 'start' : 'end'}
+        <rect x="0" y="0" width={geo.w} height={geo.lastY} fill="transparent"/>
+        <line x1={geo.trunkX} y1={geo.topY} x2={geo.diagX} y2="0" stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>
+        <line x1={geo.trunkX} y1={geo.topY} x2={geo.trunkX} y2={geo.lastY} stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>
+        {geo.taps.map((p,i)=>(
+          <text key={i} x={merge ? geo.trunkX+6 : geo.trunkX-6} y={p.y+3} textAnchor={merge ? 'start' : 'end'}
                 fontFamily="var(--mono)" fontSize="8" fontWeight="600" fill="var(--ink)" opacity="0.6">{i}</text>
         ))}
       </g> };
@@ -239,8 +210,7 @@ defineModule('gates', ['engine'], (engine) => {
   // Cells render leftmost = most-significant bit. `data-bit` is read back by
   // Canvas's existing drag/click detection (onCompMouseDown/onUp) via plain
   // DOM event-target bubbling, so no extra handler plumbing is needed here.
-  const BIT_CELL_W=18, BIT_CELL_H=24, BIT_GAP=3, BIT_PAD=8;
-  function bitsRowWidth(n) { return BIT_PAD*2 + n*BIT_CELL_W + Math.max(0,n-1)*BIT_GAP; }
+  const BIT_CELL_H=24; // BIT_CELL_W/BIT_GAP/BIT_PAD (and bitsRowWidth) come from engine — see the destructure above.
   function BitCells({ n, value, editable }) {
     const cy=20;
     return Array.from({length:n},(_,i)=>{
@@ -296,9 +266,8 @@ defineModule('gates', ['engine'], (engine) => {
   // binary's one-cell-per-bit layout — cached per (bitWidth, mode) pair since
   // the box width itself changes, not just the digits drawn inside it.
   function buildInputVis(n, hex) {
-    const cellCount = hex ? Math.ceil(n/4) : n;
-    const w=bitsRowWidth(cellCount), h=40;
-    return { w, h, inputs:[], outputs:[{x:w,y:20}],
+    const {w, h, inputs, outputs} = inputOutputGeometry(n, hex ? 'hex' : 'bin', false);
+    return { w, h, inputs, outputs,
       body:(f,comp)=><g>
         <rect x="2" y="4" width={w-4} height="32" rx="8" fill="#f3f3f1" stroke="var(--ink)" strokeWidth="2"/>
         {stableBlock(comp, w, hex ? HexCells({n, value:comp.state.value||0, editable:true}) : BitCells({n, value:comp.state.value||0, editable:true}))}
@@ -310,9 +279,8 @@ defineModule('gates', ['engine'], (engine) => {
   // Same hex/binary cell-count split as buildInputVis. The input pin sits at
   // x=0 regardless, so resizing never moves a wire.
   function buildOutputVis(n, hex) {
-    const cellCount = hex ? Math.ceil(n/4) : n;
-    const w=bitsRowWidth(cellCount), h=40;
-    return { w, h, inputs:[{x:0,y:20}], outputs:[],
+    const {w, h, inputs, outputs} = inputOutputGeometry(n, hex ? 'hex' : 'bin', true);
+    return { w, h, inputs, outputs,
       body:(f,comp)=><g>
         <rect x="2" y="4" width={w-4} height="32" rx="8" fill="#f3f3f1" stroke="var(--ink)" strokeWidth="2"/>
         {stableBlock(comp, w, hex ? HexCells({n, value:comp.inputVals[0]||0}) : BitCells({n, value:comp.inputVals[0]||0, editable:false}))}
@@ -344,11 +312,9 @@ defineModule('gates', ['engine'], (engine) => {
   // — and so box width — depends only on n/hex (regValueText zero-pads to a
   // fixed length), not on the actual value, so it can be sized here same as
   // bitsRowWidth is for the cell-grid components.
-  const CONST_CHAR_W=9, CONST_PAD=12;
   function buildConstVis(n, hex) {
-    const digits = hex ? Math.ceil(n/4) : n;
-    const w=Math.max(40, digits*CONST_CHAR_W + CONST_PAD*2), h=40;
-    return { w, h, inputs:[], outputs:[{x:w,y:20}],
+    const {w, h, inputs, outputs} = constGeometry(n, hex ? 'hex' : 'bin');
+    return { w, h, inputs, outputs,
       body:(f,comp)=>{
         const text = regValueText(comp.state.value||0, n, hex?'hex':'bin');
         return <g>
@@ -698,6 +664,7 @@ const {
   branchRouteFrom, syncWireEndCorners,
   segmentMoveSnapshot, computeSegmentMove, clampSegmentMoveDelta, finalizeSegmentMove,
   truncateWireAtSegment, removeWireCascading,
+  computeEndpointRoute, finalizeEndpointRoute,
 } = engine;
 
 // A selected wire segment is identified by a composite string distinct
@@ -736,72 +703,6 @@ function NumberField({ className, value, min, max, onCommit }) {
       if (t.trim()!=='' && inRange(n)) onCommit(n);
     }}
     onBlur={()=>{focused.current=false; setText(String(value));}}/>;
-}
-
-// Dragging a wire's endpoint should never disturb the rest of the wire —
-// only the one segment at the dragged end. `d` (built once at drag-start by
-// onWireEndpointMouseDown, before anything is touched) captures that
-// original shape: `neighbor` is the fixed point just before this endpoint
-// (the nearest existing waypoint, or the wire's other end if it has none),
-// `axis` is which way ('h'/'v') the segment leading into this endpoint
-// already ran, and `basePoints` is every other point on the wire, left
-// completely alone. Moving `newPos` along that same axis just slides the
-// endpoint — extend/shorten, no new point. Moving it off that axis appends
-// exactly one corner point beyond `neighbor` (new segment), and nothing
-// before `neighbor` is ever touched either way.
-function computeEndpointRoute(d, newPos) {
-  const EPS = 1e-6;
-  const aligned = d.axis==='h' ? Math.abs(newPos.y-d.neighbor.y)<EPS : Math.abs(newPos.x-d.neighbor.x)<EPS;
-  if (aligned) {
-    // Dragged all the way back onto the fixed point behind it (both
-    // coordinates, not just the on-axis one) — the final segment has
-    // shrunk to nothing. If that point was one of the wire's own
-    // waypoints, it's now a redundant duplicate of the endpoint sitting
-    // right on top of it, so it's dropped and that point becomes the
-    // endpoint outright — case (b): if it was already a junction, the
-    // junction stays put, now doubling as the endpoint. If there was no
-    // waypoint there at all — the fixed point was the wire's *other*
-    // end — the whole wire has collapsed to zero length; flagged via
-    // collapsedToZero rather than acted on here, since a live preview
-    // frame shouldn't delete anything — only finalizeEndpointRoute, at
-    // drop, does that (case (c) when the fixed point is a branch's own
-    // branchpoint junction).
-    const collapsed = Math.abs(newPos.x-d.neighbor.x)<EPS && Math.abs(newPos.y-d.neighbor.y)<EPS;
-    if (collapsed) {
-      if (d.basePoints.length===0) return { points: [], corner: null, collapsedToZero: true };
-      const points = d.side==='to' ? d.basePoints.slice(0,-1) : d.basePoints.slice(1);
-      return { points, corner: null };
-    }
-    return { points: d.basePoints, corner: null };
-  }
-  const corner = d.axis==='h' ? {x:newPos.x, y:d.neighbor.y} : {x:d.neighbor.x, y:newPos.y};
-  const points = d.side==='to' ? [...d.basePoints, corner] : [corner, ...d.basePoints];
-  return { points, corner };
-}
-
-// Commits computeEndpointRoute's result to `wire` and, only if it actually
-// produced a new corner, registers a junction there (skipping if an
-// equivalent one is already registered) so that corner is immediately
-// branchable — same reasoning as before, just now scoped to the one new
-// corner this drag may have added, since everything else about the wire is
-// left alone and any junctions elsewhere on it are therefore still valid.
-function finalizeEndpointRoute(wire, d, newPos, circuit) {
-  const {points, corner, collapsedToZero} = computeEndpointRoute(d, newPos);
-  if (collapsedToZero) {
-    // Both ends now sit on the same point — nothing left to draw. Going
-    // through circuit.removeWire (rather than just leaving an empty-points
-    // wire in place) runs its junction cleanup too, so retracting a
-    // branch back onto its own branchpoint takes that junction down with
-    // it if it was the last branch there (case (c)).
-    circuit.removeWire(wire.id);
-    return true;
-  }
-  wire.points = points;
-  if (corner) {
-    const dup = [...circuit.junctions].some(j=>j.sourceWireId===wire.id && Math.abs(j.x-corner.x)<1e-6 && Math.abs(j.y-corner.y)<1e-6);
-    if (!dup) circuit.junctions.add({x:corner.x, y:corner.y, sourceWireId:wire.id});
-  }
-  return false;
 }
 
 function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag, onComponentChanged, snapGrid=true }) {
@@ -2320,23 +2221,29 @@ function App(){
     </Dialog>}
 
     {showSettings&&<Dialog title="Settings" onClose={()=>setShowSettings(false)}>
-      <div className="prop-option">
-        <span className="prop-label">Propagation Mode</span>
-        <select className="prop-input"
-                  value={propagationMode}
-                  onChange={e=>{setPropagationMode(e.target.value == "length" ? "length" : "component");onComponentChanged?.();}}>
-            <option value="length">Length-Based Speed</option>
-            <option value="component">Component-Based Speed</option>
-        </select>
-      </div>
-      <div className="prop-option">
-        <span className="prop-label">Propagation Style</span>
-        <select className="prop-input"
-                  value={propagationStyle}
-                  onChange={e=>{setPropagationStyle(e.target.value == "discrete" ? "discrete" : "continuous");onComponentChanged?.();}}>
-            <option value="continuous">Continuous</option>
-            <option value="discrete">Discrete</option>
-        </select>
+      {/* .prop-grid so both rows' selects start at the same x position —
+          without it each row is its own flex line, and "Propagation Mode"
+          vs "Propagation Style" being different lengths would leave the
+          two dropdowns staggered instead of lined up. */}
+      <div className="prop-grid">
+        <div className="prop-option">
+          <span className="prop-label">Propagation Mode</span>
+          <select className="prop-input"
+                    value={propagationMode}
+                    onChange={e=>{setPropagationMode(e.target.value == "length" ? "length" : "component");onComponentChanged?.();}}>
+              <option value="length">Length-Based Speed</option>
+              <option value="component">Component-Based Speed</option>
+          </select>
+        </div>
+        <div className="prop-option">
+          <span className="prop-label">Propagation Style</span>
+          <select className="prop-input"
+                    value={propagationStyle}
+                    onChange={e=>{setPropagationStyle(e.target.value == "discrete" ? "discrete" : "continuous");onComponentChanged?.();}}>
+              <option value="continuous">Continuous</option>
+              <option value="discrete">Discrete</option>
+          </select>
+        </div>
       </div>
       <div className="dialog-actions">
         <button className="btn ghost" onClick={()=>setShowSettings(false)}>Exit</button>
