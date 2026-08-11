@@ -153,7 +153,7 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
    (columns 1/2) instead of a self-contained flex row, so they line up with
    every other row's label/control regardless of this row's own text. */
 .prop-panel .prop-option { display:contents; margin-bottom:0; }
-.prop-label { font-weight: 600; font-size: 12px; margin-right: 7px; color: black;}
+.prop-label { font-weight: 600; font-size: 12px; margin-right: 7px; color: black; white-space: nowrap; }
 .prop-panel .prop-label { margin-right:0; white-space:nowrap; }
 /* min-width:0 overrides the grid item's default automatic minimum size
    (== its min-content), which for a text/select input is small enough to
