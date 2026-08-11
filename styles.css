@@ -147,14 +147,20 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
      what let rows drift out of alignment with each other. */
   display:grid; grid-template-columns:max-content 1fr; column-gap:10px; row-gap:7px; align-items:center;
 }
+/* Same label/input column alignment as .prop-panel, minus its floating-
+   corner-panel chrome (position, background, padding, ...) — for contexts
+   like the Settings dialog that want rows to line up but already have
+   their own container (a Dialog's .modal) supplying that chrome. */
+.prop-grid { display:grid; grid-template-columns:max-content 1fr; column-gap:10px; row-gap:7px; align-items:center; }
 .prop-title { font-weight: 600; font-size: 14px; grid-column:1/-1; }
 .prop-option  { display: flex; justify-content: space-between; align-items: center; margin-bottom: 7px;}
-/* Inside a prop-panel, a row's label/control become direct grid items
-   (columns 1/2) instead of a self-contained flex row, so they line up with
-   every other row's label/control regardless of this row's own text. */
-.prop-panel .prop-option { display:contents; margin-bottom:0; }
+/* Inside a prop-panel or prop-grid, a row's label/control become direct
+   grid items (columns 1/2) instead of a self-contained flex row, so they
+   line up with every other row's label/control regardless of this row's
+   own text. */
+.prop-panel .prop-option, .prop-grid .prop-option { display:contents; margin-bottom:0; }
 .prop-label { font-weight: 600; font-size: 12px; margin-right: 7px; color: black; white-space: nowrap; }
-.prop-panel .prop-label { margin-right:0; white-space:nowrap; }
+.prop-panel .prop-label, .prop-grid .prop-label { margin-right:0; white-space:nowrap; }
 /* min-width:0 overrides the grid item's default automatic minimum size
    (== its min-content), which for a text/select input is small enough to
    not matter but for a range slider is wide enough on its own to blow past
