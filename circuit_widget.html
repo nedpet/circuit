@@ -693,7 +693,7 @@ const { GATE_VIS, GateBody, visForComp } = gates;
 const {
   GATE_DEFS,
   projectOrthogonalPoint, terminalCoords, wireKnots, resolveWire, wirePath,
-  sampleWire, splitWirePathAtSegment, wireKnotDistances, distToSeg, wireSegmentPoints, findNearestWirePoint,
+  sampleWire, splitWirePathAtSegment, splitWirePath, wireKnotDistances, distToSeg, wireSegmentPoints, findNearestWirePoint,
   insertBranchPoint, routeManhattanPoints, pinAbs, wireDelayForLength,
   branchRouteFrom, syncWireEndCorners,
   segmentMoveSnapshot, computeSegmentMove, clampSegmentMoveDelta, finalizeSegmentMove,
@@ -1312,8 +1312,9 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
   // Whether the point `dist` away from a wire's own `.from` is CURRENTLY
   // showing as high — the whole wire's settled value normally, or, mid-
   // transition, whichever side of the signal's current position it falls
-  // on (see splitWirePathAtSegment, which does the same thing for the
-  // wire's own drawn path).
+  // on (see splitWirePathAtSegment/splitWirePath — whichever is active for
+  // the current propagationStyle — which do the same thing for the wire's
+  // own drawn path).
   const isWireHighAt = (progress, dist) =>
     progress.pending ? (dist<=progress.reachedDist ? progress.pendingValue>0 : progress.value>0)
                       : progress.value>0;
@@ -1569,16 +1570,25 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
           const path=wirePath(a.x,a.y,b.x,b.y,pts);
           const high=w.value>0;
           const mismatch=w.bitMismatch;
-          // A wire mid-transition lights up segment by segment as its
-          // signal actually reaches each corner, rather than the whole
-          // wire holding its old color until the full wire delay elapses
-          // — pending/wireDelay/pendingT come from wireProgress (above),
-          // shared with the free-endpoint/waypoint lighting and the
-          // traveling InflightPulse dot below so all of them track the
-          // exact same progress, computed once instead of several times.
+          // A wire mid-transition lights up as the signal actually reaches
+          // each point along it, rather than the whole wire holding its
+          // old color until the full wire delay elapses — pending/
+          // wireDelay/pendingT come from wireProgress (above), shared with
+          // the free-endpoint/waypoint lighting and the traveling
+          // InflightPulse dot below so all of them track the exact same
+          // progress, computed once instead of several times. Which of
+          // the two split functions actually draws the lit boundary is
+          // the one thing that depends on propagationStyle — see the
+          // "Signal color" comment just below for what each one looks
+          // like; everything downstream of pendingT (particles, waypoint
+          // and endpoint lighting) doesn't care which one ran.
           const progress = wireProgress.get(w.id);
           const {pending, wireDelay, pendingT} = progress;
-          const split = pending ? splitWirePathAtSegment(a.x,a.y,b.x,b.y,pts,pendingT) : null;
+          const split = pending
+            ? (state.widgetState.propagationStyle==='discrete'
+                ? splitWirePathAtSegment(a.x,a.y,b.x,b.y,pts,pendingT)
+                : splitWirePath(a.x,a.y,b.x,b.y,pts,pendingT))
+            : null;
           // Which of this wire's segments (if any) selectedId names — a
           // composite id ('<wireId>#seg<index>', see segSelId), distinct
           // from any component id, so it rides the same selectedId prop
@@ -1605,11 +1615,15 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
                 Mid-transition (split!=null), drawn as two strokes instead
                 of one: the part already reached, in the color it's
                 arriving AT, and the rest, still in the color it's coming
-                FROM — each a whole run of fully-crossed segments, per
-                splitWirePathAtSegment, not a smooth partial fill. No CSS
-                transition on either piece; the geometry itself already
-                animates frame to frame; a color transition on top would
-                just blur the two together. */}
+                FROM. Where exactly the cut falls depends on
+                propagationStyle: "discrete" (splitWirePathAtSegment) cuts
+                at whichever corner is the furthest one entirely crossed,
+                never partway through a segment; "continuous"
+                (splitWirePath) cuts exactly where the in-flight pulse
+                currently is, tracking it smoothly rather than jumping
+                corner to corner. No CSS transition on either piece; the
+                geometry itself already animates frame to frame; a color
+                transition on top would just blur the two together. */}
             {split
               ? <>
                   <path d={split.before} fill="none" stroke={w.pendingValue>0?'var(--high)':'var(--low)'}
@@ -1632,23 +1646,23 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
                 wire when `high`. Mid-transition, `high` alone isn't
                 enough: it still reads true for the entire duration of a
                 high-to-low transition (w.value doesn't drop until the
-                full delay elapses), which used to let particles keep
-                flowing across a stretch that's already visually turned
-                off, per the segment-by-segment split above — so here
-                they're confined to just the not-yet-reached suffix
-                instead, shrinking in step with it. Arriving at high
-                (pendingValue>0) is the mirror case: nothing's actually
-                high yet except the already-reached prefix, which is
-                where they start instead of waiting for the whole wire to
-                settle. */}
+                full delay elapses), which would otherwise let particles
+                keep flowing across a stretch that's already visually
+                turned off, per the split above — so here they're confined
+                to just the not-yet-reached suffix instead, shrinking in
+                step with it. Arriving at high (pendingValue>0) is the
+                mirror case: nothing's actually high yet except the
+                already-reached prefix, which is where they start instead
+                of waiting for the whole wire to settle. */}
             {pending
               ? (w.pendingValue>0
                   ? <ParticleStream a={a} b={b} pts={pts} range={[0,pendingT]}/>
                   : high && <ParticleStream a={a} b={b} pts={pts} range={[pendingT,1]}/>)
               : high && <ParticleStream a={a} b={b} pts={pts}/>}
-            {/* In-flight pulse — the exact leading edge, finer-grained
-                than the segment-by-segment coloring above (which only
-                ever stops at a real corner). */}
+            {/* In-flight pulse — the exact leading edge. Under "discrete"
+                propagationStyle this runs a bit ahead of the segment
+                coloring above, which only ever stops at a real corner;
+                under "continuous" the two always agree exactly. */}
             {pending&&<InflightPulse a={a} b={b} pts={pts} pendingValue={w.pendingValue}
                                   pendingStart={w.pendingStart} delayMs={wireDelay}/>}
             {/* Free endpoint handles — light up with their wire like a pin
@@ -1697,7 +1711,8 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
           // — pt is wire.points[idx], which sits at distances[idx+1] in
           // wireProgress (knot 0 is `from`) — rather than waiting for the
           // whole wire to finish settling, same as the free endpoints
-          // above and the wire's own path (splitWirePathAtSegment).
+          // above and the wire's own path (splitWirePathAtSegment/
+          // splitWirePath, whichever propagationStyle picks).
           const progress = wireProgress.get(w.id);
           const pointHigh = isWireHighAt(progress, progress.distances[idx+1]);
           return <circle key={w.id+'_wp'+idx} cx={pt.x} cy={pt.y} r="5"
@@ -1791,9 +1806,10 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
 // the wire is CURRENTLY actually high — the whole thing when it's simply
 // settled high, but only part of it mid-transition (see the render site):
 // the already-reached prefix while arriving at high, or the not-yet-
-// reached suffix while leaving it, matching the same segment-by-segment
-// split the wire's own color already follows. `tt` (each particle's own
-// 0-1 cycle position) gets remapped into that sub-range rather than
+// reached suffix while leaving it, matching the same signal-arrival
+// tracking the wire's own color (splitWirePathAtSegment/splitWirePath)
+// and its waypoints (isWireHighAt) already follow. `tt` (each particle's
+// own 0-1 cycle position) gets remapped into that sub-range rather than
 // sampled directly, so particles never wander onto a stretch that's
 // already visually turned off.
 function ParticleStream({a,b,pts=[],range}) {
@@ -1982,10 +1998,16 @@ function App(){
   const[equationToLoad,setEquationToLoad]=useState('');
   const[showSettings, setShowSettings]=useState(false);
   const[propagationMode, setPropagationMode]=useState("length");
+  // "continuous": the wire's lit boundary tracks the in-flight pulse's
+  // exact position (splitWirePath). "discrete": it only advances once a
+  // whole segment is entirely crossed (splitWirePathAtSegment). See the
+  // "Signal color" render site in Canvas for where this actually gets read.
+  const[propagationStyle, setPropagationStyle]=useState("continuous");
 
 
   state.widgetState.delayMs=delayMs;
   state.widgetState.propagationMode=propagationMode;
+  state.widgetState.propagationStyle=propagationStyle;
   state.widgetState.particleDensity=4;
 
   // Sim loop
@@ -2305,6 +2327,15 @@ function App(){
                   onChange={e=>{setPropagationMode(e.target.value == "length" ? "length" : "component");onComponentChanged?.();}}>
             <option value="length">Length-Based Speed</option>
             <option value="component">Component-Based Speed</option>
+        </select>
+      </div>
+      <div className="prop-option">
+        <span className="prop-label">Propagation Style</span>
+        <select className="prop-input"
+                  value={propagationStyle}
+                  onChange={e=>{setPropagationStyle(e.target.value == "discrete" ? "discrete" : "continuous");onComponentChanged?.();}}>
+            <option value="continuous">Continuous</option>
+            <option value="discrete">Discrete</option>
         </select>
       </div>
       <div className="dialog-actions">
