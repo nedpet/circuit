@@ -866,7 +866,17 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
           } else if (wf.type==='pin' && dist>6) {
             const target={x:snap(w.x,snapGridRef.current),y:snap(w.y,snapGridRef.current)};
             const wire=circuit.addWire({compId:wf.compId,pin:wf.pin,type:'out'},target);
-            if(wire) wire.points=routeManhattanPoints(terminalCoords(wire.from,circuit),terminalCoords(wire.to,circuit),wf.dir||'h');
+            if(wire) {
+              wire.points=routeManhattanPoints(terminalCoords(wire.from,circuit),terminalCoords(wire.to,circuit),wf.dir||'h');
+              // Same bookkeeping finalizeEndpointRoute/insertBranchPoint do
+              // for every corner THEY add — without it, a wire's own very
+              // first (and possibly only) bend, drawn right here at
+              // creation time, looks to syncEndCorner like an ordinary,
+              // freely-recomputable auto-corner instead of an established
+              // one, so dragging either end later can silently discard it
+              // and re-derive the whole path from scratch.
+              if (wire.points.length) circuit.junctions.add({x:wire.points[0].x, y:wire.points[0].y, sourceWireId:wire.id});
+            }
             onChangedRef.current?.();
           } else if (wf.type==='endpoint' && dist>6) {
             // Endpoint released on empty canvas (still free) rather than

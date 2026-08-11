@@ -127,27 +127,16 @@ defineModule('engine-geometry', ['state'], (state) => {
     return out;
   }
 
-  // Keeps `wire`'s end nearest `side` ('from' or 'to') truthful to
-  // whatever component is driving it, after that component's just been
-  // dragged. Handles all three ways a pin's move can leave that one
-  // waypoint out of date: it needs a corner it didn't have before (the
-  // pin moved off the axis it used to share with the next knot in), it
-  // needs to shift (still a corner, just not the same one — the earlier,
-  // narrower version of this only ever *added* a fresh point in this
-  // case, leaving the stale one behind as a redundant duplicate instead
-  // of replacing it), or it doesn't need one anymore (the pin moved back
-  // onto that axis). Only the ONE waypoint nearest `side` is ever in
-  // play — an interior waypoint's relationship to its OWN neighbors never
-  // changes just because a pin elsewhere moved — and it's computed at the
-  // exact position resolveWire's own implicit-elbow convention would
-  // already draw, so a fix here never changes how the wire actually
-  // renders, just whether that bend is a real, interactive waypoint.
+  // Recalculate's a wire's path when it is attached to a component that has just been dragged 
+  // Handles all three ways a pin's move can leave that one waypoint out of date: 
+  //  - it needs a corner it didn't have before (the pin moved off the axis it used to share with the next knot)
+  //  - it needs to shift (still a corner, just not the same one)
+  //  - it doesn't need one anymore (the pin moved back onto that axis)
+  // Only changes the waypoint nearest to `side`, computed at the exact position 
+  // resolveWire's own implicit-elbow convention would already draw
   //
-  // Left untouched if anything else still needs that waypoint exactly
-  // where it is (a junction, or another wire's own endpoint) — moving or
-  // deleting it out from under that would disconnect it, so the pin's
-  // implicit elbow is just left for resolveWire to draw on top of it
-  // instead, same conservative rule removeRedundantWaypoint follows.
+  // Left untouched if anything else still needs that waypoint (a junction, or another wire's own endpoint)
+  // Instead creates new points off of that waypoint to help connect to where the component was dragged
   function syncEndCorner(wire, side, circuit) {
     const EPS = 1e-6;
     const same = (a,b) => Math.abs(a.x-b.x)<EPS && Math.abs(a.y-b.y)<EPS;
@@ -166,7 +155,12 @@ defineModule('engine-geometry', ['state'], (state) => {
         [...circuit.wires.values()].some(w=>w.id!==wire.id &&
           ((!isWireTerminal(w.from) && same(terminalCoords(w.from,circuit),nearPt)) ||
            (!isWireTerminal(w.to)   && same(terminalCoords(w.to,circuit),  nearPt))));
-      if (stillNeeded) return;
+      if (stillNeeded) {
+        if (anchor.x===nearPt.x || anchor.y===nearPt.y) return; // already reachable in a straight line — nothing to add
+        const newCorner = side==='from' ? {x:nearPt.x, y:anchor.y} : {x:anchor.x, y:nearPt.y};
+        wire.points = side==='from' ? [newCorner, ...pts] : [...pts, newCorner];
+        return;
+      }
     }
 
     if (anchor.x===farNeighbor.x || anchor.y===farNeighbor.y) {
@@ -181,26 +175,8 @@ defineModule('engine-geometry', ['state'], (state) => {
       : (side==='from' ? [corner, ...pts] : [...pts, corner]);
   }
 
-  // Runs syncEndCorner for both ends of `wire` — repeatedly, until neither
-  // makes a further change, rather than once each.
-  //
-  // A single from-then-to pass isn't enough: fixing one end reads (as its
-  // "farNeighbor") whatever the wire's OTHER near-end waypoint currently
-  // is, and fixing it can *change* that waypoint — which may leave the
-  // end fixed earlier in the very same pass stale again, now that its own
-  // farNeighbor has moved out from under it. That only bites the end
-  // fixed FIRST, since the one fixed second always sees the other's
-  // latest value — so with a single from-then-to pass, corners left
-  // behind on `from` never get a second look. Concretely, an INPUT
-  // (which — having no input pin of its own — is always a wire's `from`)
-  // looks fixed after one pass; an OUTPUT (always a wire's `to`, for the
-  // same reason) looks fixed too, but whatever `from` had already
-  // resolved to that same pass can be left stale, since nothing revisits
-  // it once `to` moves it out from under it. Looping both ends until
-  // stable catches that on the next go-around instead of leaving it
-  // behind. Bounded generously past what any real wire could need —
-  // cascades run at most as deep as the wire has waypoints, and those
-  // number in the single digits in practice.
+  // Runs syncEndCorner for both ends of `wire` repeatedly until neither makes a further change
+  // A single from-then-to pass isn't enough: fixing one end could change the other
   function syncWireEndCorners(wire, circuit) {
     for (let guard=0; guard<8; guard++) {
       const before = wire.points;
