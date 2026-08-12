@@ -190,20 +190,11 @@ defineModule('engine-routing', ['engine-geometry'], (geometry) => {
   }
 
   // Changes `wire`'s path after its endpoint has been dragged, based on the result of computeEndpointRoute
-  // Commits computeEndpointRoute's result to `wire` and, only if it actually
-  // produced a new corner, registers a junction there (skipping if an
-  // equivalent one is already registered) so that corner is immediately
-  // branchable — same reasoning as before, just now scoped to the one new
-  // corner this drag may have added, since everything else about the wire is
-  // left alone and any junctions elsewhere on it are therefore still valid.
+  // Registers a junction there if it doesn't exist 
   function finalizeEndpointRoute(wire, d, newPos, circuit) {
     const {points, corner, collapsedToZero} = computeEndpointRoute(d, newPos);
     if (collapsedToZero) {
-      // Both ends now sit on the same point — nothing left to draw. Going
-      // through circuit.removeWire (rather than just leaving an empty-points
-      // wire in place) runs its junction cleanup too, so retracting a
-      // branch back onto its own branchpoint takes that junction down with
-      // it if it was the last branch there (case (c)).
+      // Both ends now sit on the same point, so it is removed
       circuit.removeWire(wire.id);
       return true;
     }
@@ -215,51 +206,15 @@ defineModule('engine-routing', ['engine-geometry'], (geometry) => {
     return false;
   }
 
-  // Snapshot of one wire segment's shape, captured once at drag-start so a
-  // multi-frame drag can recompute the whole move fresh every frame from a
-  // fixed baseline instead of compounding small changes onto whatever the
-  // previous frame already wrote — same reason computeEndpointRoute's `d`
-  // freezes basePoints/neighbor rather than re-reading the wire live.
-  // Returns null if segIndex doesn't land on a real segment.
+  // Returns a snapshot of a wire before one of its segments is moved, including:
+  // wireId, the segment-to-be-moved's index and axis ('h' or 'v'), all wire knots,
+  // whether the wire's endpoints are anchored to component pins (fromPinned and toPinned),
+  // and whether the segment's endpoints are anchored (startPinned and endPinned)
+  // Returns null if segIndex is invalid
+  // Used so changes aren't compounded each frame in a multi-frame move
   //
-  // fromPinned/toPinned mark wire.from/wire.to specifically as anchored to
-  // a component pin — used only to decide whether computeSegmentMove is
-  // allowed to write a new value back into those two fields at all (never,
-  // for a pin — it stays a component reference, not a plain point).
-  //
-  // startPinned/endPinned mark the segment's own two boundary knots —
-  // whichever knots `segIndex` actually spans, which may or may not be
-  // the wire's overall from/to — as unable to move with the drag at all.
-  // Two different things can pin a knot this way: it's one of the pin
-  // ends above, or the wire is itself the SOURCE of a junction sitting
-  // exactly there that some OTHER wire still actually reads from. Moving
-  // a live branchpoint would drag that other wire along with it exactly
-  // the way dragging a component would tear its wire loose — a junction
-  // splits what looks like one wire into two conceptually separate
-  // segments meeting there, same as a component does, so it gets the
-  // same treatment: the knot stays put and computeSegmentMove grows a
-  // stub out to it instead of moving it.
-  //
-  // "Still actually reads from it" is the key qualifier — a junction
-  // registration can outlive every branch that ever justified it (its
-  // last branch retracted, or was deleted, without that specific corner
-  // happening to be collinear at the time — see pruneDeadJunctions for
-  // when it does and doesn't clean these up automatically), leaving a
-  // plain-looking corner secretly still flagged as a junction with
-  // nothing actually anchored to it. Pinning a knot for a branch that no
-  // longer exists doesn't protect anything — it just froze an ordinary
-  // corner in place and left a phantom stub behind on every drag, which
-  // is indistinguishable from a genuine leftover waypoint bug to anyone
-  // looking at the result. So this checks for an actual, live branch at
-  // that position, not just a registry entry — same "hasBranch" test
-  // pruneDeadJunctions itself uses to decide whether a junction still
-  // matters.
-  //
-  // A branch's own free end sitting on ANOTHER wire's junction is a
-  // different kind of anchoring — not owned by this wire, so it doesn't
-  // pin anything here — and is handled separately, by dragging the
-  // junction along within its parent's own extent instead (see
-  // clampSegmentMoveDelta / finalizeSegmentMove).
+  // Segment's endpoints can be anchored by either some component or a junction that 
+  // will still be in use by a branch after the move
   function segmentMoveSnapshot(wire, segIndex, circuit) {
     const from = terminalCoords(wire.from, circuit), to = terminalCoords(wire.to, circuit);
     const knots = wireKnots(from.x, from.y, to.x, to.y, wire.points || []);
@@ -287,42 +242,11 @@ defineModule('engine-routing', ['engine-geometry'], (geometry) => {
     };
   }
 
-  // Computes wire's new points (and, for whichever end is free, its new
-  // from/to) for segment `d.segIndex` shifted by (dx,dy) from its ORIGINAL
-  // (drag-start) position in `d.knots` — always relative to that frozen
-  // baseline, never to the wire's current, possibly-already-moved shape,
-  // so it's safe to call every frame of a live drag with the same
-  // growing-from-zero delta and get a correct, non-compounding result
-  // every time, exactly like computeEndpointRoute.
-  //
-  // A knot that startPinned/endPinned marks as anchored — either it's the
-  // wire's own pin-attached endpoint, or the wire is the source of a
-  // junction sitting exactly there — can't move; instead a brand-new
-  // point is added at the shifted position once there's an actual
-  // (dx,dy) to add it at, growing the wire a perpendicular "stub" out to
-  // it and leaving the anchored knot (and everything on its far side)
-  // untouched. This is the ONLY thing that moves for this drag — every
-  // other knot keeps its exact original position, so "moving a segment"
-  // never reaches past its own two ends, into whatever's on the other
-  // side of a pin or a branchpoint, exactly the way it already couldn't
-  // reach into a neighboring component. Skipped entirely at zero delta
-  // rather than unconditionally, so merely selecting an anchored segment
-  // (no real drag yet) doesn't leave a redundant zero-length stub behind.
-  // A free knot — an interior waypoint, a dangling (unattached) wire end,
-  // or a branch's own end anchored to ANOTHER wire's junction (see
-  // clampSegmentMoveDelta / finalizeSegmentMove; that's a different kind
-  // of anchoring, not one this wire owns, so it isn't pinned here) — just
-  // shifts in place; `from`/`to` come back non-null only for whichever
-  // end is both the wire's overall terminal AND not itself a component
-  // pin.
-  //
-  // A stub grown at the segment's start shifts its own index up by one —
-  // it's now one knot further into the (longer) knot list — so the
-  // segment this same drag should keep tracking is `segIndex`, returned
-  // fresh each call rather than the caller having to re-derive it. Comes
-  // back equal to `d.segIndex` whenever no stub grew there, so
-  // re-asserting it every frame (e.g. to keep a selection in sync) is
-  // always safe, even before any stub exists.
+  // Builds and returns the new knot list of a wire after one of its segments has been moved
+  // `d.knots` is the original set of knots, `d.segIndex` is the shifted segment's index
+  // Adds `dx` or `dy` to each of the segment's endpoints, unless it is pinned, in which case
+  // a new knot is placed at the original location and then moved
+  // Also returns the segment's new index since it may have changed during the move
   function computeSegmentMove(d, dx, dy) {
     const knots = d.knots, n = knots.length;
     const moved = dx!==0 || dy!==0;
@@ -354,25 +278,9 @@ defineModule('engine-routing', ['engine-geometry'], (geometry) => {
     return {points, from, to, segIndex};
   }
 
-  // Reduces a segment drag's raw, requested (dx,dy) to whatever a
-  // branch's own anchor — if this segment touches one — can actually
-  // take, per clampAlongParentWire, so the WHOLE segment (both its
-  // knots) ends up moving by the SAME, consistent amount. Meant to run
-  // *before* computeSegmentMove, not after: computeSegmentMove has no
-  // way to only shift one of a segment's two knots part-way — both knots
-  // always move by exactly the (dx,dy) it's given — so clamping needs to
-  // happen to the delta itself, upfront, not patched onto one knot
-  // afterward once the segment's already been drawn with the other one
-  // full-length. (An earlier version tried the latter, in
-  // finalizeSegmentMove, by overwriting just the anchor's own endpoint
-  // after the fact — but computeSegmentMove had already moved the
-  // segment's OTHER knot the full, unclamped distance, so the branch
-  // still reached exactly as far as before, just with a diagonal kink
-  // where the anchor snapped back.)
-  //
-  // A no-op — returns (dx,dy) unchanged — whenever neither of the
-  // segment's two knots is a branch anchored to a DIFFERENT wire's
-  // junction (most segments, most of the time).
+  // Restricts dx, dy to what's actually possible within the circuit
+  // Only changes dx, dy if the segment is the first segment of a branch,
+  // and the requested dx, dy would move it invalidly according to clampAlongParentWire
   function clampSegmentMoveDelta(d, dx, dy, circuit) {
     if (dx===0 && dy===0) return {dx, dy};
     const n = d.knots.length;
@@ -398,49 +306,14 @@ defineModule('engine-routing', ['engine-geometry'], (geometry) => {
     return {dx, dy};
   }
 
-  // Grid step wire geometry snaps to — mirrors the widget's own GRID
-  // constant. Used below purely as the margin kept clear of a parent
-  // wire's own boundary and of anything else along it, not for snapping
-  // itself (the widget already snaps whatever target it asks for).
+  // Grid step wire geometry snaps to 
   const SNAP_GRID = 20;
 
-  // Where a junction currently at `oldPos` on `wire` can move to, pulled
-  // toward `target` along a straight line — used when the branch reading
-  // from it moves (see attachBranchToJunction). `wire` itself never
-  // budges — only the branch's own end does — so this can land on an
-  // INTERIOR point of `wire`, not just its from/to.
-  //
-  // Deliberately never extends `wire` — the result always stays within
-  // its EXISTING geometry, on the same straight run `oldPos` is already
-  // on. Two things it also always keeps clear of, stepping back one grid
-  // unit at a time until it does:
-  //  - the run's own boundary in that direction (wire's own endpoint, or
-  //    a genuine corner where it bends) — the junction never reaches all
-  //    the way out to it, even if `target` asks for exactly that point;
-  //  - any position along the same line that another junction, or
-  //    another wire's own free endpoint, already occupies — landing
-  //    exactly on top of one of those would conflate the two.
-  // If there's no room to satisfy both (`oldPos` is already right up
-  // against one), the junction just stays put. A junction sitting
-  // exactly on a component pin never moves either, full stop, same
-  // reasoning as everywhere else a wire meets a component — walking
-  // outward from a pin has nowhere further to go anyway, so this falls
-  // out of the general case rather than needing its own check.
-  //
-  // `movingWireId` is the id of the branch being dragged (NOT `wire`,
-  // which is its parent) — excluded from the "another wire's free
-  // endpoint" check below for the same reason `wire.id` is already
-  // excluded from the junction one: the branch's own anchor is exactly
-  // the point being moved, not something it could ever "collide" with.
-  // Omitting this exclusion doesn't just misfire occasionally — the
-  // branch's own endpoint is on this line on *every* call, so every call
-  // saw a "collision" and stepped back from it, and since the position
-  // it stepped back from was wherever the branch happened to be sitting
-  // from the previous frame rather than anything fixed, the two
-  // alternated: full move, see the branch's now-updated position as
-  // blocking the next one, step back, see THAT position as clear again
-  // next frame, move the full distance again — back and forth every
-  // frame rather than settling anywhere.
+  // Returns the closest valid position which a junction moved from `oldPos` towards `target` can go
+  // `wire` is the parent wire and `movingWireId` is the branch actually being moved 
+  // A position is valid when the junction does not sit on the parent wire's segment boundaries,
+  // or on any other space another junction already occupies
+  // The function steps back one unit (as per grid snapping) when a position is invalid
   function clampAlongParentWire(wire, oldPos, target, circuit, movingWireId) {
     const EPS = 1e-6;
     const same = (a,b) => Math.abs(a.x-b.x)<EPS && Math.abs(a.y-b.y)<EPS;
@@ -456,11 +329,7 @@ defineModule('engine-routing', ['engine-geometry'], (geometry) => {
     const knots = wireKnots(from.x, from.y, to.x, to.y, wire.points || []);
     const segs = [];
     for (let k=0; k<knots.length-1; k++) segs.push([knots[k], knots[k+1]]);
-    // The run's true boundary in this direction, independent of `target`
-    // — probed far past anything realistic so overlapRunEnd's own
-    // "never run past the requested point" clamp can't mistake some
-    // ordinary point along the way for the wall itself.
-    const farProbe = mk(along(oldPos) + sign*1e9);
+    const farProbe = mk(along(oldPos) + sign*1e9); // the run's true boundary in this direction
     const wall = overlapRunEnd(oldPos, farProbe, segs);
     const limit = along(wall) - sign*SNAP_GRID;
 
@@ -508,31 +377,11 @@ defineModule('engine-routing', ['engine-geometry'], (geometry) => {
     wire.points = wire.points.filter((p,i) => i!==idx-1);
   }
 
-  // Attaches branch-point junction `j` (on `parentWire`) to wherever the
-  // branch reading from it drags toward `targetPos`, staying within
-  // parentWire's own existing shape the whole time — never extending it,
-  // never reaching its boundary or another junction/endpoint along it,
-  // never merging the two into one wire — see clampAlongParentWire for
-  // exactly what that rules out and why.
-  //
-  // If `j` is the only thing anchored there, it relocates in place — the
-  // old waypoint it sat on is dropped once it's safe to
-  // (removeRedundantWaypoint) and `j` itself moves. If other wires still
-  // read from `j`, moving it would disconnect THEM, so it — and its
-  // waypoint — are left exactly where they are, and a brand new junction
-  // is split off on parentWire at the reached position for just this
-  // branch.
-  //
-  // Returns the position actually reached, which the caller commits back
-  // to the branch's own endpoint — it may fall short of targetPos, and
-  // the branch must agree with wherever the junction actually ended up,
-  // not where it was asked to go, or the two snap apart again.
-  //
-  // `branchWireId` is the branch's own wire id — passed through to
-  // clampAlongParentWire purely so it can exclude the branch's own
-  // (about-to-be-overwritten) endpoint from its "clear of other wires'
-  // endpoints" check; see that function's comment for why skipping this
-  // isn't optional.
+  // Moves the junction `j` whenever a branch segment attached to `j` has been moved to `targetPos`
+  // Stays within `parentWire`'s shape, as determined by clampAlongParentWire
+  // If `j` is not in use by any other branches, then it deletes the old waypoint and moves `j` to the new location
+  // If it is used, a new junction is created, and it and the associated waypoint are left untouched
+  // Returns the new position of the junction
   function attachBranchToJunction(parentWire, j, targetPos, hasOtherReaders, circuit, branchWireId) {
     const EPS = 1e-6;
     const same = (a,b) => Math.abs(a.x-b.x)<EPS && Math.abs(a.y-b.y)<EPS;
@@ -540,42 +389,16 @@ defineModule('engine-routing', ['engine-geometry'], (geometry) => {
     const finalPos = clampAlongParentWire(parentWire, oldPos, targetPos, circuit, branchWireId);
     if (same(finalPos, oldPos)) return finalPos;
     if (!hasOtherReaders) {
-      // Move `j` itself first — insertBranchPoint below only cares about
-      // the waypoint at this point, and its own junction-dedup check now
-      // correctly finds `j` already sitting at finalPos instead of
-      // registering a redundant second one there.
       j.x = finalPos.x; j.y = finalPos.y;
       removeRedundantWaypoint(parentWire, oldPos, circuit);
     }
-    // Ensures a waypoint actually exists at finalPos — without this the
-    // junction would be a registry entry with nothing to show or select
-    // on parentWire's own path. In the shared case `j` never moved, so
-    // this registers a genuinely separate, new junction there instead.
-    insertBranchPoint(parentWire, finalPos.x, finalPos.y, circuit);
+    insertBranchPoint(parentWire, finalPos.x, finalPos.y, circuit); // ensures a waypoint actually exists at finalPos
     return finalPos;
   }
 
-  // Runs once, at drop, after computeSegmentMove's result has already been
-  // committed to `wire` — carries along the one kind of anchoring
-  // computeSegmentMove can't grow a stub for on its own: `wire` being a
-  // branch itself, anchored to a junction on some OTHER wire at this
-  // segment's endpoint. That junction is dragged toward the same move
-  // instead (attachBranchToJunction), but only ever within the parent's
-  // own existing shape — never past it — and `wire`'s own endpoint is
-  // snapped to wherever it actually landed, in case that fell short of
-  // the full move.
-  //
-  // Skips any end startPinned/endPinned already marked as anchored —
-  // computeSegmentMove left it exactly where it was and grew a stub
-  // instead, whether that anchoring was a component pin or a junction
-  // `wire` itself is the SOURCE of, so there's nothing left to carry: a
-  // branchpoint `wire` owns never moves out from under the OTHER wires
-  // reading from it in the first place, same as dragging a segment can
-  // never reach into whatever's on the far side of a component. Nor does
-  // the remaining case apply to an end that isn't actually one of
-  // `wire`'s own from/to — an interior waypoint can't be the free end of
-  // a branch reading from someone else's junction, since a branch is
-  // always anchored at its own from or to.
+  // Does some cleaning up after computeSegmentMove's result has been committed to `wire`
+  // Cleans up any dead junctions that pruneDeadJunctions won't catch
+  // Calls attachBranchToJunction to move any junctions to go with their branches that have been moved
   function finalizeSegmentMove(wire, d, dx, dy, circuit) {
     const EPS = 1e-6;
     const same = (a,b) => Math.abs(a.x-b.x)<EPS && Math.abs(a.y-b.y)<EPS;
@@ -586,16 +409,6 @@ defineModule('engine-routing', ['engine-geometry'], (geometry) => {
     ];
     const moved = dx!==0 || dy!==0;
     for (const end of ends) {
-      // A knot that moved away from a junction this wire owns leaves that
-      // junction's registration behind at the old, now off-geometry
-      // position — orphaned rather than cleaned up, since
-      // pruneDeadJunctions only ever sweeps a junction still sitting
-      // somewhere on its source wire's own path. It could only have moved
-      // here because segmentMoveSnapshot already confirmed no branch
-      // reads from it (a live one would have pinned it — see there), so
-      // there's nothing left this registration is doing; drop it now
-      // rather than leaving a phantom entry for some later drag to trip
-      // over again.
       if (!end.pinned && moved) {
         const ownJ = [...circuit.junctions].find(j=>j.sourceWireId===wire.id && same(j, end.pos));
         if (ownJ) circuit.junctions.delete(ownJ);
