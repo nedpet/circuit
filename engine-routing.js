@@ -10,9 +10,8 @@ defineModule('engine-routing', ['engine-geometry'], (geometry) => {
   'use strict';
   const { isWireTerminal, terminalCoords, wireKnots, resolveWire, wireSegmentPoints, projectOrthogonalPoint } = geometry;
 
-  // Closest point on a wire's path to (x,y), and which segment (by index
-  // into its knot list) it falls on — used to decide where a new
-  // branch/waypoint should be inserted.
+  // Returns the closest point on a wire to (x,y), and which segment it falls on (by index into its knot list)
+  // Used to decide where a new branch/waypoint should be inserted
   function findNearestWirePoint(wire,x,y,circuit) {
     const knots = wireSegmentPoints(wire, circuit);
     let best = {d:Infinity, point:null, index:0};
@@ -26,13 +25,8 @@ defineModule('engine-routing', ['engine-geometry'], (geometry) => {
   }
 
   // Splits a wire at the point nearest (x,y) by inserting a waypoint there
-  // — unless that nearest point is already an existing knot (a prior
-  // waypoint, or one of the wire's own endpoints), in which case there's
-  // nothing to insert: multiple wires can already share one junction just
-  // fine (wireSourceValue matches by coordinate, not by count), so this
-  // only avoids piling up redundant, visually-identical duplicate waypoints
-  // when several branches start from the exact same spot — e.g. dragging a
-  // new branch off a waypoint that's already a junction.
+  // unless that nearest point is already an existing knot (a prior waypoint or an endpoint)
+  // Also registers the branchpoint as an explicit junction (unless, again, it already existed)
   function insertBranchPoint(wire, x, y, circuit) {
     const nearest = findNearestWirePoint(wire, x, y, circuit);
     if (!nearest.point) return null;
@@ -49,34 +43,14 @@ defineModule('engine-routing', ['engine-geometry'], (geometry) => {
       newPts.splice(idx, 0, {x: pt.x, y: pt.y});
       wire.points = newPts;
     }
-    // Register this as an explicit junction so wireSourceValue can find it
-    // without geometry scanning, and won't confuse visual crossings with
-    // real connections. Skipped if one's already registered right here
-    // (same reasoning as above — this point may already be a junction).
     const dup = [...circuit.junctions].some(j=>j.sourceWireId===wire.id && samePoint(j, pt));
     if (!dup) circuit.junctions.add({x: pt.x, y: pt.y, sourceWireId: wire.id});
     return pt;
   }
 
-  // A junction never goes away by itself as a direct user action anymore
-  // (see onWaypointContext in the widget, which now deletes a junction's
-  // whole host wire rather than singling out just the junction) — this
-  // only cleans up what's left registered after every branch reading from
-  // a junction is actually gone. Called after every wire removal (explicit
-  // right-click delete, a junction's host wire going with it, or a branch
-  // dragged back onto its own branchpoint — see finalizeEndpointRoute) to
-  // sweep up any junction that's now branchless.
-  //
-  // A now-branchless junction is only actually deleted, along with its
-  // waypoint, when it sits at a plain pass-through on its source wire's path
-  // — i.e. removing it wouldn't change the wire's shape at all, because its
-  // neighbors on either side are already collinear with it. A junction at a
-  // real elbow stays registered (and thus still not directly deletable)
-  // even with zero branches, since deleting *that* would reshape the source
-  // wire itself — this function only ever cleans up redundant bookkeeping,
-  // never the source wire's own geometry. Same reasoning for a junction that
-  // sits at the source wire's own endpoint rather than partway along it:
-  // there's no "middle" for it to be in the middle of, so it's left alone.
+  // Removes any junctions that have been made branchless (by the deletion of some wire)
+  // Can happen through a branch deletion, host wire deletion, or a branch being dragged into its own branchpoint 
+  // Only removes junctions that the wire passes through in a "straight" way
   function pruneDeadJunctions(circuit) {
     const EPS = 1e-6;
     const same = (a,b) => Math.abs(a.x-b.x)<EPS && Math.abs(a.y-b.y)<EPS;
@@ -98,23 +72,18 @@ defineModule('engine-routing', ['engine-geometry'], (geometry) => {
     }
   }
 
-  // Picks a single elbow corner for a new wire between two points that
-  // don't already share an axis, going vertical-then-horizontal or
-  // horizontal-then-vertical depending on firstDir. Points already sharing
-  // an axis need no corner at all.
+  // Returns a single elbow corner for a wire between two points that don't already share an axis
+  // Goes vertical-then-horizontal or horizontal-then-vertical depending on firstDir
   function routeManhattanPoints(from, to, firstDir) {
     if (from.x === to.x || from.y === to.y) return [];
     const corner = firstDir === 'v' ? {x:from.x, y:to.y} : {x:to.x, y:from.y};
     return [corner];
   }
 
-  // How far a straight, axis-aligned move from `a` toward `b` can travel
-  // while staying on top of `segs` (consecutive point pairs of some wire's
-  // resolved path). Returns the furthest point from `a` toward `b` that's
-  // still covered by the wire — `a` itself if the move leaves it right away,
-  // `b` if the whole move runs along it. Coverage carries through abutting
-  // collinear segments, so a wire that turns a corner and comes back onto
-  // the same line still reads as one continuous run.
+  // Returns the furthest point from `a` towards `b` that's still covered by a
+  // wire defined by `segs` (consecutive point pairs of some wire's resolved path)
+  // Returns `a` itself if the move leaves it right away, `b` if the whole move runs along it
+  // Used when branching to choose the best branchpoint
   function overlapRunEnd(a, b, segs) {
     const EPS = 1e-6;
     const horiz = Math.abs(a.y - b.y) < EPS;
@@ -145,55 +114,19 @@ defineModule('engine-routing', ['engine-geometry'], (geometry) => {
     return horiz ? {x:reach, y:a.y} : {x:a.x, y:reach};
   }
 
-  // Where a branch dragged off `wire` should actually start, and what's left
-  // of its route once the part that merely retraces `wire` is dropped.
-  //
-  // A branch drag often opens by running *along* the wire it came from —
-  // grab a horizontal wire, pull right then up, and that entire first leg
-  // lies on top of the wire, drawing a second copy of a connection that's
-  // already there. Rather than that, the junction slides forward to the
-  // corner where the route genuinely diverges off the wire, and only the
-  // part beyond that corner becomes the new wire.
-  //
-  // Returns {start, points}: the junction position, and the branch's
-  // waypoint list measured from it. Returns null when the route never leaves
-  // the wire at all — then the "branch" is pure duplicate, so callers should
-  // create nothing.
-  //
-  // `start` always lands exactly ON one of `wire`'s own resolved segments
-  // (that's the whole point of walking along it below), so one of its two
-  // coordinates is pinned to that segment's own line and the other is
-  // wherever along it the divergence happened to land — free-floating,
-  // continuous, and not necessarily grid-aligned, since it can come
-  // straight from an unsnapped mouse position (`from`, when the route
-  // diverges immediately with no retrace at all). When `snapToGrid` is on,
-  // that second coordinate gets rounded to SNAP_GRID — the same treatment
-  // the branch's OTHER end already gets, dropped on empty canvas or a pin,
-  // from the caller — while the pinned one is left alone, since rounding
-  // it too could nudge the junction off the wire it's meant to sit on.
-  //
-  // Rounding that coordinate can detach `start` from `points[0]` — the
-  // branch's own first waypoint — if the two happened to share it (which
-  // they do exactly when the route diverges immediately, perpendicular to
-  // the wire, with `points[0]` still carrying that same raw, unsnapped
-  // value straight from `from`). Detected by comparing against `start`'s
-  // OWN pre-snap value rather than assumed unconditionally, since a route
-  // that instead retraced partway along the wire before diverging shares
-  // a *different* coordinate with `points[0]` (the wire's own, already
-  // fixed one) — nudging that one to match would be wrong, not corrective.
+  // Creates a new branch, dragged off `wire`, returning {start, points}: 
+  // the junction position and the branch's waypoint list measured from it
+  // Returns null if the route never leaves the wire
+  // Creates the junction at the point the branch actually leaves the wire
   function branchRouteFrom(wire, from, to, firstDir, circuit, snapToGrid) {
     const EPS = 1e-6;
     const route = [from, ...routeManhattanPoints(from, to, firstDir), to];
     const a = terminalCoords(wire.from, circuit), b = terminalCoords(wire.to, circuit);
-    // The *resolved* path, so we compare against the wire as actually drawn
-    // (elbows included) rather than its raw knot list.
+    // The *resolved* path, so the wire as actually drawn is used (elbows included) rather than its raw knot list
     const path = resolveWire(a.x, a.y, b.x, b.y, wire.points || []);
     const segs = [];
     for (let i=1;i<path.length;i++) segs.push([path[i-1], path[i]]);
 
-    // Follow the route leg by leg for as long as it stays on the wire. The
-    // first leg to get cut short is the one carrying the branch away, and
-    // where it got cut short is the corner the junction belongs at.
     let start = from, leg = 1;
     for (; leg < route.length; leg++) {
       start = overlapRunEnd(start, route[leg], segs);
@@ -203,11 +136,6 @@ defineModule('engine-routing', ['engine-geometry'], (geometry) => {
     const points = route.slice(leg, route.length-1);
     if (!snapToGrid) return { start, points };
 
-    // Which of wire's OWN segments start sits on — deliberately re-derived
-    // from wire's geometry rather than inferred from the route (the
-    // route's own legs run in whatever direction the mouse moved, which
-    // isn't necessarily the same axis as the wire underneath them at that
-    // exact point).
     let alongAxis = null;
     for (const [s,t] of segs) {
       const segHoriz = Math.abs(s.y-t.y) < EPS;
@@ -226,35 +154,24 @@ defineModule('engine-routing', ['engine-geometry'], (geometry) => {
     return { start: Object.assign({}, start, {[alongAxis]: snapped}), points };
   }
 
-  // Dragging a wire's endpoint should never disturb the rest of the wire —
-  // only the one segment at the dragged end. `d` (built once at drag-start
-  // by the widget's onWireEndpointMouseDown, before anything is touched)
-  // captures that original shape: `neighbor` is the fixed point just
-  // before this endpoint (the nearest existing waypoint, or the wire's
-  // other end if it has none), `axis` is which way ('h'/'v') the segment
-  // leading into this endpoint already ran, and `basePoints` is every
-  // other point on the wire, left completely alone. Moving `newPos` along
-  // that same axis just slides the endpoint — extend/shorten, no new
-  // point. Moving it off that axis appends exactly one corner point
-  // beyond `neighbor` (new segment), and nothing before `neighbor` is
-  // ever touched either way.
+  // Computes the new path of a wire once its endpoint has been dragged
+  // Dragging a wire's endpoint only ever changes the one segment at the dragged end
+  // `d` captures the wire's original shape: 
+  //  - `neighbor` is the fixed point just before this endpoint (the nearest existing waypoint or the other endpoint if no waypoints exist)
+  //  - `axis` is which way ('h'/'v') the segment leading into this endpoint already ran
+  //  - `basePoints` is every other point on the wire, left completely alone
+  // Moving `newPos` along that same axis just slides the endpoint, extending/shortening the segment
+  // Moving it off that axis appends exactly one corner point beyond `neighbor` (new segment)
+  // Returns the wire's new waypoints, a new corner location (if needed), and whether the wire collapsed 
   function computeEndpointRoute(d, newPos) {
     const EPS = 1e-6;
     const aligned = d.axis==='h' ? Math.abs(newPos.y-d.neighbor.y)<EPS : Math.abs(newPos.x-d.neighbor.x)<EPS;
     if (aligned) {
-      // Dragged all the way back onto the fixed point behind it (both
-      // coordinates, not just the on-axis one) — the final segment has
-      // shrunk to nothing. If that point was one of the wire's own
-      // waypoints, it's now a redundant duplicate of the endpoint sitting
-      // right on top of it, so it's dropped and that point becomes the
-      // endpoint outright — case (b): if it was already a junction, the
-      // junction stays put, now doubling as the endpoint. If there was no
-      // waypoint there at all — the fixed point was the wire's *other*
-      // end — the whole wire has collapsed to zero length; flagged via
-      // collapsedToZero rather than acted on here, since a live preview
-      // frame shouldn't delete anything — only finalizeEndpointRoute, at
-      // drop, does that (case (c) when the fixed point is a branch's own
-      // branchpoint junction).
+      // If dragged all the way back onto the fixed point behind it, the final segment has shrunk to nothing
+      // If that point was: 
+      //  - one of the wire's waypoints, it's dropped and that point becomes the endpoint 
+      //  - already a junction, the junction stays put, now doubling as the endpoint
+      //  - not a waypoint, then it was the other endpoint, marked by collapsedToZero
       const collapsed = Math.abs(newPos.x-d.neighbor.x)<EPS && Math.abs(newPos.y-d.neighbor.y)<EPS;
       if (collapsed) {
         if (d.basePoints.length===0) return { points: [], corner: null, collapsedToZero: true };
@@ -268,6 +185,7 @@ defineModule('engine-routing', ['engine-geometry'], (geometry) => {
     return { points, corner };
   }
 
+  // Changes `wire`'s path after its endpoint has been dragged, based on the result of computeEndpointRoute
   // Commits computeEndpointRoute's result to `wire` and, only if it actually
   // produced a new corner, registers a junction there (skipping if an
   // equivalent one is already registered) so that corner is immediately
@@ -565,13 +483,9 @@ defineModule('engine-routing', ['engine-geometry'], (geometry) => {
     return mk(a);
   }
 
-  // Drops the waypoint at `pos` on `wire` if it's safe to — collinear
-  // with its own neighbors (not a real corner shaping the wire) and
-  // nothing else still needs it there (a junction, or another wire's own
-  // endpoint). Run after a junction that used to sit at `pos` has already
-  // moved elsewhere, to clean up the now-purposeless point it leaves
-  // behind — pruneDeadJunctions doesn't catch this on its own, since by
-  // then there's no junction left registered at `pos` for it to notice.
+  // Drops the waypoint at `pos` on `wire` if it's collinear with its own neighbors 
+  // and unneeded by anything (a junction, or another wire's own endpoint)
+  // Run after a junction that used to sit at `pos` has already moved elsewhere
   function removeRedundantWaypoint(wire, pos, circuit) {
     const EPS = 1e-6;
     const same = (a,b) => Math.abs(a.x-b.x)<EPS && Math.abs(a.y-b.y)<EPS;
@@ -698,17 +612,8 @@ defineModule('engine-routing', ['engine-geometry'], (geometry) => {
   }
 
   // Deletes `wire` and, recursively, every OTHER wire branching off of it
-  // — directly, or via a chain of further branches off THOSE branches —
-  // rather than leaving them dangling in place, still drawn but reading
-  // from a junction that no longer exists. Whatever `wire` fed is gone
-  // too, all the way down the branch tree, same as it would be if there
-  // were nothing left of the parent for any of them to attach to.
-  //
-  // Collects the full set to remove *before* removing anything — walking
-  // circuit.junctions/circuit.wires as they stood at the start, breadth
-  // first — so an earlier removeWire call's own bookkeeping (it runs
-  // pruneDeadJunctions every time) never mutates the very junctions a
-  // later step in this same cascade still needs to check.
+  // Collects the full set to remove before removing anything to prevent 
+  // removing junctions still needed to delete other branches 
   function removeWireCascading(wireId, circuit) {
     const EPS = 1e-6;
     const same = (a,b) => Math.abs(a.x-b.x)<EPS && Math.abs(a.y-b.y)<EPS;
@@ -729,27 +634,9 @@ defineModule('engine-routing', ['engine-geometry'], (geometry) => {
     for (const id of toDelete) circuit.removeWire(id);
   }
 
-  // Deletes segment `segIndex` of `wire` and every segment after it —
-  // toward `wire.to` — leaving everything before it (toward `wire.from`)
-  // exactly as it was. The knot the deleted run starts from, knots[segIndex],
-  // becomes the wire's new free `to` endpoint; whatever `wire.to` used to be
-  // (a component pin or a further waypoint chain) goes with the rest.
-  //
-  // segIndex 0 has nothing "before" it to leave behind — deleting the
-  // first segment onward is deleting the whole wire — so that case just
-  // defers to removeWireCascading instead of producing a zero-length stub.
-  //
-  // Mirrors removeWire's own handling of the junctions it owns: any
-  // junction `wire` is the source of that sits strictly past the cut
-  // (knots[segIndex+1] onward) is deregistered right along with the
-  // geometry that carried it, exactly as removeWire drops every junction
-  // it owns when the whole wire goes. A junction sitting exactly at the
-  // cut (knots[segIndex] itself) survives — it's still on the wire, just
-  // at the tip instead of partway along it now, the same case
-  // pruneDeadJunctions already leaves alone for any other wire's own
-  // endpoint. Whatever was reading from a dropped junction is deleted
-  // right along with it — via removeWireCascading, so a branch of THAT
-  // branch goes too — rather than left behind disconnected.
+  // Deletes segment `segIndex` of `wire` and every segment after it 
+  // The knot the deleted run starts from, knots[segIndex], becomes the wire's new free `to` endpoint
+  // segIndex 0 has nothing "before" it to leave behind, so deleting that segment deletes the whole wire
   function truncateWireAtSegment(wire, segIndex, circuit) {
     if (segIndex === 0) { removeWireCascading(wire.id, circuit); return; }
     const EPS = 1e-6;

@@ -665,7 +665,7 @@ const {
   projectOrthogonalPoint, terminalCoords, wireKnots, resolveWire, wirePath,
   sampleWire, splitWirePathAtSegment, splitWirePath, wireKnotDistances, distToSeg, wireSegmentPoints, findNearestWirePoint,
   insertBranchPoint, routeManhattanPoints, pinAbs, wireDelayForLength,
-  branchRouteFrom, syncWireEndCorners,
+  branchRouteFrom, syncEndCorner,
   segmentMoveSnapshot, computeSegmentMove, clampSegmentMoveDelta, finalizeSegmentMove,
   truncateWireAtSegment, removeWireCascading,
   computeEndpointRoute, finalizeEndpointRoute,
@@ -785,7 +785,40 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
         if (Math.hypot(e.clientX-d.startSX,e.clientY-d.startSY)>4) {
           d.moved=true;
           const c=circuit.components.get(d.id);
-          if(c){c.x=snap(w.x-d.ox,snapGridRef.current);c.y=snap(w.y-d.oy,snapGridRef.current);onChangedRef.current?.();}
+          if(c){
+            c.x=snap(w.x-d.ox,snapGridRef.current);c.y=snap(w.y-d.oy,snapGridRef.current);
+            // Live preview of the same routing drop will commit — points
+            // only, junction cleanup deferred to drop (see onUp), same
+            // "don't thrash the registry every frame" reasoning as
+            // endpointDragRef/segDragRef's own previews above. Reset each
+            // wire to its pre-drag snapshot before re-syncing, every frame —
+            // otherwise a corner THIS preview added last frame would look
+            // just as "established" as a real one to syncEndCorner, and
+            // dragging on would keep piling on a fresh corner per frame
+            // instead of recomputing one cleanly against the drag's actual
+            // current position.
+            //
+            // Only the side(s) actually touching the dragged component get
+            // synced — never syncWireEndCorners' own "try both ends"
+            // (that's for a caller that doesn't know which end changed).
+            // The OTHER end's own terminalCoords is a live read of whatever
+            // this SAME wire's opposite pin currently sits at — if that
+            // pin's own component wasn't the one just dragged, its position
+            // didn't actually change, but calling syncEndCorner on it here
+            // would still compare it against wire.points as they stand
+            // RIGHT NOW, mid-transaction, which can look like a fresh
+            // misalignment purely from the OTHER side's own drag, and add a
+            // spurious corner that has nothing to do with this pin at all.
+            for (const wire of circuit.wires.values()) {
+              const snapshot = d.wireSnapshots.get(wire.id);
+              if (!snapshot) continue;
+              wire.points = snapshot.map(p=>({x:p.x,y:p.y}));
+              const anchors = d.oldAnchors.get(wire.id);
+              if (wire.from.compId===d.id) syncEndCorner(wire, 'from', circuit, false, anchors.from);
+              if (wire.to.compId===d.id)   syncEndCorner(wire, 'to',   circuit, false, anchors.to);
+            }
+            onChangedRef.current?.();
+          }
         }
       }
       if (endpointDragRef.current) {
@@ -923,16 +956,21 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
           }
           if (comp?.kind==='CLOCK')  { circuit.toggleClock(comp.id);  onChangedRef.current?.(); }
         } else {
-          // The component actually moved — any wire attached to one of
-          // its pins may need its near-pin corner reconciled: added,
-          // removed, or shifted to a new position if it was already a
-          // corner but not this one anymore (see syncWireEndCorners,
-          // which loops both ends to convergence rather than fixing each
-          // once — needed since e.g. an OUTPUT, only ever a wire's `to`,
-          // is fixed second, and a single pass never rechecks whatever
-          // `from` resolved to earlier in that same pass).
+          // The component actually moved — any wire attached to one of its
+          // pins may need its near-pin corner reconciled: added, removed,
+          // or shifted. Final commit of what the live preview (onMove,
+          // above) already computed every frame — same "only the side(s)
+          // actually touching the dragged component" scoping, and for the
+          // same reason (the other side's own terminalCoords reads THIS
+          // wire's own opposite pin live, which has nothing to do with
+          // whether this pin needs anything). The one thing this pass adds
+          // over the preview is committing any junction cleanup the
+          // preview deferred (commitJunctions=true, the default).
           for (const w of circuit.wires.values()) {
-            if (w.from.compId===d.id || w.to.compId===d.id) syncWireEndCorners(w, circuit);
+            const anchors = d.oldAnchors.get(w.id);
+            if (!anchors) continue;
+            if (w.from.compId===d.id) syncEndCorner(w, 'from', circuit, true, anchors.from);
+            if (w.to.compId===d.id)   syncEndCorner(w, 'to',   circuit, true, anchors.to);
           }
           onChangedRef.current?.();
         }
@@ -999,7 +1037,31 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
     const shiftAttr = e.target && e.target.dataset ? e.target.dataset.shift : undefined;
     const bitIndex = bitAttr!==undefined ? Number(bitAttr) : null;
     const digitShift = shiftAttr!==undefined ? Number(shiftAttr) : null;
-    compDragRef.current={id:comp.id,ox:w.x-comp.x,oy:w.y-comp.y,startSX:e.clientX,startSY:e.clientY,moved:false,bitIndex,digitShift};
+    // Snapshot every attached wire's pre-drag points so the live preview
+    // can re-sync from this frozen baseline every frame, same reasoning as
+    // segDragRef's own snapshot (see computeSegmentMove's comment): syncing
+    // repeatedly against the wire's own already-live-updated points would
+    // let each frame's newly-added corner look "established" to the next
+    // frame's call (nothing here can tell it apart from a real one), so a
+    // single continuous drag would keep appending a fresh corner every
+    // frame instead of recomputing one cleanly.
+    const wireSnapshots = new Map();
+    // Also the dragged side's pre-drag terminal position, per wire — needed
+    // by syncEndCorner's zero-waypoint case (a wire that happened to need
+    // no bend at all still has one real, established segment; recovering
+    // which axis it was on isn't possible from post-drag state alone, so
+    // it has to be captured here, before comp.x/comp.y change at all).
+    const oldAnchors = new Map();
+    for (const wire of circuit.wires.values()) {
+      if (wire.from.compId===comp.id || wire.to.compId===comp.id) {
+        wireSnapshots.set(wire.id, (wire.points||[]).map(p=>({x:p.x,y:p.y})));
+        oldAnchors.set(wire.id, {
+          from: wire.from.compId===comp.id ? terminalCoords(wire.from,circuit) : undefined,
+          to:   wire.to.compId===comp.id   ? terminalCoords(wire.to,circuit)   : undefined,
+        });
+      }
+    }
+    compDragRef.current={id:comp.id,ox:w.x-comp.x,oy:w.y-comp.y,startSX:e.clientX,startSY:e.clientY,moved:false,bitIndex,digitShift,wireSnapshots,oldAnchors};
     onSelect(comp.id);
   };
   const onCompContext=(e,comp)=>{e.preventDefault();circuit.removeComponent(comp.id);onComponentChanged?.();};
