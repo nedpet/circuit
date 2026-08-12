@@ -76,22 +76,8 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
       if (component.ioId != ''){
         ioComponents.delete(component.ioId);
       }
-      // A wire this component DROVE (its output pin is the wire's `from`)
-      // has nothing left feeding it, so it goes too — and, same as
-      // right-clicking it or deleting its first segment would,
-      // recursively takes every branch reading from it (and every branch
-      // of THOSE branches) along, rather than leaving them dangling on a
-      // junction whose source just vanished. See removeWireCascading.
-      //
-      // A wire this component only READ from (its input pin is the
-      // wire's `to`) is a completely different case: the wire itself,
-      // and whatever's feeding it, is still perfectly valid — only this
-      // one end has nowhere left to plug into. So it's detached rather
-      // than deleted, at the exact spot the pin used to be (captured via
-      // `component`, still held here even though it's already gone from
-      // `components`), leaving it hanging exactly where the component
-      // used to sit instead of taking it, and anything behind it, out
-      // over a change that's entirely on the other end.
+      // Wires coming out of this component are deleted too
+      // Wires feeding into this component are just detached
       for (const [wid,w] of [...wires]) {
         if (w.from.compId===id) {
           removeWireCascading(wid, {components, wires, junctions, removeWire});
@@ -121,9 +107,7 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
     }
 
     // Deletes a wire and every junction branching off of it, then sweeps up
-    // any OTHER junction this removal just left branchless (e.g. deleting
-    // the last branch off some other wire's junction) — see
-    // pruneDeadJunctions.
+    // any OTHER junction this removal just left branchless
     function removeWire(id) {
       wires.delete(id);
       for (const j of junctions) {
@@ -163,10 +147,8 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
       return srcWidth !== pinBitWidthAt(dst, 'in', wire.to.pin);
     }
 
-    // The value a wire is currently driven by, from its source — either a
-    // component's output pin directly, or (for a wire branching off another
-    // wire mid-route) whatever value has reached that branch point so far,
-    // accounting for the source wire's own in-flight propagation delay.
+    // Returns the value (0 or 1) at the source of the wire, either a pin or a junction
+    // For branches, does not account for the parent wire, just its branchpoint
     function wireSourceValue(wire, circuit, now, instant) {
       if (isWireTerminal(wire.from)) {
         const src = circuit.components.get(wire.from.compId);
@@ -206,12 +188,9 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
               }
 
               const t = totalLen > 0 ? distToJunction / totalLen : 0;
-              // The signal reaches the junction at pendingStart + t * delayMs.
-              // In component mode there's no concept of "partway along the
-              // wire" — the junction sees the new value the instant the
-              // source commits, and the branch pays its own flat delayMs
-              // from there (so a source → branch hop still totals delayMs,
-              // same as a direct wire, instead of double-paying).
+              // In length mode, the signal reaches the junction at pendingStart + t * delayMs
+              // In component mode, the junction sees the new value the instant the
+              // source commits, and the branch pays its own flat delayMs from there 
               let arrivalTime;
               if (state.widgetState.propagationMode === 'component') {
                 arrivalTime = src.pendingStart || 0;
@@ -241,14 +220,12 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
       return 0;
     }
 
-    // Advances the simulation by one tick: ticks any running clocks,
-    // recomputes every component's outputs (holding each change for the
-    // component's own configured gate delay before it takes effect),
-    // propagates values across every wire (holding each for its own travel
-    // delay), and finally rebuilds every component's inputs from whatever
-    // wires now drive them. `instant` skips all delays — used for settling
-    // custom-gate sub-circuits and other places that need an immediate,
-    // steady-state result rather than a delay-accurate animation frame.
+
+    // Advances the simulation by one tick, doing the following:
+    //  - recomputes every component's inputs and outputs
+    //  - ticks clocks
+    //  - propagates values across wires
+    // `instant` skips all delays, used for subcircuits or equation generation
     function step(now, delayMs, instant) {
       // Tick clocks
       for (const c of components.values()) {
@@ -259,9 +236,8 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
           }
         }
       }
-      // Compute outputs, holding each change for the gate's own `delay` (ms)
-      // before it becomes visible on the output pin — mirrors how wires hold
-      // pendingValue for their travel time below.
+      // Compute outputs and hold each change for the gate's own `delay` (ms)
+      // before it becomes visible on the output pin
       for (const c of components.values()) {
         const def = GATE_DEFS[c.kind];
         const outs = def.compute(c.inputVals, c.state, c.bitWidth||1, c)||[];
@@ -293,8 +269,7 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
       for (const w of wires.values()) {
         const circuitRef = {components, wires, ioComponents, junctions};
         // A width mismatch between the pins this wire connects means the
-        // signal shouldn't cross it at all — held at 0 instead of the
-        // driven value, with the mismatch itself flagged for rendering.
+        // signal shouldn't cross it at all, setting it to 0
         w.bitMismatch = wireBitMismatch(w, circuitRef);
         const srcVal = w.bitMismatch ? 0 : wireSourceValue(w, circuitRef, now, instant);
         if (srcVal!==w.pendingValue && srcVal!==w.value) { w.pendingValue=srcVal; w.pendingStart=now; }
@@ -311,9 +286,6 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
           if(w.value!==w.pendingValue){w.value=w.pendingValue;w.lastChange=now;}
           w.pendingValue=undefined; w.pendingStart=undefined;
         }
-        // Do not assign directly to component inputs here — inputs are
-        // recomputed after propagation to avoid transient partial updates
-        // that can cause a one-frame flicker when wires are reattached.
       }
       // Reset inputs from wires
       const acc = new Map();
@@ -323,7 +295,6 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
         const a = acc.get(w.to.compId);
         if (a) {
           // If multiple wires drive the same input, combine drivers with OR
-          // so a high on any wire keeps the input high instead of last-writer-wins.
           a[w.to.pin] = (a[w.to.pin] || 0) || (w.value||0);
         }
       }
@@ -375,7 +346,7 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
       nextIoId=Math.max(data.nextIoId||1,nextIoId);
     }
 
-    // Return for createCircuit(). Returns all properties and methods the app may need to access after build
+    // Return for createCircuit(): returns all properties and methods the app may need to access after build
     return {
       components, wires, ioComponents, junctions,
       addComponent, removeComponent, addWire, removeWire, step, serialize, load,
@@ -401,7 +372,7 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
         c.state.value = maskVal((cleared | (((nibble+1)&0xF)<<shift))>>>0, width);
       },
       // Changes a component's bitWidth (clamped 1-32)
-      // Remasks any value already stored on it so it doesn't silently keep bits beyond the new, narrower width.
+      // Remasks any value already stored on it so it doesn't silently keep bits beyond the new, narrower width
       setBitWidth(id,w){
         const c=components.get(id); if(!c||!BIT_WIDTH_KINDS.has(c.kind)) return;
         const width=Math.max(1,Math.min(32,Math.round(w)||1));
@@ -436,11 +407,8 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
         const oldN=c.muxInputs||2;
         if (newN===oldN) return;
         c.muxInputs=newN;
-        // Select always sits at index === the input count, so it moves as
-        // arity changes — a wire feeding it should follow to the new index
-        // rather than silently become a data-line wire. Data pins beyond the
-        // new count no longer exist at all, so their wires are dropped the
-        // same way removeComponent drops a deleted component's wires.
+        // Wires connected to the select pin need to have their index updated
+        // Wires connected to now deleted inputs are also deleted
         for (const [wid,w] of wires) {
           if (w.to.compId!==id || typeof w.to.pin!=='number') continue;
           if (w.to.pin===oldN) w.to={...w.to, pin:newN};
