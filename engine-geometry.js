@@ -132,74 +132,50 @@ defineModule('engine-geometry', ['state'], (state) => {
   //  - it needs a corner it didn't have before (the pin moved off the axis it used to share with the next knot)
   //  - it needs to shift (still a corner, just not the same one)
   //  - it doesn't need one anymore (the pin moved back onto that axis)
-  // Only changes the waypoint nearest to `side`, computed at the exact position 
-  // resolveWire's own implicit-elbow convention would already draw
-  //
-  // Left untouched if anything else still needs that waypoint (a junction, or another wire's own endpoint)
+  // Only ever changes the waypoint nearest to `side`
+  // `oldAnchor` is the previous location of the component that was just moved
+  // `commitJunctions` is only true when the component is dropped to prevent excessive "junction-thrashing" during live preview
+  // Waypoints left untouched if anything else still needs that waypoint (a junction, or another wire's own endpoint)
   // Instead creates new points off of that waypoint to help connect to where the component was dragged
   function syncEndCorner(wire, side, circuit, commitJunctions=true, oldAnchor=null) {
     const EPS = 1e-6;
     const same = (a,b) => Math.abs(a.x-b.x)<EPS && Math.abs(a.y-b.y)<EPS;
     const otherSide = side==='from' ? 'to' : 'from';
-    const anchor = terminalCoords(wire[side], circuit);
+    const anchor = terminalCoords(wire[side], circuit); // moved pin's current location
     const pts = wire.points || [];
 
-    if (pts.length===0) {
+    if (pts.length===0) { // no waypoints, i.e. wire was a straight line
       const other = terminalCoords(wire[otherSide], circuit);
-      if (Math.abs(anchor.x-other.x)<EPS || Math.abs(anchor.y-other.y)<EPS) return;
-      // Zero points doesn't mean nothing's established — a wire that
-      // happened to need no bend at all (other and the pin's PRE-drag
-      // position were already axis-aligned) still has one real segment,
-      // same as any other. Continuing THAT segment's own axis out of
-      // `other` — not a fixed template — needs knowing which axis it
-      // actually was, which isn't recoverable from current state alone (no
-      // second segment to invert against, unlike the nearPt case below);
-      // the caller has to have captured the pin's pre-drag position before
-      // moving anything. Falls back to the old fixed-template guess only
-      // when that wasn't provided.
+      if (Math.abs(anchor.x-other.x)<EPS || Math.abs(anchor.y-other.y)<EPS) return; // same axis, no corners needed
       if (oldAnchor) {
-        const intoVertical = Math.abs(other.x - oldAnchor.x) < EPS;
+        const intoVertical = Math.abs(other.x - oldAnchor.x) < EPS; // wire used to be a vertical line
         wire.points = [intoVertical
           ? {x:other.x, y:anchor.y}   // established segment was vertical — continue that column, then turn to reach anchor
           : {x:anchor.x, y:other.y}]; // established segment was horizontal — continue that row, then turn to reach anchor
         return;
       }
-      wire.points = [side==='from' ? {x:other.x, y:anchor.y} : {x:anchor.x, y:other.y}];
+      wire.points = [side==='from' ? {x:other.x, y:anchor.y} : {x:anchor.x, y:other.y}]; // fallback, not guaranteed to work
       return;
     }
 
     const nearIdx = side==='from' ? 0 : pts.length-1;
-    const nearPt = pts[nearIdx];
-    const farNeighbor = pts.length>=2
-      ? (side==='from' ? pts[1] : pts[pts.length-2])
-      : terminalCoords(wire[otherSide], circuit);
+    const nearPt = pts[nearIdx]; // the closest waypoint to the original endpoint
+    const farNeighbor = pts.length>=2 
+      ? (side==='from' ? pts[1] : pts[pts.length-2]) // the next waypoint in line
+      : terminalCoords(wire[otherSide], circuit);    // the other endpoint
 
-    // Once nearPt exists, it's never silently replaced or relocated —
-    // whether it's a registered junction, a live branch's own anchor, or
-    // just an ordinary corner syncEndCorner itself derived on an earlier
-    // drag. A junction/branch only changes whether it can be DROPPED below;
-    // preservation itself is unconditional, since nothing here can tell a
-    // "disposable" corner apart from a deliberately-drawn one, and treating
-    // any existing point as disposable is exactly what silently reshapes a
-    // wire out from under whoever placed it.
+    // is nearPt needed by some other wire, i.e. is it some endpoint already?
     const hasLiveBranch = [...circuit.wires.values()].some(w=>w.id!==wire.id &&
       ((!isWireTerminal(w.from) && same(terminalCoords(w.from,circuit),nearPt)) ||
        (!isWireTerminal(w.to)   && same(terminalCoords(w.to,circuit),  nearPt))));
 
     if (!hasLiveBranch) {
-      // Fully redundant now (collinear with both its own neighbor and the
-      // pin's new position, so removing it wouldn't reshape anything) — the
-      // pin moved back onto an axis nearPt no longer needs to enforce.
+      // Is nearPt redundant, i.e. is it collinear with the wire passing through it?
       const redundant =
         (Math.abs(nearPt.x-farNeighbor.x)<EPS && Math.abs(nearPt.x-anchor.x)<EPS) ||
         (Math.abs(nearPt.y-farNeighbor.y)<EPS && Math.abs(nearPt.y-anchor.y)<EPS);
       if (redundant) {
-        wire.points = pts.filter((_,i)=>i!==nearIdx);
-        // Skipped during a live drag preview (commitJunctions=false), same
-        // reasoning as endpointDragRef/segDragRef's own live previews: don't
-        // thrash circuit.junctions every mousemove frame. The wire's shape
-        // still updates live either way — only this cleanup waits for the
-        // real, drop-time call to commit.
+        wire.points = pts.filter((_,i)=>i!==nearIdx); // removes nearPt since it won't change the shape of the wire
         if (commitJunctions) {
           const ownJ = [...circuit.junctions].find(j=>j.sourceWireId===wire.id && same(j,nearPt));
           if (ownJ) circuit.junctions.delete(ownJ); // orphaned bookkeeping — pruneDeadJunctions can't find it once it's off the wire's own path
@@ -208,17 +184,8 @@ defineModule('engine-geometry', ['state'], (state) => {
       }
     }
 
-    if (Math.abs(anchor.x-nearPt.x)<EPS || Math.abs(anchor.y-nearPt.y)<EPS) return; // pin dragged along the axis nearPt's own segment ran on — pure extend/shorten, nothing to add
-    // Pin dragged off that axis — one new corner is needed, continuing
-    // nearPt's own segment along the SAME axis it already had (never the
-    // fixed template farNeighbor's own axis would imply): in a valid
-    // orthogonal path consecutive bends never share an axis, so nearPt's
-    // outgoing run toward the pin is always the axis farNeighbor->nearPt
-    // DIDN'T take. Extending that run to meet the pin's new position lands
-    // the new corner exactly on the pin's OLD position when the drag was
-    // purely orthogonal, or partway there on a diagonal drag — matching
-    // extend-then-branch either way without ever needing to know where the
-    // pin actually used to be.
+    if (Math.abs(anchor.x-nearPt.x)<EPS || Math.abs(anchor.y-nearPt.y)<EPS) return; // pin dragged along the axis nearPt's own segment ran on: pure extend/shorten, nothing to add
+    // pin dragged off that axis, thus the segment is extended/shortened then branches
     const intoVertical = Math.abs(farNeighbor.x - nearPt.x) < EPS;
     const newCorner = intoVertical
       ? {x:anchor.x, y:nearPt.y}   // nearPt's own outgoing run was horizontal

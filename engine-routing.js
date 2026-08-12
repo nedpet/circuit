@@ -151,6 +151,10 @@ defineModule('engine-routing', ['engine-geometry'], (geometry) => {
     if (points.length && Math.abs(points[0][alongAxis]-original) < EPS) {
       points[0] = Object.assign({}, points[0], {[alongAxis]: snapped});
     }
+    // Removes the accidental corner created when snapping in a straight branch
+    if (points.length && Math.abs(points[0].x-to.x)<EPS && Math.abs(points[0].y-to.y)<EPS) {
+      points.shift();
+    }
     return { start: Object.assign({}, start, {[alongAxis]: snapped}), points };
   }
 
