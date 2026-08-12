@@ -402,16 +402,16 @@ defineModule('gates', ['engine'], (engine) => {
     },
   };
 
-  VIS.SEVEN = { w:W, h:H*1.5, inputs:[{x:W*0.2,y:0,dir:'up'}, {x:W*0.4,y:0,dir:'up'}, {x:W*0.6,y:0,dir:'up'}, {x:W*0.8,y:0,dir:'up'}, {x:W*0.2,y:H*1.5,dir:'down'}, {x:W*0.4,y:H*1.5,dir:'down'}, {x:W*0.6,y:H*1.5,dir:'down'}], outputs:[],
+  VIS.SEVEN = { w:W*1.25, h:H*1.75, inputs:[{x:W*0.25,y:0,dir:'up'}, {x:W*0.5,y:0,dir:'up'}, {x:W*0.75,y:0,dir:'up'}, {x:W,y:0,dir:'up'}, {x:W*0.25,y:H*1.75,dir:'down'}, {x:W*0.5,y:H*1.75,dir:'down'}, {x:W*0.75,y:H*1.75,dir:'down'}], outputs:[],
     body:(f,comp)=><g>
-        <rect x="6" y="10" width="68" height="100" rx="7" fill="#f3f3f1" stroke="var(--ink)" strokeWidth="2"/>
-        <rect x="22" y="16" width="36" height="8" fill={comp.inputVals[2]?'#ff3333':'#aeaeae'}/>
-        <rect x="22" y="56" width="36" height="8" fill={comp.inputVals[0]?'#ff3333':'#aeaeae'}/>
-        <rect x="22" y="96" width="36" height="8" fill={comp.inputVals[5]?'#ff3333':'#aeaeae'}/>
-        <rect x="12" y="22" width="8" height="36" fill={comp.inputVals[1]?'#ff3333':'#aeaeae'}/>
-        <rect x="12" y="62" width="8" height="36" fill={comp.inputVals[4]?'#ff3333':'#aeaeae'}/>
-        <rect x="60" y="22" width="8" height="36" fill={comp.inputVals[3]?'#ff3333':'#aeaeae'}/>
-        <rect x="60" y="62" width="8" height="36" fill={comp.inputVals[6]?'#ff3333':'#aeaeae'}/>
+        <rect x="10" y="10" width="80" height="120" rx="7" fill="#f3f3f1" stroke="var(--ink)" strokeWidth="2"/>
+        <rect x="27" y="16" width="46" height="8" fill={comp.inputVals[2]?'#ff3333':'#aeaeae'}/>
+        <rect x="27" y="66" width="46" height="8" fill={comp.inputVals[0]?'#ff3333':'#aeaeae'}/>
+        <rect x="27" y="116" width="46" height="8" fill={comp.inputVals[5]?'#ff3333':'#aeaeae'}/>
+        <rect x="16" y="22" width="8" height="46" fill={comp.inputVals[1]?'#ff3333':'#aeaeae'}/>
+        <rect x="16" y="72" width="8" height="46" fill={comp.inputVals[4]?'#ff3333':'#aeaeae'}/>
+        <rect x="76" y="22" width="8" height="46" fill={comp.inputVals[3]?'#ff3333':'#aeaeae'}/>
+        <rect x="76" y="72" width="8" height="46" fill={comp.inputVals[6]?'#ff3333':'#aeaeae'}/>
       </g>
   };
 
