@@ -9,8 +9,37 @@
 defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-routing'], (state, core, geometry, routing) => {
   'use strict';
   const { GATE_DEFS, BIT_WIDTH_KINDS, maskVal, pinBitWidthAt, compInputCount } = core;
-  const { isWireTerminal, wireSegmentPoints, wireDelayForLength, pinAbs } = geometry;
+  const { isWireTerminal, wireSegmentPoints, wireDelayForLength, pinAbs, bitsRowWidth, constGeometry } = geometry;
   const { removeWireCascading, pruneDeadJunctions } = routing;
+
+  // Width (in local px) of an INPUT/OUTPUT/CONST box at a given bitWidth —
+  // mirrors gates.js's inputVis/outputVis/constVis sizing exactly (including
+  // their 1-bit cutoff to a fixed pill/circle shape instead of a bit-cell
+  // grid), so setBitWidth's anchor-compensation below shifts x by precisely
+  // however much the box is about to grow or shrink. See setBitWidth.
+  function ioBoxWidth(kind, bw, mode) {
+    const n = Math.max(1, Math.min(32, Math.round(bw)||1));
+    if (kind==='CONST') return constGeometry(n, mode==='hex'?'hex':'bin').w;
+    if (n<=1) return kind==='INPUT' ? 60 : 40; // VIS.INPUT.w / VIS.OUTPUT.w
+    const cellCount = mode==='hex' ? Math.ceil(n/4) : n;
+    return bitsRowWidth(cellCount);
+  }
+  // Shifts an INPUT/OUTPUT/CONST's x by however much its box is about to
+  // grow/shrink, but only on the facing where that resize would otherwise
+  // drag its pin along with it — see the note in setBitWidth. Called with
+  // the bitWidth/mode the box is about to have; c itself still holds the
+  // pre-change values when this runs, so the "old" width comes straight off
+  // c. Shared by setBitWidth and setDisplayMode — a bin<->hex toggle resizes
+  // the box exactly the same way a bitWidth change does.
+  function compensateIOAnchor(c, newBitWidth, newMode) {
+    const pinOnGrowingEdge = (c.kind==='OUTPUT')
+      ? c.facing==='left'
+      : (c.kind==='INPUT'||c.kind==='CONST') && (c.facing==='right' || !c.facing);
+    if (!pinOnGrowingEdge) return;
+    const oldW = ioBoxWidth(c.kind, c.bitWidth, c.displayMode);
+    const newW = ioBoxWidth(c.kind, newBitWidth, newMode);
+    c.x -= (newW-oldW);
+  }
 
   // Constructs a fresh, empty circuit instance: the mutable component/wire/
   // junction store, plus every operation — simulation stepping, mutation,
@@ -376,6 +405,13 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
       setBitWidth(id,w){
         const c=components.get(id); if(!c||!BIT_WIDTH_KINDS.has(c.kind)) return;
         const width=Math.max(1,Math.min(32,Math.round(w)||1));
+        // INPUT/OUTPUT/CONST are the only BIT_WIDTH_KINDS whose box actually
+        // resizes with bitWidth (see ioBoxWidth) — everything else keeps a
+        // fixed footprint and just carries wider values internally. That
+        // resize has one pin (INPUT/CONST: output; OUTPUT: input) which
+        // should stay put so an attached wire doesn't visibly jump — see
+        // compensateIOAnchor.
+        compensateIOAnchor(c, width, c.displayMode);
         c.bitWidth=width;
         if (c.kind==='INPUT' || c.kind==='CONST') c.state.value = maskVal(c.state.value||0, width);
         if (c.kind==='REG') c.state.q = maskVal(c.state.q||0, width);
@@ -393,7 +429,13 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
       // Switches a component's canvas readout between binary and hex
       setDisplayMode(id,mode){
         const c=components.get(id); if(!c||(c.kind!=='REG'&&c.kind!=='OUTPUT'&&c.kind!=='INPUT'&&c.kind!=='CONST')) return;
-        c.displayMode = mode==='hex' ? 'hex' : 'bin';
+        const newMode = mode==='hex' ? 'hex' : 'bin';
+        // REG's box and pin layout stay fixed regardless of mode — only its
+        // little value readout grows (see gates.js's regValueText comment)
+        // — so compensateIOAnchor is a no-op for it; it only ever moves x
+        // for OUTPUT/INPUT/CONST, the kinds whose box actually resizes.
+        compensateIOAnchor(c, c.bitWidth, newMode);
+        c.displayMode = newMode;
       },
       // Sets SHFT's shift direction/mode (logical left, logical right, or arithmetic right)
       setShiftMode(id,mode){
