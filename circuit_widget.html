@@ -171,7 +171,7 @@ defineModule('gates', ['engine'], (engine) => {
         <line x1={geo.trunkX} y1={geo.topY} x2={geo.trunkX} y2={geo.lastY} stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>
         {geo.taps.map((p,i)=>(
           <g>
-            <line x1={geo.trunkX} y1={p.y} x2={geo.trunkX+8} y2={p.y} stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>
+            <line x1={geo.trunkX} y1={p.y} x2={merge ? geo.trunkX-8 : geo.trunkX+8} y2={p.y} stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>
             <text key={i} x={merge ? geo.trunkX+6 : geo.trunkX-6} y={p.y+3} textAnchor={merge ? 'start' : 'end'}
                   fontFamily="var(--mono)" fontSize="8" fontWeight="600" fill="var(--ink)" opacity="0.6">{i}</text>
           </g>
