@@ -9,36 +9,45 @@
 defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-routing'], (state, core, geometry, routing) => {
   'use strict';
   const { GATE_DEFS, BIT_WIDTH_KINDS, maskVal, pinBitWidthAt, compInputCount } = core;
-  const { isWireTerminal, wireSegmentPoints, wireDelayForLength, pinAbs, bitsRowWidth, constGeometry } = geometry;
+  const { isWireTerminal, wireSegmentPoints, wireDelayForLength, pinAbs } = geometry;
   const { removeWireCascading, pruneDeadJunctions } = routing;
 
-  // Width (in local px) of an INPUT/OUTPUT/CONST box at a given bitWidth —
-  // mirrors gates.js's inputVis/outputVis/constVis sizing exactly (including
-  // their 1-bit cutoff to a fixed pill/circle shape instead of a bit-cell
-  // grid), so setBitWidth's anchor-compensation below shifts x by precisely
-  // however much the box is about to grow or shrink. See setBitWidth.
-  function ioBoxWidth(kind, bw, mode) {
-    const n = Math.max(1, Math.min(32, Math.round(bw)||1));
-    if (kind==='CONST') return constGeometry(n, mode==='hex'?'hex':'bin').w;
-    if (n<=1) return kind==='INPUT' ? 60 : 40; // VIS.INPUT.w / VIS.OUTPUT.w
-    const cellCount = mode==='hex' ? Math.ceil(n/4) : n;
-    return bitsRowWidth(cellCount);
+  // Runs `mutate` (some change to a geometry-affecting field on `c`, e.g.
+  // bitWidth, muxInputs, or a SPLIT's bits/space) and shifts c.x/c.y by
+  // however much that changed the absolute position of pin
+  // `anchorKind`/`anchorIdx` on `c`, so that pin — and whatever wire is
+  // attached to it — stays exactly where it was, and the shape visibly
+  // grows/shrinks away from it instead of dragging it along.
+  //
+  // Comparing two real pinAbs calls (rather than hand-deriving "this
+  // field grew by N px, so shift x/y by such-and-such") makes this
+  // automatically correct for EVERY facing: pinAbs already knows how to
+  // turn a change in local geometry into a change in absolute position
+  // for any rotation, so this doesn't need its own copy of that math, and
+  // doesn't need to special-case which facing "grows" which edge either.
+  function compensateAnchor(c, anchorKind, anchorIdx, mutate) {
+    const before = pinAbs(c, anchorKind, anchorIdx);
+    mutate();
+    const after = pinAbs(c, anchorKind, anchorIdx);
+    c.x -= (after.x - before.x);
+    c.y -= (after.y - before.y);
   }
-  // Shifts an INPUT/OUTPUT/CONST's x by however much its box is about to
-  // grow/shrink, but only on the facing where that resize would otherwise
-  // drag its pin along with it — see the note in setBitWidth. Called with
-  // the bitWidth/mode the box is about to have; c itself still holds the
-  // pre-change values when this runs, so the "old" width comes straight off
-  // c. Shared by setBitWidth and setDisplayMode — a bin<->hex toggle resizes
-  // the box exactly the same way a bitWidth change does.
+  // Which pin (index 0) anchors an INPUT/OUTPUT/CONST's shape when its box
+  // resizes — INPUT/CONST grow away from their single output pin; OUTPUT
+  // grows away from its single input pin. Everything else that resizes
+  // with bitWidth (REG) keeps a fixed footprint regardless (only its
+  // little value readout grows — see setDisplayMode), so it has no anchor
+  // pin at all, and this just applies the change directly.
+  function ioAnchorPin(kind) {
+    if (kind==='INPUT' || kind==='CONST') return 'out';
+    if (kind==='OUTPUT') return 'in';
+    return null;
+  }
   function compensateIOAnchor(c, newBitWidth, newMode) {
-    const pinOnGrowingEdge = (c.kind==='OUTPUT')
-      ? c.facing==='left'
-      : (c.kind==='INPUT'||c.kind==='CONST') && (c.facing==='right' || !c.facing);
-    if (!pinOnGrowingEdge) return;
-    const oldW = ioBoxWidth(c.kind, c.bitWidth, c.displayMode);
-    const newW = ioBoxWidth(c.kind, newBitWidth, newMode);
-    c.x -= (newW-oldW);
+    const anchorKind = ioAnchorPin(c.kind);
+    const apply = () => { c.bitWidth = newBitWidth; c.displayMode = newMode; };
+    if (!anchorKind) { apply(); return; }
+    compensateAnchor(c, anchorKind, 0, apply);
   }
 
   // Constructs a fresh, empty circuit instance: the mutable component/wire/
@@ -406,13 +415,12 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
         const c=components.get(id); if(!c||!BIT_WIDTH_KINDS.has(c.kind)) return;
         const width=Math.max(1,Math.min(32,Math.round(w)||1));
         // INPUT/OUTPUT/CONST are the only BIT_WIDTH_KINDS whose box actually
-        // resizes with bitWidth (see ioBoxWidth) — everything else keeps a
+        // resizes with bitWidth (see ioAnchorPin) — everything else keeps a
         // fixed footprint and just carries wider values internally. That
         // resize has one pin (INPUT/CONST: output; OUTPUT: input) which
         // should stay put so an attached wire doesn't visibly jump — see
-        // compensateIOAnchor.
+        // compensateIOAnchor. It also applies the new bitWidth itself.
         compensateIOAnchor(c, width, c.displayMode);
-        c.bitWidth=width;
         if (c.kind==='INPUT' || c.kind==='CONST') c.state.value = maskVal(c.state.value||0, width);
         if (c.kind==='REG') c.state.q = maskVal(c.state.q||0, width);
       },
@@ -432,10 +440,10 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
         const newMode = mode==='hex' ? 'hex' : 'bin';
         // REG's box and pin layout stay fixed regardless of mode — only its
         // little value readout grows (see gates.js's regValueText comment)
-        // — so compensateIOAnchor is a no-op for it; it only ever moves x
-        // for OUTPUT/INPUT/CONST, the kinds whose box actually resizes.
+        // — so compensateIOAnchor just applies the mode change for it; it
+        // only ever moves x/y for OUTPUT/INPUT/CONST, the kinds whose box
+        // actually resizes. It also applies the new mode itself.
         compensateIOAnchor(c, c.bitWidth, newMode);
-        c.displayMode = newMode;
       },
       // Sets SHFT's shift direction/mode (logical left, logical right, or arithmetic right)
       setShiftMode(id,mode){
@@ -448,7 +456,11 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
         const newN=Math.max(2,Math.min(4,Math.round(n)||2));
         const oldN=c.muxInputs||2;
         if (newN===oldN) return;
-        c.muxInputs=newN;
+        // Input pin 0 always sits at the same local position regardless of
+        // input count (see muxGeometry) — the anchor pin to keep put as
+        // the body grows/shrinks to fit the new count, same reasoning as
+        // compensateIOAnchor.
+        compensateAnchor(c, 'in', 0, () => { c.muxInputs=newN; });
         // Wires connected to the select pin need to have their index updated
         // Wires connected to now deleted inputs are also deleted
         for (const [wid,w] of wires) {
@@ -468,7 +480,12 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
         const newN=Math.max(2,Math.min(8,Math.round(n)||2));
         const oldN=c.bits||2;
         if (newN===oldN) return;
-        c.bits=newN;
+        // The diagonal (wide-bus) pin always sits at the same local
+        // position regardless of bit count (see splitGeometry) — the
+        // anchor pin to keep put as the trunk grows/shrinks to fit the
+        // new count. Its kind (in for 'split' mode, out for 'merge')
+        // follows splitType, same as everywhere else that pin is found.
+        compensateAnchor(c, c.splitType==='merge' ? 'out' : 'in', 0, () => { c.bits=newN; });
         // Drop any wires still attached to now deleted pins
         // Which side those pins are on depends on splitType (outputs in split mode, inputs in merge mode)
         const merge = c.splitType==='merge';
@@ -480,7 +497,12 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
       // Sets the spacing (in grid units, clamped 1-8) between SPLIT's single-bit pins
       setSplitSpace(id,n){
         const c=components.get(id); if(!c||c.kind!=='SPLIT') return;
-        c.space=Math.max(1,Math.min(8,Math.round(n)||1));
+        // Same anchor-preservation reasoning as setSplitBits — space also
+        // changes the trunk's own length (see splitGeometry), just via a
+        // different field.
+        compensateAnchor(c, c.splitType==='merge' ? 'out' : 'in', 0, () => {
+          c.space=Math.max(1,Math.min(8,Math.round(n)||1));
+        });
       },
       // Switches SPLIT mode between split and merge
       setSplitType(id,type){

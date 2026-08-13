@@ -48,6 +48,7 @@ defineModule('gates', ['engine'], (engine) => {
     GATE_DEFS,
     muxGeometry, splitGeometry, bitsRowWidth, inputOutputGeometry, constGeometry,
     BIT_CELL_W, BIT_GAP, BIT_PAD,
+    rotationCenter,
   } = engine;
 
   const FAMILY_FILL = { and:'#fffae3', or:'#e8f5ee', not:'#ede8f7', xor:'#e4eef8', mux: '#fff1e3', seq:'#fce8ee', io:'#fefce8', misc:'#ede8f7' };
@@ -367,7 +368,7 @@ defineModule('gates', ['engine'], (engine) => {
     }
   };
 
-  VIS.CONST = { w:40,h:40, inputs:[], outputs:[{x:38,y:20}],
+  VIS.CONST = { w:40,h:40, inputs:[], outputs:[{x:40,y:20}],
     body:(f,comp)=>{
       const on=comp.state.value;
       return <g>
@@ -552,9 +553,10 @@ defineModule('gates', ['engine'], (engine) => {
       {['AND','OR','NAND','NOR','XOR','XNOR','MUX'].includes(comp.kind)&&
         <text x={vis.w/2+2} y={vis.h/2+4} textAnchor="middle" fontFamily="var(--mono)" fontSize="10" fontWeight="600" fill="var(--ink)" opacity="0.35" pointerEvents="none">{def.label}</text>}
     </>;
+    const rc = rotationCenter(vis);
     return <g transform={mirrored
                           ? `translate(${vis.w} 0) scale(-1 1)`
-                          : `rotate(${comp.facing==='up'?270:comp.facing==='down'?90:0} ${vis.w/2} ${vis.h/2})`}>
+                          : `rotate(${comp.facing==='up'?270:comp.facing==='down'?90:0} ${rc.cx} ${rc.cy})`}>
       {vis.inputs.map((p,i)=>{if(p.noStub) return null; const s=pinStub(p,'left');return <line key={'i'+i} x1={s.x1} y1={s.y1} x2={s.x2} y2={s.y2} stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>;})}
       {vis.outputs.map((p,i)=>{if(p.noStub) return null; const s=pinStub(p,'right');return <line key={'o'+i} x1={s.x1} y1={s.y1} x2={s.x2} y2={s.y2} stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>;})}
       {mirrored ? unmirrorText(body) : body}
@@ -669,7 +671,7 @@ const {
   projectOrthogonalPoint, terminalCoords, wireKnots, resolveWire, wirePath,
   sampleWire, splitWirePathAtSegment, splitWirePath, wireKnotDistances, distToSeg, wireSegmentPoints, findNearestWirePoint,
   insertBranchPoint, routeManhattanPoints, pinAbs, wireDelayForLength,
-  branchRouteFrom, syncEndCorner,
+  branchRouteFrom, syncEndCorner, rotationCenter,
   segmentMoveSnapshot, computeSegmentMove, clampSegmentMoveDelta, finalizeSegmentMove,
   truncateWireAtSegment, removeWireCascading,
   computeEndpointRoute, finalizeEndpointRoute,
@@ -1716,7 +1718,7 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
                           strokeDasharray="4 3" opacity="0.35"
                           transform={comp.facing==='left'
                           ? `translate(${vis.w} 0) scale(-1 1)`
-                          : `rotate(${comp.facing==='up'?270:comp.facing==='down'?90:0} ${vis.w/2} ${vis.h/2})`}/>}
+                          : `rotate(${comp.facing==='up'?270:comp.facing==='down'?90:0} ${rotationCenter(vis).cx} ${rotationCenter(vis).cy})`}/>}
             <GateBody comp={comp}/>
             {vis.inputs.map((_,i)=>{
               const abs=pinAbs(comp,'in',i);

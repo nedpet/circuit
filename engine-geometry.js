@@ -64,7 +64,11 @@ defineModule('engine-geometry', ['state'], (state) => {
   }
 
   // Returns the width of an input/output component with n cells
-  const BIT_CELL_W=18, BIT_GAP=3, BIT_PAD=8;
+  // BIT_CELL_W+BIT_GAP is exactly one grid unit (20px), and BIT_PAD*2+BIT_CELL_W
+  // is exactly two, so bitsRowWidth(n) always comes out to 20*(n+1) -- a grid
+  // multiple for every n, not just some -- which keeps the pin (on the box's
+  // far edge) grid-aligned after the component's own x/y gets snapped on drag.
+  const BIT_CELL_W=18, BIT_GAP=2, BIT_PAD=11;
   function bitsRowWidth(n) { return BIT_PAD*2 + n*BIT_CELL_W + Math.max(0,n-1)*BIT_GAP; }
 
   // Returns the width, height, and input/output locations
@@ -82,7 +86,13 @@ defineModule('engine-geometry', ['state'], (state) => {
   const CONST_CHAR_W=9, CONST_PAD=12;
   function constGeometry(n, mode) {
     const digits = mode==='hex' ? Math.ceil(n/4) : n;
-    const w = Math.max(40, digits*CONST_CHAR_W + CONST_PAD*2), h = 40;
+    const rawW = Math.max(40, digits*CONST_CHAR_W + CONST_PAD*2);
+    // Rounded up to the next grid unit (never down, so the text always still
+    // fits) -- same reasoning as bitsRowWidth, but simpler here since the
+    // body's just a centered readout, not a grid of individually-positioned
+    // cells, so a little extra width beyond the digits' own footprint just
+    // means slightly more breathing room either side rather than a gap.
+    const w = Math.ceil(rawW/20)*20, h = 40;
     return { w, h, inputs:[], outputs:[{x:w,y:20}] };
   }
 
@@ -317,11 +327,37 @@ defineModule('engine-geometry', ['state'], (state) => {
     return (wireLen / WIRE_REF_LEN) * delayMs;
   }
 
+  // The point an up/down-facing component's SVG rotation transform (and
+  // pinAbs below) pivots around — the shape's own geometric center,
+  // snapped to the nearest grid intersection rather than used exactly as
+  // drawn. Every pin already sits at a grid-aligned LOCAL position, and
+  // rotating a grid-aligned offset from a grid-aligned pivot by exactly
+  // 90 degrees always lands back on a grid-aligned offset (a pure
+  // 90-degree turn only swaps/negates the two axes — it never scales
+  // them) — so snapping the pivot is all a rotated pin needs to stay on
+  // the grid too, without requiring the shape's own w/h to itself be a
+  // 40px multiple (half of a plain 20px multiple can land on a 10px
+  // half-grid offset once rotation swaps it onto the other axis, which is
+  // exactly the gap this closes). Facing right/left never reads this at
+  // all (see pinAbs and GateBody's own mirror transform), so nothing
+  // about those changes.
+  //
+  // GATES' own rendering (GateBody's body/stub rotation, and the
+  // selection outline's matching one) must pivot on this exact same
+  // point, not the raw center — otherwise a pin circle (placed via
+  // pinAbs) would visually detach from the end of its stub (part of the
+  // rotated body) by up to 10px. Exported so both stay in sync with this
+  // single definition instead of three hand-copied rounding formulas.
+  const GRID = 20;
+  function rotationCenter(vis) {
+    return { cx: Math.round((vis.w/2)/GRID)*GRID, cy: Math.round((vis.h/2)/GRID)*GRID };
+  }
+
   // Absolute canvas position of one pin (input or output, by index) of a component
-  // Accounts for its facing: rotated about its own center for up/down, mirrored horizontally for left 
+  // Accounts for its facing: rotated about its own center for up/down, mirrored horizontally for left
   function pinAbs(comp,kind,idx){
     const vis=window.Modules.gates.visForComp(comp),p=kind==='in'?vis.inputs[idx]:vis.outputs[idx];
-    const cx=vis.w/2, cy=vis.h/2;
+    const {cx,cy} = rotationCenter(vis);
     if (comp.facing==='left') {
       // Mirror horizontally: flip x around centre
       return{x:comp.x+(vis.w-p.x), y:comp.y+p.y};
@@ -340,6 +376,6 @@ defineModule('engine-geometry', ['state'], (state) => {
     projectOrthogonalPoint, isWireTerminal, terminalCoords, wireKnots, resolveWire,
     syncEndCorner, syncWireEndCorners, wirePath, sampleWire,
     splitWirePathAtSegment, splitWirePath, wireKnotDistances, distToSeg,
-    wireSegmentPoints, wireDelayForLength, pinAbs,
+    wireSegmentPoints, wireDelayForLength, pinAbs, rotationCenter,
   };
 });
