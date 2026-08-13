@@ -1877,7 +1877,7 @@ return { Palette };
 /* ═══ APP ══════════════════════════════════════════════════════════════════ */
 defineModule('app', ['state', 'engine', 'gates', 'canvas', 'palette'], (state, engine, gates, canvas, palette) => {
 'use strict';
-const{useState,useEffect,useCallback}=React;
+const{useState,useEffect,useCallback,useRef}=React;
 const{createCircuit,GATE_DEFS}=engine;
 const{Canvas}=canvas;
 const{Palette}=palette;
@@ -1969,6 +1969,17 @@ function App(){
   const[customKinds,setCustomKinds]=useState(()=>hydrateCustomGates());
   const[showSave,setShowSave]=useState(false);
   const[saveName,setSaveName]=useState('');
+  // Bottom-of-screen confirmation shown right after a save completes; see
+  // doSave. Keyed by `key` (not just text) so re-saving the same name back
+  // to back restarts the fade-out instead of the old timer silently
+  // clearing the brand-new toast.
+  const[toast,setToast]=useState(null);
+  const toastTimer=useRef(null);
+  const showToast=(text)=>{
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    setToast({text,key:Date.now()});
+    toastTimer.current=setTimeout(()=>setToast(null),2400);
+  };
   const[showLoad,setShowLoad]=useState(false);
   const[showEquation, setShowEquation]=useState(false);
   const[equation,setEquation]=useState('');
@@ -2036,6 +2047,22 @@ function App(){
     window.addEventListener('keydown',fn);return()=>window.removeEventListener('keydown',fn);
   },[selectedId]);
 
+  // Ctrl/Cmd+S opens the save dialog instead of triggering the browser's
+  // save-page action.
+  useEffect(()=>{
+    const fn=(e)=>{
+      if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='s'&&circuit.components.size!==0){
+        e.preventDefault();
+        setShowSave(true);
+      }
+      else if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='o'){
+        e.preventDefault();
+        setShowLoad(true);
+      }
+    };
+    window.addEventListener('keydown',fn);return()=>window.removeEventListener('keydown',fn);
+  },[]);
+
   const doSave=()=>{
     const name=saveName.trim()||`Circuit ${saved.length+1}`;
     const data=circuit.serialize();
@@ -2052,12 +2079,14 @@ function App(){
         return;
       }
     }
+    const isUpdate=saved.some(s=>s.name===name);
     const next=[...saved.filter(s=>s.name!==name),{name,data,ts:Date.now()}];
     setSaved(next);localStorage.setItem('dss_v2',JSON.stringify(next));setShowSave(false);setSaveName('');
     if (customKinds.includes('CUSTOM:'+name)) {
       gates.registerCustomGate(name, data);
       upsertCustomRegistry(name, data);
     }
+    showToast(`"${name}" ${isUpdate?'updated':'saved'}`);
   };
   const doLoad=(s)=>{circuit.load(s.data);setShowLoad(false);refresh();};
   // This only stops a custom kind from being placed again — it deliberately
@@ -2252,6 +2281,8 @@ function App(){
         </div>
       </div>
     </div>
+
+    {toast&&<div key={toast.key} className="toast">{toast.text}</div>}
 
     {showSave&&<Dialog title="Save circuit" onClose={()=>setShowSave(false)}>
       <input className="text-input" placeholder="My circuit" value={saveName} autoFocus
