@@ -12,18 +12,30 @@ defineModule('engine-geometry', ['state'], (state) => {
   // Pin layout and footprint for the components whose size varies per
   // instance (MUX, SPLIT, and multi-bit INPUT/OUTPUT/CONST)
 
-  // Returns the width, height, input/output coords, and y-coord of the middle of the top/bottom edges 
+  // Returns the width, height, input/output coords, and y-coord of the middle of the top/bottom edges
   // for a mux with n inputs and select pin location (top or bottom)
   function muxGeometry(n, selectLocation) {
     const count = Math.max(2, Math.min(4, n|0||2)); // number of bits (2-4)
     const bottom = selectLocation==='bottom';
-    const W=80, MUX_PIN_GAP=40, MUX_TOP_MARGIN=20;
-    const h = count*MUX_PIN_GAP; // 80 for count=2 
+    const W=80, MUX_PIN_GAP=40, MUX_TOP_MARGIN=20, STUB=12;
+    const h = count*MUX_PIN_GAP; // 80 for count=2
     const inputs = Array.from({length:count},(_,i)=>({x:0,y:MUX_TOP_MARGIN+i*MUX_PIN_GAP}));
-    const outY = h/2, bt=6, bb=h-6; 
-    const selectY = bottom ? (bb*.75 + bb/8) + 12 : (bt + bb/8) - 12;
+    const outY = h/2, bt=6, bb=h-6; // input (left) edge's own corners -- fixed, so its length (bb-bt) never changes with n
+    // Output (right) edge's own corners -- rt (top) and rb (bottom) --
+    // are solved for instead of a fixed .25/.75 split of bb, so the
+    // select pin (which sits wherever the diagonal edges cross x=W*0.5 --
+    // always each edge's exact midpoint, since BX sits the same distance
+    // in from both sides -- offset by its STUB-px stub) lands on a grid
+    // line like every other pin: (bt+rt)/2-STUB=0 gives rt=2*STUB-bt; rb
+    // mirrors it (h-rt), the same way the two select-pin locations
+    // mirror each other, so aligning the top edge's corner aligns the
+    // bottom edge's too. Doesn't depend on h at all (bt is fixed), so 0
+    // is always a valid target -- rt sits comfortably between bt and bb
+    // regardless of how many inputs the mux has.
+    const rt = 2*STUB - bt, rb = h - rt;
+    const selectY = bottom ? h : 0;
     inputs.push({x:W*0.5,y:selectY,dir: bottom ? 'down' : 'up'});
-    return { w:W, h, inputs, outputs:[{x:W,y:outY}], bt, bb };
+    return { w:W, h, inputs, outputs:[{x:W,y:outY}], bt, bb, rt, rb };
   }
 
   // Returns the width, height, input/output locations, 
@@ -36,7 +48,7 @@ defineModule('engine-geometry', ['state'], (state) => {
     const sp = Math.max(1, Math.min(8, space|0||1));
     const merge = type==='merge';
     const gap = sp*SPLIT_UNIT, topY = SPLIT_UNIT;
-    const w = SPLIT_UNIT + 12; 
+    const w = SPLIT_UNIT + 20; 
     const trunkX = merge ? w-SPLIT_UNIT : SPLIT_UNIT;
     const tapX   = merge ? 0 : w;
     const diagX  = merge ? w : 0;

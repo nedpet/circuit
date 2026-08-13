@@ -115,15 +115,16 @@ defineModule('gates', ['engine'], (engine) => {
       <circle cx={W-7} cy={YO} r="5" fill={f} stroke="var(--ink)" strokeWidth="2"/>
     </g> };
   // MUX's pin geometry (per-instance, since its data-input count is) comes
-  // from engine's muxGeometry — see there for what bt/bb (the body's own
-  // top/bottom edge y's, at the select pin's x) mean; this just adds the
-  // body that draws between them.
+  // from engine's muxGeometry — see there for what bt/bb (the input-side
+  // edge's own top/bottom corners) and rt/rb (the output-side edge's own
+  // top/bottom corners) mean; this just adds the body that draws between
+  // them.
   function buildMuxVis(n, bottom) {
     const geo = muxGeometry(n, bottom ? 'bottom' : 'top');
     return { ...geo,
       body:(f, comp)=><g>
         {pendingBar(comp)}
-        <path d={`M ${BX} ${geo.bt} L ${W - BX} ${geo.bt + geo.bb*.25} V ${geo.bb*.75} L ${BX} ${geo.bb} Z`} fill={f} stroke="var(--ink)" strokeWidth="2" strokeLinejoin="round"/>
+        <path d={`M ${BX} ${geo.bt} L ${W - BX} ${geo.rt} V ${geo.rb} L ${BX} ${geo.bb} Z`} fill={f} stroke="var(--ink)" strokeWidth="2" strokeLinejoin="round"/>
       </g> };
   }
   const muxVisCache = {};
@@ -169,8 +170,11 @@ defineModule('gates', ['engine'], (engine) => {
         <line x1={geo.trunkX} y1={geo.topY} x2={geo.diagX} y2="0" stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>
         <line x1={geo.trunkX} y1={geo.topY} x2={geo.trunkX} y2={geo.lastY} stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>
         {geo.taps.map((p,i)=>(
-          <text key={i} x={merge ? geo.trunkX+6 : geo.trunkX-6} y={p.y+3} textAnchor={merge ? 'start' : 'end'}
-                fontFamily="var(--mono)" fontSize="8" fontWeight="600" fill="var(--ink)" opacity="0.6">{i}</text>
+          <g>
+            <line x1={geo.trunkX} y1={p.y} x2={geo.trunkX+8} y2={p.y} stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>
+            <text key={i} x={merge ? geo.trunkX+6 : geo.trunkX-6} y={p.y+3} textAnchor={merge ? 'start' : 'end'}
+                  fontFamily="var(--mono)" fontSize="8" fontWeight="600" fill="var(--ink)" opacity="0.6">{i}</text>
+          </g>
         ))}
       </g> };
   }
