@@ -426,6 +426,54 @@ defineModule('engine-routing', ['engine-geometry'], (geometry) => {
       const finalPos = attachBranchToJunction(parentWire, parentJ, newPos, hasOtherReaders, circuit, wire.id);
       wire[end.side] = {x:finalPos.x, y:finalPos.y};
     }
+
+    // The segment just moved can also flatten whichever segment sits right
+    // beside it — its shared knot slid exactly onto the neighbor knot it
+    // didn't move (the one just outside the dragged segment). Once that
+    // happens neither knot marks a real corner anymore, so both waypoints
+    // — and any junction bookkeeping this wire owns at their old spot —
+    // are dropped, same as the user deleting that corner by hand. Skipped
+    // whenever that neighbor is itself the wire's own endpoint (nothing to
+    // drop there — see the `ends` handling above) or a pinned knot (a
+    // component pin or a live branch anchor always stays; collapsing INTO
+    // one is what the anchor+stub path in computeSegmentMove is for, not
+    // this), and whenever some OTHER wire is still anchored at the
+    // collapsing position, since dropping it out from under that wire
+    // would orphan it.
+    if (moved) {
+      const hasLiveBranchAt = p => [...circuit.wires.values()].some(w => w.id!==wire.id &&
+        ((!isWireTerminal(w.from) && same(terminalCoords(w.from,circuit), p)) ||
+         (!isWireTerminal(w.to)   && same(terminalCoords(w.to,circuit),   p))));
+      const dropOwnJunctionAt = p => {
+        const j = [...circuit.junctions].find(jj=>jj.sourceWireId===wire.id && same(jj, p));
+        if (j) circuit.junctions.delete(j);
+      };
+      // Where the dragged segment actually landed in the (possibly
+      // anchor+stub-lengthened) knot list — mirrors computeSegmentMove's
+      // own `segIndex = newKnots.length-1`.
+      const finalSegIndex = d.segIndex + (d.startPinned ? 1 : 0);
+
+      // The neighbor beyond the moved segment's END, i.e. knots[segIndex+2]
+      // — only real (interior) if it's not the wire's own `to` endpoint.
+      if (!d.endPinned && d.segIndex+2 <= n-2) {
+        const nextKnot = d.knots[d.segIndex+2];
+        const newEnd = {x: d.knots[d.segIndex+1].x+dx, y: d.knots[d.segIndex+1].y+dy};
+        if (same(nextKnot, newEnd) && !hasLiveBranchAt(nextKnot)) {
+          dropOwnJunctionAt(nextKnot);
+          wire.points.splice(finalSegIndex, 2); // points[i] === knots[i+1], so knots[segIndex+1..+2] live at finalSegIndex..+1
+        }
+      }
+      // The neighbor before the moved segment's START, i.e. knots[segIndex-1]
+      // — only real (interior) if it's not the wire's own `from` endpoint.
+      if (!d.startPinned && d.segIndex-1 >= 1) {
+        const prevKnot = d.knots[d.segIndex-1];
+        const newStart = {x: d.knots[d.segIndex].x+dx, y: d.knots[d.segIndex].y+dy};
+        if (same(prevKnot, newStart) && !hasLiveBranchAt(prevKnot)) {
+          dropOwnJunctionAt(prevKnot);
+          wire.points.splice(finalSegIndex-2, 2); // knots[segIndex-1..segIndex] live at finalSegIndex-2..-1
+        }
+      }
+    }
   }
 
   // Deletes `wire` and, recursively, every OTHER wire branching off of it
