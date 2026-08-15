@@ -57,6 +57,7 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
   // without threading them through every call.
   function createCircuit() {
     let nextId = 1;
+    let nextIoId = 1;
     const components = new Map();
     const ioComponents = new Map();
     const wires = new Map();
@@ -68,7 +69,7 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
     function addComponent(kind, x, y, facing = "right", delay = 0, label = "none", bitWidth, muxInputs, bitWidthIn, bitWidthOut, bits, space, splitType) {
       const def = GATE_DEFS[kind];
       const id = 'c'+(nextId++);
-      const ioId = kind==='INPUT' || kind==='OUTPUT' ? 'io'+(ioComponents.size + 1) : ''
+      const ioId = kind==='INPUT' || kind==='OUTPUT' ? 'io'+(nextIoId++) : ''
       // MUX and SPLIT's number of inputs varies per instance, so its
       // inputVals can't be sized off the kind's static def.inputs
       const muxN = kind==='MUX' ? Math.max(2,Math.min(4,Math.round(muxInputs||2))) : undefined;
@@ -397,7 +398,7 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
           state:c.kind==='INPUT'||c.kind==='CONST'?{value:c.state.value}:c.kind==='CLOCK'?{period:c.state.period,paused:c.state.paused}:{}})),
         wires: [...wires.values()].map(w=>({id:w.id,from:w.from,to:w.to,points:w.points||[]})),
         junctions: [...junctions],
-        nextId,
+        nextId, nextIoId,
       };
     }
 
@@ -432,12 +433,18 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
         junctions.add(j);
       }
       nextId=Math.max(data.nextId||1,nextId);
+      nextIoId=Math.max(data.nextIoId||1,nextIoId);
     }
+
+    // Resets the io-pin id/label counter back to io1/'A'. Called on a full
+    // canvas clear so a fresh circuit doesn't keep counting up from wherever
+    // the previous one left off — see addComponent's ioId assignment above.
+    function resetIoIds() { nextIoId = 1; }
 
     // Return for createCircuit(): returns all properties and methods the app may need to access after build
     return {
       components, wires, ioComponents, junctions,
-      addComponent, removeComponent, addWire, removeWire, step, serialize, load,
+      addComponent, removeComponent, addWire, removeWire, step, serialize, load, resetIoIds,
       // Exposed so the renderer's own pulse/waypoint-lighting animation (see
       // circuit_widget.html's wireProgress) can use the SAME effective delay
       // a branch actually commits on, instead of independently recomputing

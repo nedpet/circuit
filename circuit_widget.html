@@ -2204,6 +2204,7 @@ function App(){
   };
   const doClear=()=>{
     [...circuit.components.keys()].forEach(id=>circuit.removeComponent(id));
+    circuit.resetIoIds(); // fresh canvas restarts io labeling at io1/'A'
     setShowClear(false);
     refresh();
   };
