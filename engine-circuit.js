@@ -185,13 +185,45 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
       return srcWidth !== pinBitWidthAt(dst, 'in', wire.to.pin);
     }
 
-    // Returns the value (0 or 1) at the source of the wire, either a pin or a junction
-    // For branches, does not account for the parent wire, just its branchpoint
+    // A wire's own effective delay budget, in component mode: the flat
+    // `delayMs` nominal for a normal (non-branch) wire, or, for a wire
+    // that's itself a branch, whatever wireSourceValue below already
+    // worked out was left of it (`wire._ownDelay`, stored as a side
+    // effect there — see the comment down there for why it has to be
+    // computed from the PARENT's own effective delay rather than the flat
+    // nominal for the recursive convergence to hold across chains of
+    // branches-of-branches).
+    // Length mode ignores this entirely — it's already correctly additive
+    // by real geometric distance, with no shared "total budget" to
+    // subdivide, so `nominalDelay` (already length-derived) passes through.
+    function wireOwnDelay(w, nominalDelay) {
+      if (state.widgetState.propagationMode !== 'component') return nominalDelay;
+      return typeof w._ownDelay === 'number' ? w._ownDelay : nominalDelay;
+    }
+
+    // A no-op placeholder for callers that don't care about a branch's
+    // own delay bookkeeping (reachMs/ownDelay) — see wireSourceValue below.
+    const NO_REACH = {reachMs: 0, ownDelay: undefined};
+
+    // Returns {value, reachMs, ownDelay} for the source of the wire, either
+    // a pin or a junction. `value` is the value (0 or 1) currently visible
+    // there. For branches, `reachMs`/`ownDelay` describe how long the
+    // signal takes to reach the branchpoint on the parent wire, and how
+    // much delay budget is left over after that — see wireOwnDelay above
+    // for how that composes across chains of branches. These are NOT
+    // written onto `wire` here — only step()'s caller does that, and only
+    // at the exact moment `wire.pendingStart` itself gets (re)committed.
+    // That matters: this function keeps recomputing every tick, but once
+    // `src` finishes ITS OWN transition (pendingValue clears) partway
+    // through this wire's wait, there's nothing left here to recompute —
+    // the values from the tick this wire's own transition began need to
+    // stay put, exactly like `wire.pendingStart` itself already does,
+    // rather than being clobbered back to "no branch" on every later tick.
     function wireSourceValue(wire, circuit, now, instant) {
       if (isWireTerminal(wire.from)) {
         const src = circuit.components.get(wire.from.compId);
-        if (!src) return 0;
-        return src.outputVals[wire.from.pin]||0;
+        if (!src) return {value: 0, ...NO_REACH};
+        return {value: src.outputVals[wire.from.pin]||0, ...NO_REACH};
       }
       if (typeof wire.from.x === 'number' && typeof wire.from.y === 'number') {
         const px = wire.from.x, py = wire.from.y;
@@ -201,7 +233,7 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
             const src = circuit.wires.get(j.sourceWireId);
             if (!src) continue;
 
-            if (instant) return src.pendingValue!==undefined ? (src.pendingValue||0) : (src.value||0);
+            if (instant) return {value: src.pendingValue!==undefined ? (src.pendingValue||0) : (src.value||0), ...NO_REACH};
 
             if (typeof src.pendingValue !== 'undefined') {
               // Find how far along the source wire the junction sits (0..1)
@@ -226,36 +258,42 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
               }
 
               const t = totalLen > 0 ? distToJunction / totalLen : 0;
-              // In length mode, the signal reaches the junction at pendingStart + t * delayMs
-              // In component mode, the junction sees the new value the instant the
-              // source commits, and the branch pays its own flat delayMs from there 
-              let arrivalTime;
-              if (state.widgetState.propagationMode === 'component') {
-                arrivalTime = src.pendingStart || 0;
-              } else {
-                const srcKnots = wireSegmentPoints(src, circuit);
-                let srcTotalLen = 0;
-                for (let i = 0; i < srcKnots.length - 1; i++) {
-                  srcTotalLen += Math.hypot(srcKnots[i+1].x - srcKnots[i].x, srcKnots[i+1].y - srcKnots[i].y);
-                }
-                const srcWireDelay = wireDelayForLength(srcTotalLen, state.widgetState.delayMs);
-                arrivalTime = (src.pendingStart || 0) + t * srcWireDelay;
+              // The signal reaches the junction at pendingStart + t * (src's
+              // own EFFECTIVE delay budget) — in length mode that budget is
+              // src's real geometric delay (so this is a straight physical-
+              // distance fraction, same as always). In component mode it's
+              // whatever src's own wireOwnDelay resolved to — which, if src
+              // is itself a branch, is already reduced below the flat
+              // nominal. Reading src's ACTUAL effective delay here (not the
+              // flat nominal) is what lets this recurse correctly: this
+              // wire's own remaining budget below is carved out of what its
+              // parent actually had left, not a fresh flat delayMs, so an
+              // arbitrarily deep chain of branches-of-branches still lands
+              // on the same commit instant as the original root.
+              const srcKnots = wireSegmentPoints(src, circuit);
+              let srcTotalLen = 0;
+              for (let i = 0; i < srcKnots.length - 1; i++) {
+                srcTotalLen += Math.hypot(srcKnots[i+1].x - srcKnots[i].x, srcKnots[i+1].y - srcKnots[i].y);
               }
+              const srcOwnDelay = wireOwnDelay(src, wireDelayForLength(srcTotalLen, state.widgetState.delayMs));
+              const reachMs = t * srcOwnDelay;
+              const ownDelay = Math.max(0, srcOwnDelay - reachMs);
+              const arrivalTime = (src.pendingStart || 0) + reachMs;
 
               if (now >= arrivalTime) {
-                return src.pendingValue || 0;
+                return {value: src.pendingValue || 0, reachMs, ownDelay};
               } else {
                 // Signal hasn't reached the junction yet
-                return src.value || 0;
+                return {value: src.value || 0, reachMs, ownDelay};
               }
             }
 
-            return src.value || 0;
+            return {value: src.value || 0, ...NO_REACH};
           }
         }
-        return 0;
+        return {value: 0, ...NO_REACH};
       }
-      return 0;
+      return {value: 0, ...NO_REACH};
     }
 
 
@@ -309,8 +347,18 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
         // A width mismatch between the pins this wire connects means the
         // signal shouldn't cross it at all, setting it to 0
         w.bitMismatch = wireBitMismatch(w, circuitRef);
-        const srcVal = w.bitMismatch ? 0 : wireSourceValue(w, circuitRef, now, instant);
-        if (srcVal!==w.pendingValue && srcVal!==w.value) { w.pendingValue=srcVal; w.pendingStart=now; }
+        const {value: srcVal, reachMs, ownDelay} = w.bitMismatch ? {value:0, ...NO_REACH} : wireSourceValue(w, circuitRef, now, instant);
+        if (srcVal!==w.pendingValue && srcVal!==w.value) {
+          w.pendingValue=srcVal; w.pendingStart=now;
+          // Commit this wire's own reachMs/ownDelay (see wireSourceValue)
+          // ONLY at the exact tick its transition begins, same as
+          // pendingStart just above — NOT every tick, since `src` (this
+          // wire's parent, if it's a branch) can go on to finish ITS OWN
+          // transition partway through this wire's wait, at which point
+          // recomputing here would have nothing left to compute from and
+          // would wrongly wipe these back to "not a branch".
+          w._reachMs = reachMs; w._ownDelay = ownDelay;
+        }
       }
       for (const w of wires.values()) {
         const knots = wireSegmentPoints(w, {components, wires, ioComponents});
@@ -318,7 +366,11 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
         for (let i = 0; i < knots.length - 1; i++) {
           wireLen += Math.hypot(knots[i+1].x - knots[i].x, knots[i+1].y - knots[i].y);
         }
-        const wireDelay = wireDelayForLength(wireLen, delayMs);
+        // wireOwnDelay: in component mode, a branch (w._reachMs>0, set by the
+        // wireSourceValue pass just above) gets credit for however much of
+        // its budget was already spent reaching its own pendingStart, so it
+        // still lands on the same commit instant as its ultimate root wire.
+        const wireDelay = wireOwnDelay(w, wireDelayForLength(wireLen, delayMs));
 
         if (typeof w.pendingValue !== 'undefined' && now - (w.pendingStart || 0) >= wireDelay) {
           if(w.value!==w.pendingValue){w.value=w.pendingValue;w.lastChange=now;}
@@ -388,6 +440,12 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
     return {
       components, wires, ioComponents, junctions,
       addComponent, removeComponent, addWire, removeWire, step, serialize, load,
+      // Exposed so the renderer's own pulse/waypoint-lighting animation (see
+      // circuit_widget.html's wireProgress) can use the SAME effective delay
+      // a branch actually commits on, instead of independently recomputing
+      // the flat geometric one — see wireOwnDelay's own comment above for
+      // why a branch's real delay isn't just wireDelayForLength(wireLen).
+      wireOwnDelay,
       // Flips a single-bit INPUT's value
       toggleInput(id){
         const c=components.get(id);

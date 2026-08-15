@@ -1283,7 +1283,14 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
     const pending = !w.bitMismatch && typeof w.pendingValue!=='undefined';
     let pendingT=0, wireDelay=0;
     if (pending) {
-      wireDelay = wireDelayForLength(wireLen, state.widgetState.delayMs);
+      // wireOwnDelay: in component mode, a branch commits sooner than the
+      // flat wireDelayForLength(wireLen) would suggest — it gets credit
+      // for however much of its budget its own parent already spent
+      // reaching the branchpoint (see engine-circuit.js). Animating the
+      // pulse against the un-credited flat delay would have it crawl at
+      // the wrong (slower) rate and then jump the rest of the way instantly
+      // the moment the wire actually commits underneath it.
+      wireDelay = circuit.wireOwnDelay(w, wireDelayForLength(wireLen, state.widgetState.delayMs));
       pendingT = Math.min(1, (performance.now()-(w.pendingStart||performance.now()))/wireDelay);
     }
     wireProgress.set(w.id, {
