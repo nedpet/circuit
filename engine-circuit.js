@@ -605,6 +605,47 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
         const c=components.get(id);
         c.delay=d;
       },
+      // Snapshots `id`'s full configuration for copy/paste: everything
+      // serialize() keeps except id/ioId/position, which pasteComponent
+      // assigns fresh. An IO's label gets "_copy" appended right here, off
+      // the ORIGINAL label at copy time, so pasting the same clipboard
+      // repeatedly doesn't stack more suffixes on top of each other.
+      // Returns null if `id` isn't a component.
+      copyComponent(id){
+        const c = components.get(id); if (!c) return null;
+        const isIO = c.kind==='INPUT' || c.kind==='OUTPUT';
+        return {
+          kind:c.kind, facing:c.facing, delay:c.delay,
+          label: isIO ? c.label+'_copy' : c.label,
+          bitWidth:c.bitWidth, displayMode:c.displayMode, shiftMode:c.shiftMode,
+          muxInputs:c.muxInputs, muxSelectLocation:c.muxSelectLocation,
+          bitWidthIn:c.bitWidthIn, bitWidthOut:c.bitWidthOut,
+          bits:c.bits, space:c.space, splitType:c.splitType,
+          // Only the sliver of `state` that's real configuration rather
+          // than ephemeral runtime carries over — mirrors serialize(),
+          // with one deliberate difference: a CLOCK drops paused/lastTick,
+          // so a pasted copy always starts fresh and running instead of
+          // possibly landing paused mid-cycle.
+          state: c.kind==='INPUT'||c.kind==='CONST' ? {value:c.state.value}
+               : c.kind==='CLOCK' ? {period:c.state.period} : {},
+        };
+      },
+      // Recreates a copyComponent() snapshot at (x,y) — the paste half of
+      // copy/paste. Same two-step reconstruction load() uses per saved
+      // component: addComponent() for everything its own params cover,
+      // then direct field assignment for the rest. Always wireless, same
+      // as a fresh placement from the palette.
+      pasteComponent(snapshot,x,y){
+        if (!snapshot) return null;
+        const c = addComponent(snapshot.kind, x, y, snapshot.facing, snapshot.delay, snapshot.label,
+                                snapshot.bitWidth, snapshot.muxInputs, snapshot.bitWidthIn, snapshot.bitWidthOut,
+                                snapshot.bits, snapshot.space, snapshot.splitType);
+        if (snapshot.displayMode!==undefined) c.displayMode=snapshot.displayMode;
+        if (snapshot.shiftMode!==undefined) c.shiftMode=snapshot.shiftMode;
+        if (snapshot.muxSelectLocation!==undefined) c.muxSelectLocation=snapshot.muxSelectLocation;
+        if (snapshot.state) Object.assign(c.state, snapshot.state);
+        return c;
+      },
     };
   }
 

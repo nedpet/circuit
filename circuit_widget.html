@@ -741,6 +741,16 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
   const onClearPalRef    = useRef(onClearPaletteDrag);
   const onSelectRef      = useRef(onSelect);
   const wiringFromRef    = useRef(wiringFrom);
+  // Copy/paste support. mousePosRef/mouseTrackedRef mirror mousePos into a
+  // ref (updated straight from onMove below, not via its own effect) so
+  // the Ctrl+V handler can read the latest position without resubscribing
+  // its listener on every mousemove; mouseTrackedRef distinguishes "mouse
+  // really is at world (0,0)" from "no mousemove has landed yet", which
+  // mousePos's own {x:0,y:0} initial value can't. clipboardRef holds the
+  // last copyComponent() snapshot, if any.
+  const mousePosRef      = useRef(mousePos);
+  const mouseTrackedRef  = useRef(false);
+  const clipboardRef     = useRef(null);
   useEffect(()=>{viewRef.current=view;},[view]);
   useEffect(()=>{paletteDragRef.current=paletteDrag;},[paletteDrag]);
   useEffect(()=>{snapGridRef.current=snapGrid;},[snapGrid]);
@@ -779,6 +789,7 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
     const onMove=(e)=>{
       const w=screenToWorld(e.clientX,e.clientY);
       setMousePos(w);
+      mousePosRef.current=w; mouseTrackedRef.current=true;
       if (wiringFromRef.current && !wiringFromRef.current.dir) {
         const wf=wiringFromRef.current;
         const dx=w.x-wf.startX, dy=w.y-wf.startY;
@@ -1023,6 +1034,44 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
     window.addEventListener('mouseup',onUp);
     return()=>{window.removeEventListener('mousemove',onMove);window.removeEventListener('mouseup',onUp);};
   },[circuit, screenToWorld]);
+
+  // Copy/paste a single component (no wires — a pasted component always
+  // starts unconnected, same as one dropped fresh from the palette).
+  // Ctrl/Cmd+C snapshots the selected one (circuit.copyComponent covers
+  // exactly what "snapshot" includes — every configuration field, an
+  // IO's label with "_copy" appended, no wires); Ctrl/Cmd+V recreates it
+  // centered on the current mouse position (mousePosRef, grid-snapped
+  // like a palette drop), or at the world origin if the mouse hasn't
+  // moved over the page at all yet this load (mouseTrackedRef still
+  // false — mousePos's own {x:0,y:0} init can't tell that case apart
+  // from a real move to (0,0)). Ignored while a text field has focus,
+  // same guard the Delete/Backspace handler (see App) uses, so it
+  // doesn't fight normal text copy/paste there.
+  useEffect(()=>{
+    const fn=(e)=>{
+      if(!(e.ctrlKey||e.metaKey)) return;
+      if(e.target && e.target.tagName==='INPUT') return;
+      const key=e.key.toLowerCase();
+      if(key==='c'){
+        if(!selectedId || selectedId.indexOf('#seg')!==-1) return;
+        const snapshot=circuit.copyComponent(selectedId);
+        if(snapshot) clipboardRef.current=snapshot;
+      } else if(key==='v'){
+        const snapshot=clipboardRef.current;
+        if(!snapshot) return;
+        e.preventDefault();
+        let x=0,y=0;
+        if(mouseTrackedRef.current){
+          const vis=visForComp(snapshot), w=mousePosRef.current;
+          x=snap(w.x-vis.w/2,snapGridRef.current); y=snap(w.y-vis.h/2,snapGridRef.current);
+        }
+        const comp=circuit.pasteComponent(snapshot,x,y);
+        if(comp){ onChangedRef.current?.(); onSelectRef.current?.(comp.id); }
+      }
+    };
+    window.addEventListener('keydown',fn);
+    return()=>window.removeEventListener('keydown',fn);
+  },[circuit, selectedId]);
 
   // Scroll to zoom. Attached as a native listener (not JSX onWheel) because
   // React registers wheel handlers as passive by default, so a synthetic
