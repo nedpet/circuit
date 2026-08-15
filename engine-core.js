@@ -65,6 +65,15 @@ defineModule('engine-core', [], () => {
     }
     const fixed = FIXED_WIDTH_PINS[comp.kind];
     if (fixed && fixed[dir] && fixed[dir].has(idx)) return 1;
+    // A custom gate's ports each carry their own fixed width (set by
+    // registerCustomGate from the bitWidth of the INPUT/OUTPUT it was built
+    // from), unrelated to one another and to any single comp.bitWidth — so
+    // it's recorded per-pin on the GATE_DEF itself (inWidths/outWidths)
+    // rather than fitting the single-bitWidth-per-component shape every
+    // other kind above uses.
+    const def = GATE_DEFS[comp.kind];
+    const widths = def && (dir === 'in' ? def.inWidths : def.outWidths);
+    if (widths) return widths[idx] || 1;
     return BIT_WIDTH_KINDS.has(comp.kind) ? (comp.bitWidth||1) : 1;
   }
 
