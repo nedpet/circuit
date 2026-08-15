@@ -195,7 +195,12 @@ defineModule('gates', ['engine'], (engine) => {
       const on=comp.state.value;
       return <g>
         <rect x="4" y="4" width="52" height="32" rx="16" fill={on?'#fef3c7':'#f3f3f1'} stroke="var(--ink)" strokeWidth="2"/>
-        <circle cx={on?40:20} cy="20" r="11" fill="white" stroke="var(--ink)" strokeWidth="1.5"/>
+        {/* data-knob marks just the switch's knob as the click-to-toggle
+            target — read back the same way BitCells' data-bit is, off the
+            real hit-tested event target — so a click on the rest of the
+            body (the track, the label) drags/selects like anywhere else
+            on a component instead of also toggling the value. */}
+        <circle cx={on?40:20} cy="20" r="11" fill="white" stroke="var(--ink)" strokeWidth="1.5" data-knob="1" style={{cursor:'pointer'}}/>
       </g>;
     },
     // Rendered directly by GateBody (see mirrorTexts there) instead of
@@ -951,13 +956,17 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
           const comp=circuit.components.get(d.id);
           if (comp?.kind==='INPUT') {
             // A stray click on the multi-bit body's padding (not a bit cell)
-            // has no single-bit meaning — only single-bit INPUTs toggle from
-            // an unspecific click; wide ones require hitting an actual cell.
+            // has no single-bit meaning — wide INPUTs require hitting an
+            // actual cell, and a single-bit INPUT requires hitting its
+            // switch knob (data-knob, captured as d.onKnob in
+            // onCompMouseDown) rather than toggling from anywhere on the
+            // body, so a click meant to just select/drag it doesn't also
+            // flip its value.
             if ((comp.bitWidth||1)>1) {
               if (comp.displayMode==='hex') { if (d.digitShift!=null) circuit.incrementInputDigit(comp.id,d.digitShift); }
               else if (d.bitIndex!=null) circuit.toggleInputBit(comp.id,d.bitIndex);
             }
-            else circuit.toggleInput(comp.id);
+            else if (d.onKnob) circuit.toggleInput(comp.id);
             onChangedRef.current?.();
           }
           if (comp?.kind==='CLOCK')  { circuit.toggleClock(comp.id);  onChangedRef.current?.(); }
@@ -1046,11 +1055,13 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
     e.stopPropagation(); if(e.button===2)return;
     const w=screenToWorld(e.clientX,e.clientY);
     // Bit cells (multi-bit INPUT) tag themselves with data-bit, hex-digit
-    // cells with data-shift; reading it off the real event target lets the
-    // browser's own hit-testing tell us which cell was pressed,
-    // transform/rotation and all, instead of re-deriving it.
+    // cells with data-shift, a single-bit INPUT's toggle knob with
+    // data-knob; reading it off the real event target lets the browser's
+    // own hit-testing tell us which cell was pressed, transform/rotation
+    // and all, instead of re-deriving it.
     const bitAttr = e.target && e.target.dataset ? e.target.dataset.bit : undefined;
     const shiftAttr = e.target && e.target.dataset ? e.target.dataset.shift : undefined;
+    const onKnob = !!(e.target && e.target.dataset && e.target.dataset.knob!==undefined);
     const bitIndex = bitAttr!==undefined ? Number(bitAttr) : null;
     const digitShift = shiftAttr!==undefined ? Number(shiftAttr) : null;
     // Snapshot every attached wire's pre-drag points so the live preview
@@ -1077,7 +1088,7 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
         });
       }
     }
-    compDragRef.current={id:comp.id,ox:w.x-comp.x,oy:w.y-comp.y,startSX:e.clientX,startSY:e.clientY,moved:false,bitIndex,digitShift,wireSnapshots,oldAnchors};
+    compDragRef.current={id:comp.id,ox:w.x-comp.x,oy:w.y-comp.y,startSX:e.clientX,startSY:e.clientY,moved:false,bitIndex,digitShift,onKnob,wireSnapshots,oldAnchors};
     onSelect(comp.id);
   };
   const onCompContext=(e,comp)=>{e.preventDefault();circuit.removeComponent(comp.id);onComponentChanged?.();};
@@ -1104,6 +1115,11 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
 
   const onOutputPinDown=(e,comp,idx)=>{
     e.stopPropagation();
+    // Right click here is a delete request (see onCompContext, whose
+    // onContextMenu bubbles up from this same pin's hit circle) — starting
+    // a wire drag on the mousedown that precedes it would leave wiringFrom
+    // pointed at a pin whose component is about to be removed.
+    if (e.button!==0) return;
     const p=pinAbs(comp,'out',idx);
     const wf={type:'pin',compId:comp.id,pin:idx,x:p.x,y:p.y,startX:p.x,startY:p.y,startSX:e.clientX,startSY:e.clientY};
     wiringFromRef.current=wf;
