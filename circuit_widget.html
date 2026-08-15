@@ -171,9 +171,9 @@ defineModule('gates', ['engine'], (engine) => {
         <line x1={geo.trunkX} y1={geo.topY} x2={geo.diagX} y2="0" stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>
         <line x1={geo.trunkX} y1={geo.topY} x2={geo.trunkX} y2={geo.lastY} stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>
         {geo.taps.map((p,i)=>(
-          <g>
+          <g key={i}>
             <line x1={geo.trunkX} y1={p.y} x2={merge ? geo.trunkX-8 : geo.trunkX+8} y2={p.y} stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>
-            <text key={i} x={merge ? geo.trunkX+6 : geo.trunkX-6} y={p.y+3} textAnchor={merge ? 'start' : 'end'}
+            <text x={merge ? geo.trunkX+6 : geo.trunkX-6} y={p.y+3} textAnchor={merge ? 'start' : 'end'}
                   fontFamily="var(--mono)" fontSize="8" fontWeight="600" fill="var(--ink)" opacity="0.6">{i}</text>
           </g>
         ))}
@@ -1015,14 +1015,24 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
     return()=>{window.removeEventListener('mousemove',onMove);window.removeEventListener('mouseup',onUp);};
   },[circuit, screenToWorld]);
 
-  // Scroll to zoom
-  const onWheel=(e)=>{
-    e.preventDefault();
-    const r=svgRef.current.getBoundingClientRect(),v=viewRef.current;
-    const cx=(e.clientX-r.left)/v.zoom-v.x, cy=(e.clientY-r.top)/v.zoom-v.y;
-    const nz=Math.max(.3,Math.min(2.5,v.zoom*Math.exp(-e.deltaY*.0015)));
-    setView(()=>({x:(e.clientX-r.left)/nz-cx, y:(e.clientY-r.top)/nz-cy, zoom:nz}));
-  };
+  // Scroll to zoom. Attached as a native listener (not JSX onWheel) because
+  // React registers wheel handlers as passive by default, so a synthetic
+  // onWheel's preventDefault() is silently ignored (and logs a warning) —
+  // {passive:false} here is what actually stops the page/browser from
+  // scrolling or zooming along with our own zoom.
+  useEffect(()=>{
+    const el = svgRef.current;
+    if (!el) return;
+    const onWheel=(e)=>{
+      e.preventDefault();
+      const r=el.getBoundingClientRect(),v=viewRef.current;
+      const cx=(e.clientX-r.left)/v.zoom-v.x, cy=(e.clientY-r.top)/v.zoom-v.y;
+      const nz=Math.max(.3,Math.min(2.5,v.zoom*Math.exp(-e.deltaY*.0015)));
+      setView(()=>({x:(e.clientX-r.left)/nz-cx, y:(e.clientY-r.top)/nz-cy, zoom:nz}));
+    };
+    el.addEventListener('wheel',onWheel,{passive:false});
+    return()=>el.removeEventListener('wheel',onWheel);
+  },[]);
 
   const onMouseDownBg=(e)=>{
     if(e.button!==0&&e.button!==1)return;
@@ -1541,7 +1551,6 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
     <svg ref={svgRef} className="canvas"
          style={{width:'100%',height:'100%',cursor:isPanning?'grabbing':'default',background:'transparent'}}
          onMouseDown={onMouseDownBg}
-         onWheel={onWheel}
          onContextMenu={e=>e.preventDefault()}>
       <defs>
         <pattern id="grid-dots" x="0" y="0" width={GRID} height={GRID} patternUnits="userSpaceOnUse">
