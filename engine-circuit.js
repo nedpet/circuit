@@ -50,6 +50,25 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
     compensateAnchor(c, anchorKind, 0, apply);
   }
 
+  // step()'s dirty-check (see the "Compute outputs" loop below): whether
+  // two inputVals snapshots are identical, so a component whose inputs
+  // haven't actually changed since the last tick can skip re-running
+  // compute() and just reuse what it returned last time. Plain value
+  // comparison is enough — inputVals are always flat arrays of 0/1 or
+  // small ints, never objects.
+  function arraysEqual(a, b) {
+    if (!a || !b || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+    return true;
+  }
+  // Forces a component's compute() to actually run next tick even though
+  // its inputVals haven't changed — for every setter below that changes
+  // something OTHER than inputVals that compute() also reads (bitWidth,
+  // comp.muxInputs, comp.shiftMode, a CONST's own state.value, ...). Without
+  // this, e.g. widening a gate's bitWidth wouldn't visibly remask its
+  // output until some unrelated input next flips.
+  function markDirty(c) { c._lastInputVals = undefined; }
+
   // Constructs a fresh, empty circuit instance: the mutable component/wire/
   // junction store, plus every operation — simulation stepping, mutation,
   // (de)serialization — that acts on it. Everything below lives in this
@@ -314,9 +333,25 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
       }
       // Compute outputs and hold each change for the gate's own `delay` (ms)
       // before it becomes visible on the output pin
+      //
+      // compute() only actually runs when this component's inputVals
+      // changed since the last tick it ran (or def.alwaysRecompute opts it
+      // out of the check, e.g. CLOCK) — otherwise the exact same inputVals
+      // would just recompute the exact same outs, so the cached c._lastOuts
+      // from last time is reused instead. For a plain gate that's a trivial
+      // saving; for a CUSTOM gate it's the difference that matters — its
+      // compute() runs an entire sub-circuit for up to 10 sub-steps, and
+      // that cost was previously paid every tick for every instance
+      // regardless of whether anything fed into it had changed, compounding
+      // with every level of custom-gate nesting. A settled circuit's
+      // inputVals stop changing almost everywhere, so this turns "replay
+      // the whole nested tree every frame forever" into "only the part
+      // that's actually still settling."
       for (const c of components.values()) {
         const def = GATE_DEFS[c.kind];
-        const outs = def.compute(c.inputVals, c.state, c.bitWidth||1, c)||[];
+        const dirty = def.alwaysRecompute || !arraysEqual(c.inputVals, c._lastInputVals);
+        const outs = dirty ? (def.compute(c.inputVals, c.state, c.bitWidth||1, c)||[]) : c._lastOuts;
+        if (dirty) { c._lastInputVals = c.inputVals.slice(); c._lastOuts = outs; }
         if (!c.pendingOutputVals) c.pendingOutputVals = [];
         if (!c.pendingOutputStart) c.pendingOutputStart = [];
         for (let i=0;i<outs.length;i++) {
@@ -451,16 +486,31 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
       // the flat geometric one — see wireOwnDelay's own comment above for
       // why a branch's real delay isn't just wireDelayForLength(wireLen).
       wireOwnDelay,
+      // Forces `id`'s compute() to actually run next tick even though its
+      // inputVals haven't changed — see markDirty above. Exposed for
+      // callers outside this module that mutate a component's state
+      // directly instead of through one of the setters below, which all
+      // already call markDirty themselves. Specifically: a CUSTOM gate's
+      // own compute() (circuit_widget.html) pokes its sub-circuit's INPUT
+      // ports' state.value this same way every time it runs, and an INPUT
+      // has zero inputVals — so without this, that port's own compute()
+      // would look "unchanged" forever after its first run and the whole
+      // custom gate would freeze on its first-ever result.
+      markComponentDirty(id) {
+        const c = components.get(id);
+        if (c) markDirty(c);
+      },
       // Flips a single-bit INPUT's value
       toggleInput(id){
         const c=components.get(id);
-        if(c&&c.kind==='INPUT') c.state.value=c.state.value?0:1;
+        if(c&&c.kind==='INPUT') { c.state.value=c.state.value?0:1; markDirty(c); }
       },
       // Flips one bit of a multi-bit INPUT's value (in binary mode)
       toggleInputBit(id,bit){
         const c=components.get(id); if(!c||c.kind!=='INPUT') return;
         const width=c.bitWidth||1; if (bit<0||bit>=width) return;
         c.state.value = ((c.state.value||0) ^ (1<<bit)) >>> 0;
+        markDirty(c);
       },
       // Increments one nibble of a multi-bit INPUT's value (in hexadecimal mode), wrapping F to 0
       // Remasks to bitWidth so a wrap on a partial top nibble can't leak bits past the pin's width
@@ -471,6 +521,7 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
         const nibble=(v>>>shift)&0xF;
         const cleared=v & ~(0xF<<shift);
         c.state.value = maskVal((cleared | (((nibble+1)&0xF)<<shift))>>>0, width);
+        markDirty(c);
       },
       // Changes a component's bitWidth (clamped 1-32)
       // Remasks any value already stored on it so it doesn't silently keep bits beyond the new, narrower width
@@ -486,16 +537,19 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
         compensateIOAnchor(c, width, c.displayMode);
         if (c.kind==='INPUT' || c.kind==='CONST') c.state.value = maskVal(c.state.value||0, width);
         if (c.kind==='REG') c.state.q = maskVal(c.state.q||0, width);
+        markDirty(c);
       },
       // Sets EXTND's input width (clamped 1-32)
       setExtBitWidthIn(id,w){
         const c=components.get(id); if(!c||c.kind!=='EXTND') return;
         c.bitWidthIn=Math.max(1,Math.min(32,Math.round(w)||1));
+        markDirty(c);
       },
       // Sets EXTND's output width (clamped 1-32)
       setExtBitWidthOut(id,w){
         const c=components.get(id); if(!c||c.kind!=='EXTND') return;
         c.bitWidthOut=Math.max(1,Math.min(32,Math.round(w)||1));
+        markDirty(c);
       },
       // Switches a component's canvas readout between binary and hex
       setDisplayMode(id,mode){
@@ -512,6 +566,7 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
       setShiftMode(id,mode){
         const c=components.get(id); if(!c||c.kind!=='SHFT') return;
         c.shiftMode = (mode==='right'||mode==='arith') ? mode : 'left';
+        markDirty(c);
       },
       // Changes MUX's number of inputs (clamped 2-4)
       setMuxInputs(id,n){
@@ -524,6 +579,7 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
         // the body grows/shrinks to fit the new count, same reasoning as
         // compensateIOAnchor.
         compensateAnchor(c, 'in', 0, () => { c.muxInputs=newN; });
+        markDirty(c);
         // Wires connected to the select pin need to have their index updated
         // Wires connected to now deleted inputs are also deleted
         for (const [wid,w] of wires) {
@@ -549,6 +605,7 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
         // new count. Its kind (in for 'split' mode, out for 'merge')
         // follows splitType, same as everywhere else that pin is found.
         compensateAnchor(c, c.splitType==='merge' ? 'out' : 'in', 0, () => { c.bits=newN; });
+        markDirty(c);
         // Drop any wires still attached to now deleted pins
         // Which side those pins are on depends on splitType (outputs in split mode, inputs in merge mode)
         const merge = c.splitType==='merge';
@@ -573,6 +630,7 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
         const t = type==='merge' ? 'merge' : 'split';
         if (t===c.splitType) return;
         c.splitType=t;
+        markDirty(c);
         // Delete all wires originally attached as the context in which they were attached no longer exists
         for (const [wid,w] of wires) {
           if (w.from.compId===id || w.to.compId===id) wires.delete(wid);
@@ -601,6 +659,7 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
       setConstValue(id,v){
         const c=components.get(id); if(!c||c.kind!=='CONST') return;
         c.state.value = maskVal(Math.max(0,Math.round(Number(v)||0)), c.bitWidth||1);
+        markDirty(c);
       },
       // Rotates/mirrors a component by setting its facing (right, left, up, or down)
       setFacing(id,f){

@@ -90,7 +90,14 @@ defineModule('engine-core', [], () => {
               compute:(i,s,w) => [maskVal(s.value||0, w||1)] },
     OUTPUT: { kind:'OUTPUT',  label:'OUT',   inputs:1, outputs:0, family:'io',
               compute:()=>[] },
-    CLOCK:  { kind:'CLOCK',   label:'CLK',   inputs:0, outputs:1, family:'io',
+    // alwaysRecompute: a CLOCK has zero inputs, so its `inputVals` never
+    // changes — step()'s dirty-check (engine-circuit.js) would otherwise
+    // read that as "nothing to do" forever after the first tick and never
+    // notice the tick loop flipping s.value out from under it. This is the
+    // one gate kind whose output legitimately changes on its own, so it
+    // opts out of the dirty-check instead of trying to make the check
+    // itself understand time.
+    CLOCK:  { kind:'CLOCK',   label:'CLK',   inputs:0, outputs:1, family:'io', alwaysRecompute:true,
               compute:(i,s) => [s.value?1:0] },
     CONST:  { kind:'CONST',   label:'CONST', inputs:0, outputs:1, family:'io',
               compute:(i,s,w) => [maskVal(s.value||0, w||1)] },

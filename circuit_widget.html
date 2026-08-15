@@ -632,6 +632,18 @@ defineModule('gates', ['engine'], (engine) => {
     // per-pin on the def itself since pinBitWidthAt (engine-core) has no
     // other per-instance place to read a custom gate's widths from.
     const inWidths=ins.map(c=>c.bitWidth||1), outWidths=outs.map(c=>c.bitWidth||1);
+    // Whether this gate's own output can drift over time even while its
+    // (outer) inputVals stay fixed — true if its sub-circuit contains a
+    // live CLOCK, directly or through another custom gate that's already
+    // carrying the same flag (dependencies always register before the
+    // custom gates that use them — see hydrateCustomGates). step()'s
+    // dirty-check (engine-circuit.js) reads this to know it isn't safe to
+    // skip recomputing this kind just because nothing obviously changed —
+    // skipping would silently freeze a clock buried anywhere inside it.
+    const alwaysRecompute = [...tmp.components.values()].some(c => {
+      const d = GATE_DEFS[c.kind];
+      return d && d.alwaysRecompute;
+    });
 
     const h = Math.max(H, CUSTOM_PIN_MARGIN*2 + (Math.max(inIds.length,outIds.length,1)-1)*CUSTOM_PIN_GAP);
     const inYs = customPinYs(inIds.length, h), outYs = customPinYs(outIds.length, h);
@@ -642,7 +654,7 @@ defineModule('gates', ['engine'], (engine) => {
 
     GATE_DEFS[kindKey] = {
       kind:kindKey, label:name, inputs:inIds.length, outputs:outIds.length, family:'custom',
-      inWidths, outWidths,
+      inWidths, outWidths, alwaysRecompute,
       compute(inputVals, state) {
         if (!state.sub) { state.sub = engine.createCircuit(); state.sub.load(data); }
         const sub = state.sub;
@@ -651,7 +663,11 @@ defineModule('gates', ['engine'], (engine) => {
         // same as a top-level INPUT would. Coercing to a single bit here
         // (as before multi-bit support) silently dropped every bit above
         // bit 0 of a wide input.
-        inIds.forEach((ioId,i)=>{ const c=sub.ioComponents.get(ioId); if (c) c.state.value = inputVals[i]||0; });
+        // markComponentDirty: an INPUT has zero inputVals, so step()'s
+        // dirty-check (engine-circuit.js) would otherwise see this port as
+        // "unchanged" on every call after the first and skip recomputing it
+        // forever — same reason toggleInput/setConstValue/etc. call it too.
+        inIds.forEach((ioId,i)=>{ const c=sub.ioComponents.get(ioId); if (c) { c.state.value = inputVals[i]||0; sub.markComponentDirty(c.id); } });
         for (let i=0;i<10;i++) sub.step(performance.now(), 0, true);
         return outIds.map(ioId=>{ const c=sub.ioComponents.get(ioId); return c ? (c.inputVals[0]||0) : 0; });
       }
