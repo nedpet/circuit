@@ -2136,7 +2136,11 @@ function App(){
     upsertCustomRegistry(s.name,s.data);
     setCustomKinds(prev=>prev.includes(kind)?prev:[...prev,kind]);
   };
-  const doClear=()=>{if(!confirm('Clear canvas?'))return;[...circuit.components.keys()].forEach(id=>circuit.removeComponent(id));refresh();};
+  const doClear=()=>{
+    if(!confirm('Clear canvas?'))return;
+    [...circuit.components.keys()].forEach(id=>circuit.removeComponent(id));
+    refresh();
+  };
   const generateEquation=()=>{
 
     const inputs = Array.from(circuit.ioComponents.values()).

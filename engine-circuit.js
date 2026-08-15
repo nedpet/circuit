@@ -57,7 +57,6 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
   // without threading them through every call.
   function createCircuit() {
     let nextId = 1;
-    let nextIoId = 1;
     const components = new Map();
     const ioComponents = new Map();
     const wires = new Map();
@@ -69,7 +68,7 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
     function addComponent(kind, x, y, facing = "right", delay = 0, label = "none", bitWidth, muxInputs, bitWidthIn, bitWidthOut, bits, space, splitType) {
       const def = GATE_DEFS[kind];
       const id = 'c'+(nextId++);
-      const ioId = kind==='INPUT' || kind==='OUTPUT' ? 'io'+(nextIoId++) : ''
+      const ioId = kind==='INPUT' || kind==='OUTPUT' ? 'io'+(ioComponents.size + 1) : ''
       // MUX and SPLIT's number of inputs varies per instance, so its
       // inputVals can't be sized off the kind's static def.inputs
       const muxN = kind==='MUX' ? Math.max(2,Math.min(4,Math.round(muxInputs||2))) : undefined;
@@ -398,7 +397,7 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
           state:c.kind==='INPUT'||c.kind==='CONST'?{value:c.state.value}:c.kind==='CLOCK'?{period:c.state.period,paused:c.state.paused}:{}})),
         wires: [...wires.values()].map(w=>({id:w.id,from:w.from,to:w.to,points:w.points||[]})),
         junctions: [...junctions],
-        nextId, nextIoId,
+        nextId,
       };
     }
 
@@ -433,7 +432,6 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
         junctions.add(j);
       }
       nextId=Math.max(data.nextId||1,nextId);
-      nextIoId=Math.max(data.nextIoId||1,nextIoId);
     }
 
     // Return for createCircuit(): returns all properties and methods the app may need to access after build
