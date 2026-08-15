@@ -584,7 +584,7 @@ defineModule('gates', ['engine'], (engine) => {
   // Registers a saved circuit as a placeable gate: a white rounded box sized
   // to fit its inputs (left) / outputs (right), simulated as a black box by
   // running a private nested circuit to settling on every compute() call.
-  const CUSTOM_PIN_MARGIN = 20, CUSTOM_PIN_GAP = 30;
+  const CUSTOM_PIN_MARGIN = 20, CUSTOM_PIN_GAP = 40;
   function customPinYs(n, h) {
     if (n <= 1) return [h/2];
     const usable = h - CUSTOM_PIN_MARGIN*2;
