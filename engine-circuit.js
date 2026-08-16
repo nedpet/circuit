@@ -621,7 +621,7 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
         // changes the trunk's own length (see splitGeometry), just via a
         // different field.
         compensateAnchor(c, c.splitType==='merge' ? 'out' : 'in', 0, () => {
-          c.space=Math.max(1,Math.min(8,Math.round(n)||1));
+          c.space=Math.max(1,Math.min(16,Math.round(n)||1));
         });
       },
       // Switches SPLIT mode between split and merge

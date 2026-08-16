@@ -45,7 +45,7 @@ defineModule('engine-geometry', ['state'], (state) => {
   const SPLIT_UNIT = 20; // matches the widget's own 20px grid snap
   function splitGeometry(n, space, type) {
     const bits = Math.max(2, Math.min(8, n|0||2));
-    const sp = Math.max(1, Math.min(8, space|0||1));
+    const sp = Math.max(1, Math.min(16, space|0||1));
     const merge = type==='merge';
     const gap = sp*SPLIT_UNIT, topY = SPLIT_UNIT;
     const w = SPLIT_UNIT + 20; 

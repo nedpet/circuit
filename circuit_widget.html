@@ -182,7 +182,7 @@ defineModule('gates', ['engine'], (engine) => {
   const splitVisCache = {};
   function splitVis(n, space, type) {
     const bits = Math.max(2, Math.min(8, n|0||2));
-    const sp = Math.max(1, Math.min(8, space|0||1));
+    const sp = Math.max(1, Math.min(16, space|0||1));
     const merge = type==='merge';
     const key = bits+'_'+sp+'_'+(merge?'m':'s');
     return splitVisCache[key] || (splitVisCache[key] = buildSplitVis(bits, sp, merge));
@@ -1562,7 +1562,7 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
           </div>
           <div className="prop-option">
             <span className="prop-label">Space</span>
-            <NumberField className="prop-input" min={1} max={8}
+            <NumberField className="prop-input" min={1} max={16}
                     value={selComp.space||1}
                     onCommit={n=>{circuit.setSplitSpace(selComp.id,n);onComponentChanged?.();}}/>
           </div>
@@ -2386,7 +2386,7 @@ function App(){
       {/* Propagation delay */}
       <div className="tb-delay">
         <span>Propagation Delay</span>
-        <input type="range" min="10" max="2000" step="10" value={delayMs}
+        <input type="range" min="0" max="2000" step="10" value={delayMs}
                onChange={e=>setDelayMs(Number(e.target.value))}/>
         <span className="tb-delay-val">{delayMs}ms</span>
       </div>
