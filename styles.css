@@ -82,6 +82,21 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
 .pal-del-btn:hover { background:#dc2626; border-color:#dc2626; color:#fff; }
 .pal-del-btn svg { display:block; pointer-events:none; }
 
+/* SPLIT's "Custom Layout..." menu button — top-right corner of its
+   properties panel, only shown once Layout is set to Custom. Square
+   (vs. pal-del-btn's circular delete button) and neutral on hover since
+   it opens a dialog rather than deleting anything. */
+.split-menu-btn {
+  position:absolute; top:8px; right:8px; z-index:1;
+  width:20px; height:20px; border-radius:4px; padding:0;
+  background:var(--bg); border:1px solid var(--border-md); color:var(--ink-2);
+  display:flex; align-items:center; justify-content:center;
+  cursor:pointer; line-height:1;
+  transition:background .1s, border-color .1s, color .1s;
+}
+.split-menu-btn:hover { background:var(--panel); border-color:var(--border-md); color:var(--ink); }
+.split-menu-btn svg { display:block; pointer-events:none; }
+
 /* canvas */
 .canvas-wrap { flex:1; position:relative; min-width:0; }
 .canvas      { display:block; }
@@ -118,6 +133,44 @@ input, textarea { -webkit-user-select:text; -moz-user-select:text; -ms-user-sele
 .modal-bg { position:fixed; inset:0; background:rgba(26,26,24,.28); display:grid; place-items:center; z-index:100; }
 .modal { background:var(--bg); border-radius:10px; padding:20px; width:400px; max-width:calc(100vw - 32px); box-shadow:var(--shadow); border:1px solid var(--border); }
 .modal-title { font-size:14px; font-weight:600; margin-bottom:12px; }
+/* Wider modal for the "SPLIT Custom Layout" dialog's two-column
+   preview+options layout — the base .modal's 400px is too narrow to fit
+   both side by side. Its fixed-height preview (.split-layout-preview)
+   makes this dialog tall enough that a short viewport can be shorter than
+   the dialog itself — .modal-bg has no scrolling of its own, so without
+   this the Exit button (and whatever else lands below the fold) would be
+   simply unreachable rather than just needing a scroll. */
+.modal.split-layout-modal { width:640px; max-height:calc(100vh - 40px); overflow-y:auto; }
+.split-layout-body { display:flex; gap:20px; align-items:flex-start; }
+/* Fixed footprint so a large custom layout's preview (more pins, taller
+   trunk) never grows the dialog itself — it scrolls internally instead.
+   Background is --panel (a touch greyer than the dialog's own --bg) so
+   the preview reads as its own inset area. */
+.split-layout-preview {
+  flex:none; width:260px; height:320px; overflow:auto;
+  background:var(--panel); border:1px solid var(--border); border-radius:var(--r);
+  display:flex;
+}
+/* Centers the preview svg when it's smaller than the box above, WITHOUT
+   the `justify/align-items:center` + overflow:auto combination's classic
+   bug (unsupported on some engines, and even where it's supported the
+   `safe` keyword needed to fix it isn't always honored) where a centered
+   item bigger than its box becomes partly unreachable by scrolling.
+   auto margins on a flex item are exactly the standard "center if it
+   fits, otherwise flush to the start and fully scrollable" trick: flexbox
+   only gives auto margins a share of *positive* leftover space, so once
+   the svg is as big as (or bigger than) the box, they simply resolve to
+   0 in that axis instead of clipping anything. flex-shrink:0 stops the
+   svg from being squashed to fit instead of overflowing (which would
+   leave nothing to scroll at all, most visibly on the 'up'/'down'
+   facings, whose preview is wide rather than tall). */
+.split-layout-preview svg { margin:auto; flex-shrink:0; }
+.split-layout-options { flex:1; min-width:0; align-content:start; }
+/* Each tap's own bit-width field in the preview — just wide enough for a
+   2-digit value plus the native number input's increment/decrement
+   buttons, unlike the properties panel's compact .prop-input (width:100%,
+   sized for a full property row instead of a small overlay control). */
+.pin-bits-input { width:42px; height:20px; padding:0 2px; font-size:11px; border-radius:4px; border:1px solid var(--border); font-family:inherit; background:var(--bg); color:var(--ink); outline:none; }
 .text-input { width:100%; padding:8px 10px; border-radius:var(--r); border:1px solid var(--border); font:inherit; font-size:13px; background:var(--bg); color:var(--ink); outline:none; }
 .text-input:focus { border-color:var(--border-md); box-shadow:0 0 0 3px rgba(26,26,24,.06); }
 .dialog-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:14px; }

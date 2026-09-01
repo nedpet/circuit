@@ -38,13 +38,19 @@ defineModule('engine-geometry', ['state'], (state) => {
     return { w:W, h, inputs, outputs:[{x:W,y:outY}], bt, bb, rt, rb };
   }
 
-  // Returns the width, height, input/output locations, 
-  // x-coords of the vertical trunk, 1-bit pins, and n-bit pin,
-  // coords of the 1-bit pins, and y-coords of the top and bottom 1-bit pins
-  // for a splitter of n bits, space units between the 1-bit pins, and type (merge or split)
+  // Returns the width, height, input/output locations,
+  // x-coords of the vertical trunk, tap pins, and wide (trunk-side) pin,
+  // coords of the tap pins, and y-coords of the top and bottom tap pins
+  // for a splitter with n taps, space units between taps, and type (merge or split).
+  // n is the number of TAPS, not necessarily the trunk's bit width — in the
+  // regular layout they're the same (one tap per bit), but the custom
+  // layout can have fewer/more taps than trunk bits, each carrying its own
+  // width (see engine-core's pinBitWidthAt/GATE_DEFS.SPLIT.compute); tap
+  // *position* only ever depends on the count and spacing, never on any
+  // tap's individual width, so this function doesn't need to know widths.
   const SPLIT_UNIT = 20; // matches the widget's own 20px grid snap
   function splitGeometry(n, space, type) {
-    const bits = Math.max(2, Math.min(8, n|0||2));
+    const bits = Math.max(2, Math.min(32, n|0||2));
     const sp = Math.max(1, Math.min(16, space|0||1));
     const merge = type==='merge';
     const gap = sp*SPLIT_UNIT, topY = SPLIT_UNIT;

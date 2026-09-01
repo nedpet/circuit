@@ -69,6 +69,22 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
   // output until some unrelated input next flips.
   function markDirty(c) { c._lastInputVals = undefined; }
 
+  // Validates a candidate SPLIT custom-layout pin-width array against a
+  // trunk width: must be an array of 2..bits positive integers summing
+  // exactly to bits (every trunk bit assigned to exactly one pin). Returns
+  // the array unchanged if valid, otherwise null so callers (addComponent,
+  // setSplitLayout) can fall back to a fresh default instead of trusting
+  // stale/hand-edited data.
+  function validSplitPinBits(pinBits, bits) {
+    if (!Array.isArray(pinBits) || pinBits.length<2 || pinBits.length>bits) return null;
+    let sum = 0;
+    for (const w of pinBits) {
+      if (!Number.isInteger(w) || w<1) return null;
+      sum += w;
+    }
+    return sum===bits ? pinBits : null;
+  }
+
   // Constructs a fresh, empty circuit instance: the mutable component/wire/
   // junction store, plus every operation — simulation stepping, mutation,
   // (de)serialization — that acts on it. Everything below lives in this
@@ -85,17 +101,27 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
     // Creates, registers, and returns a new component of `kind` at (x,y)
     // Most trailing params only apply to a few specific kinds;
     // they are stored as `undefined` on every other kind
-    function addComponent(kind, x, y, facing = "right", delay = 0, label = "none", bitWidth, muxInputs, bitWidthIn, bitWidthOut, bits, space, splitType) {
+    function addComponent(kind, x, y, facing = "right", delay = 0, label = "none", bitWidth, muxInputs, bitWidthIn, bitWidthOut, bits, space, splitType, layout, pinBits) {
       const def = GATE_DEFS[kind];
       const id = 'c'+(nextId++);
       const ioId = kind==='INPUT' || kind==='OUTPUT' ? 'io'+(nextIoId++) : ''
       // MUX and SPLIT's number of inputs varies per instance, so its
       // inputVals can't be sized off the kind's static def.inputs
       const muxN = kind==='MUX' ? Math.max(2,Math.min(4,Math.round(muxInputs||2))) : undefined;
-      const splitBitsN = kind==='SPLIT' ? Math.max(2,Math.min(8,Math.round(bits||2))) : undefined;
+      const splitBitsN = kind==='SPLIT' ? Math.max(2,Math.min(32,Math.round(bits||2))) : undefined;
       const splitTypeV = kind==='SPLIT' ? (splitType==='merge' ? 'merge' : 'split') : undefined;
+      // The custom layout's per-pin widths, sanity-checked against the
+      // resolved bit count above (see validSplitPinBits) — an invalid or
+      // absent array (fresh placement, legacy save, hand-edited JSON)
+      // falls back to the same one-pin-per-bit shape the regular layout
+      // uses, so a freshly-flipped 'custom' component never looks
+      // different from 'regular' until the user actually customizes it.
+      const splitLayoutV = kind==='SPLIT' ? (layout==='custom' ? 'custom' : 'regular') : undefined;
+      const splitPinBitsV = kind==='SPLIT' && splitLayoutV==='custom'
+        ? (validSplitPinBits(pinBits, splitBitsN) || Array(splitBitsN).fill(1))
+        : undefined;
       const inputCount = kind==='MUX' ? muxN+1
-                        : (kind==='SPLIT' && splitTypeV==='merge') ? splitBitsN
+                        : (kind==='SPLIT' && splitTypeV==='merge') ? (splitLayoutV==='custom' ? splitPinBitsV.length : splitBitsN)
                         : def.inputs;
       const comp = {
         id, ioId, kind, x, y,
@@ -118,6 +144,8 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
         bits:  splitBitsN,                                                                                    // number of bits to split
         space: kind==='SPLIT' ? Math.max(1,Math.min(8,Math.round(space||1))) : undefined,                     // space between 1-bit pins
         splitType: splitTypeV,                                                                                // split or merge
+        layout: splitLayoutV,                                                                                 // regular (one 1-bit pin per bit) or custom (varying pin widths)
+        pinBits: splitPinBitsV,                                                                               // custom layout only: each pin's own bit width, summing to `bits`
       };
       components.set(id, comp);
       if (ioId != '') {
@@ -429,7 +457,7 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
     // Snapshots the circuit into a plain-object form suitable for JSON.stringify (Save), mirrored by load below
     function serialize() {
       return {
-        components: [...components.values()].map(c=>({id:c.id,ioId:c.ioId,kind:c.kind,x:c.x,y:c.y,facing:c.facing,delay:c.delay,label:c.label,bitWidth:c.bitWidth,displayMode:c.displayMode,shiftMode:c.shiftMode,muxInputs:c.muxInputs,muxSelectLocation:c.muxSelectLocation,bitWidthIn:c.bitWidthIn,bitWidthOut:c.bitWidthOut,bits:c.bits,space:c.space,splitType:c.splitType,
+        components: [...components.values()].map(c=>({id:c.id,ioId:c.ioId,kind:c.kind,x:c.x,y:c.y,facing:c.facing,delay:c.delay,label:c.label,bitWidth:c.bitWidth,displayMode:c.displayMode,shiftMode:c.shiftMode,muxInputs:c.muxInputs,muxSelectLocation:c.muxSelectLocation,bitWidthIn:c.bitWidthIn,bitWidthOut:c.bitWidthOut,bits:c.bits,space:c.space,splitType:c.splitType,layout:c.layout,pinBits:c.pinBits?[...c.pinBits]:undefined,
           state:c.kind==='INPUT'||c.kind==='CONST'?{value:c.state.value}:c.kind==='CLOCK'?{period:c.state.period,paused:c.state.paused}:{}})),
         wires: [...wires.values()].map(w=>({id:w.id,from:w.from,to:w.to,points:w.points||[]})),
         junctions: [...junctions],
@@ -445,7 +473,7 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
       // Only after every component is processed do they get assigned their actual ids
       const builtComponents = [];
       for (const cd of data.components||[]) {
-        const c=addComponent(cd.kind,cd.x,cd.y,cd.facing,cd.delay,undefined,cd.bitWidth,cd.muxInputs,cd.bitWidthIn,cd.bitWidthOut,cd.bits,cd.space,cd.splitType); components.delete(c.id); ioComponents.delete(c.ioId);
+        const c=addComponent(cd.kind,cd.x,cd.y,cd.facing,cd.delay,undefined,cd.bitWidth,cd.muxInputs,cd.bitWidthIn,cd.bitWidthOut,cd.bits,cd.space,cd.splitType,cd.layout,cd.pinBits); components.delete(c.id); ioComponents.delete(c.ioId);
         if(cd.label!==undefined) c.label=cd.label;
         if(cd.displayMode!==undefined) c.displayMode=cd.displayMode;
         if(cd.shiftMode!==undefined) c.shiftMode=cd.shiftMode;
@@ -593,10 +621,21 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
         const c=components.get(id); if(!c||c.kind!=='MUX') return;
         c.muxSelectLocation = loc==='bottom' ? 'bottom' : 'top';
       },
-      // Changes SPLIT's bit count (clamped 2-8)
+      // Changes SPLIT's total bit count (clamped 2-32)
+      // In the custom layout, per-pin widths must keep summing to this
+      // total, so a change here cascades onto the LAST pin: growing the
+      // total hands the whole increase to it; shrinking it takes bits back
+      // from it (and, once it's down to 1, the next-to-last pin, and so
+      // on) — the same "last pin absorbs the change" rule setSplitPinCount
+      // uses for adding/removing a pin, just applied to a width change
+      // instead of a count change. That means the total can never drop
+      // below the current pin count (every pin needs >=1 bit), so the
+      // effective minimum is raised accordingly for custom layouts.
       setSplitBits(id,n){
         const c=components.get(id); if(!c||c.kind!=='SPLIT') return;
-        const newN=Math.max(2,Math.min(8,Math.round(n)||2));
+        const custom = c.layout==='custom' && Array.isArray(c.pinBits);
+        const floor = custom ? Math.max(2,c.pinBits.length) : 2;
+        const newN=Math.max(floor,Math.min(32,Math.round(n)||2));
         const oldN=c.bits||2;
         if (newN===oldN) return;
         // The diagonal (wide-bus) pin always sits at the same local
@@ -604,14 +643,32 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
         // anchor pin to keep put as the trunk grows/shrinks to fit the
         // new count. Its kind (in for 'split' mode, out for 'merge')
         // follows splitType, same as everywhere else that pin is found.
-        compensateAnchor(c, c.splitType==='merge' ? 'out' : 'in', 0, () => { c.bits=newN; });
+        compensateAnchor(c, c.splitType==='merge' ? 'out' : 'in', 0, () => {
+          c.bits=newN;
+          if (custom) {
+            let diff = newN - oldN;
+            if (diff > 0) {
+              c.pinBits[c.pinBits.length-1] += diff;
+            } else {
+              let need = -diff;
+              for (let i=c.pinBits.length-1; i>=0 && need>0; i--) {
+                const take = Math.min(need, c.pinBits[i]-1);
+                c.pinBits[i] -= take;
+                need -= take;
+              }
+            }
+          }
+        });
         markDirty(c);
-        // Drop any wires still attached to now deleted pins
-        // Which side those pins are on depends on splitType (outputs in split mode, inputs in merge mode)
+        // Drop any wires still attached to now deleted pins (regular
+        // layout only — in custom mode this width change never changes
+        // the pin COUNT, so nothing here is actually deleted, but the
+        // check is harmless to leave in place for both).
         const merge = c.splitType==='merge';
+        const pinCount = custom ? c.pinBits.length : newN;
         for (const [wid,w] of wires) {
           const t = merge ? w.to : w.from;
-          if (t.compId===id && typeof t.pin==='number' && t.pin>=newN) wires.delete(wid);
+          if (t.compId===id && typeof t.pin==='number' && t.pin>=pinCount) wires.delete(wid);
         }
       },
       // Sets the spacing (in grid units, clamped 1-8) between SPLIT's single-bit pins
@@ -635,6 +692,90 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
         for (const [wid,w] of wires) {
           if (w.from.compId===id || w.to.compId===id) wires.delete(wid);
         }
+      },
+      // Switches SPLIT between the regular layout (one 1-bit pin per bit)
+      // and the custom layout (pins with independently-set widths)
+      setSplitLayout(id,layout){
+        const c=components.get(id); if(!c||c.kind!=='SPLIT') return;
+        const t = layout==='custom' ? 'custom' : 'regular';
+        if (t===c.layout) return;
+        // Entering custom: reuse whatever pinBits is already sitting on
+        // this component (from a previous custom session) if it's still
+        // valid for the current bit count, so flipping layout back and
+        // forth doesn't throw away a customization the user already made.
+        // If it's missing or stale (e.g. `bits` changed while regular),
+        // fall back to the same one-pin-per-bit shape the regular layout
+        // already shows, so the flip itself never causes a visual jump.
+        const pinCountBefore = c.layout==='custom' && Array.isArray(c.pinBits) ? c.pinBits.length : (c.bits||2);
+        compensateAnchor(c, c.splitType==='merge' ? 'out' : 'in', 0, () => {
+          c.layout = t;
+          if (t==='custom') {
+            c.pinBits = validSplitPinBits(c.pinBits, c.bits||2) || Array(c.bits||2).fill(1);
+          }
+        });
+        markDirty(c);
+        // Prune wires on pins that no longer exist under the new pin count
+        const merge = c.splitType==='merge';
+        const pinCountAfter = t==='custom' ? c.pinBits.length : (c.bits||2);
+        if (pinCountAfter < pinCountBefore) {
+          for (const [wid,w] of wires) {
+            const term = merge ? w.to : w.from;
+            if (term.compId===id && typeof term.pin==='number' && term.pin>=pinCountAfter) wires.delete(wid);
+          }
+        }
+      },
+      // Changes SPLIT's number of pins in the custom layout (clamped 2 to
+      // the current total bit count, since every pin needs >=1 bit).
+      // Growing adds a new 1-bit pin and steals that bit from the last
+      // pin that has one to spare; shrinking removes the last pin and
+      // hands its bits to the (new) last pin — repeated once per pin
+      // added/removed, so total bits never changes here, only how they're
+      // divided up.
+      setSplitPinCount(id,n){
+        const c=components.get(id); if(!c||c.kind!=='SPLIT'||c.layout!=='custom'||!Array.isArray(c.pinBits)) return;
+        const total = c.bits||2;
+        const newN = Math.max(2,Math.min(total,Math.round(n)||2));
+        const oldN = c.pinBits.length;
+        if (newN===oldN) return;
+        compensateAnchor(c, c.splitType==='merge' ? 'out' : 'in', 0, () => {
+          if (newN > oldN) {
+            for (let k=0;k<newN-oldN;k++) {
+              let idx=-1;
+              for (let i=c.pinBits.length-1;i>=0;i--) { if (c.pinBits[i]>1) { idx=i; break; } }
+              if (idx===-1) break; // no spare bit anywhere — shouldn't happen since newN<=total
+              c.pinBits[idx]--;
+              c.pinBits.push(1);
+            }
+          } else {
+            for (let k=0;k<oldN-newN;k++) {
+              const removed = c.pinBits.pop();
+              c.pinBits[c.pinBits.length-1] += removed;
+            }
+          }
+        });
+        markDirty(c);
+        const merge = c.splitType==='merge';
+        for (const [wid,w] of wires) {
+          const t = merge ? w.to : w.from;
+          if (t.compId===id && typeof t.pin==='number' && t.pin>=c.pinBits.length) wires.delete(wid);
+        }
+      },
+      // Sets a single pin's own bit width in the custom layout, clamped to
+      // 1..(total bits minus every OTHER pin's width) so the pins always
+      // keep summing to the total. Never moves any pin (tap position only
+      // depends on pin count/spacing, never on individual widths — see
+      // splitGeometry), so unlike the other SPLIT setters this doesn't
+      // need compensateAnchor.
+      setSplitPinBits(id,idx,n){
+        const c=components.get(id); if(!c||c.kind!=='SPLIT'||c.layout!=='custom'||!Array.isArray(c.pinBits)) return;
+        if (idx<0 || idx>=c.pinBits.length) return;
+        const total = c.bits||2;
+        const sumOthers = c.pinBits.reduce((a,b,i)=> i===idx ? a : a+b, 0);
+        const maxForPin = Math.max(1, total-sumOthers);
+        const newVal = Math.max(1, Math.min(maxForPin, Math.round(n)||1));
+        if (newVal === c.pinBits[idx]) return;
+        c.pinBits[idx] = newVal;
+        markDirty(c);
       },
       // Pauses/resumes a CLOCK
       // When resuming, restarts its tick timer to start from now so it doesn't immediately jump using a stale lastTick
@@ -687,6 +828,7 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
           muxInputs:c.muxInputs, muxSelectLocation:c.muxSelectLocation,
           bitWidthIn:c.bitWidthIn, bitWidthOut:c.bitWidthOut,
           bits:c.bits, space:c.space, splitType:c.splitType,
+          layout:c.layout, pinBits:c.pinBits?[...c.pinBits]:undefined,
           // Only the sliver of `state` that's real configuration rather
           // than ephemeral runtime carries over — mirrors serialize(),
           // with one deliberate difference: a CLOCK drops paused/lastTick,
@@ -705,7 +847,7 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
         if (!snapshot) return null;
         const c = addComponent(snapshot.kind, x, y, snapshot.facing, snapshot.delay, snapshot.label,
                                 snapshot.bitWidth, snapshot.muxInputs, snapshot.bitWidthIn, snapshot.bitWidthOut,
-                                snapshot.bits, snapshot.space, snapshot.splitType);
+                                snapshot.bits, snapshot.space, snapshot.splitType, snapshot.layout, snapshot.pinBits);
         if (snapshot.displayMode!==undefined) c.displayMode=snapshot.displayMode;
         if (snapshot.shiftMode!==undefined) c.shiftMode=snapshot.shiftMode;
         if (snapshot.muxSelectLocation!==undefined) c.muxSelectLocation=snapshot.muxSelectLocation;

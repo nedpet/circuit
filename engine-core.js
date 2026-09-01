@@ -59,9 +59,15 @@ defineModule('engine-core', [], () => {
       return dir === 'in' ? (comp.bitWidthIn||1) : (comp.bitWidthOut||1);
     }
     if (comp.kind === 'SPLIT') {
-      const wide = comp.bits||2, narrow = 1;
+      const wide = comp.bits||2;
       const merge = comp.splitType === 'merge';
-      return dir === 'in' ? (merge ? narrow : wide) : (merge ? wide : narrow);
+      const wideDir = merge ? 'out' : 'in';
+      if (dir === wideDir) return wide;
+      // Tap pins are 1 bit each in the regular layout; in the custom
+      // layout each tap carries whatever width was assigned to it (see
+      // GATE_DEFS.SPLIT.compute below for how that maps onto the trunk).
+      if (comp.layout === 'custom' && Array.isArray(comp.pinBits)) return comp.pinBits[idx]||1;
+      return 1;
     }
     const fixed = FIXED_WIDTH_PINS[comp.kind];
     if (fixed && fixed[dir] && fixed[dir].has(idx)) return 1;
@@ -81,7 +87,12 @@ defineModule('engine-core', [], () => {
   // MUX and SPLIT are the only kinds whose input count varies per instance
   function compInputCount(c) {
     if (c.kind === 'MUX') return (c.muxInputs||2) + 1;
-    if (c.kind === 'SPLIT') return c.splitType==='merge' ? (c.bits||2) : GATE_DEFS.SPLIT.inputs;
+    if (c.kind === 'SPLIT') {
+      if (c.splitType !== 'merge') return GATE_DEFS.SPLIT.inputs;
+      // In merge mode, one input pin per tap — in the custom layout that's
+      // however many pins pinBits describes, not necessarily c.bits.
+      return c.layout==='custom' && Array.isArray(c.pinBits) ? c.pinBits.length : (c.bits||2);
+    }
     return GATE_DEFS[c.kind].inputs;
   }
 
@@ -155,18 +166,40 @@ defineModule('engine-core', [], () => {
                 const toW = (comp&&comp.bitWidthOut)||1;
                 return [signExtend(a||0, fromW, toW)];
               } } ,
-    // 'split': one multibit input split into many 1-bit outputs
-    // output i reads bit i of the input (0 = topmost pin = LSB)
-    // 'merge': many 1-bit inputs merge into one multibit output
-    SPLIT:  { kind:'SPLIT', label:'SPLITTER', inputs:1, outputs:8, family:'misc',
+    // 'split': one multibit input split into many outputs
+    // 'merge': many inputs merge into one multibit output
+    // Regular layout: every tap is 1 bit, so output/input i reads/writes
+    // bit i of the trunk directly (0 = topmost pin = LSB).
+    // Custom layout: taps can be wider than 1 bit, so each tap instead
+    // reads/writes a contiguous slice of the trunk — comp.pinBits gives
+    // each tap's width in order, and offset (the running sum of the
+    // widths before it) gives where that slice starts.
+    SPLIT:  { kind:'SPLIT', label:'SPLITTER', inputs:1, outputs:32, family:'misc',
               compute:(inputVals,s,w,comp) => {
                 const n = (comp&&comp.bits)||2;
+                const customPins = comp && comp.layout==='custom' && Array.isArray(comp.pinBits) ? comp.pinBits : null;
                 if (comp && comp.splitType === 'merge') {
+                  if (customPins) {
+                    let v = 0, offset = 0;
+                    for (let i=0;i<customPins.length;i++) {
+                      v |= maskVal(inputVals[i]||0, customPins[i]) << offset;
+                      offset += customPins[i];
+                    }
+                    return [v>>>0];
+                  }
                   let v = 0;
                   for (let i=0;i<n;i++) v |= (inputVals[i]?1:0) << i;
                   return [v>>>0];
                 }
                 const v = inputVals[0]||0;
+                if (customPins) {
+                  let offset = 0;
+                  return customPins.map(width => {
+                    const val = (v>>>offset) & bitMask(width);
+                    offset += width;
+                    return val;
+                  });
+                }
                 return Array.from({length:n}, (_,i)=>(v>>>i)&1);
               } } ,
   };

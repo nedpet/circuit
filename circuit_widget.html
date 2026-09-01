@@ -138,29 +138,46 @@ defineModule('gates', ['engine'], (engine) => {
   VIS.MUX = muxVis(2);
 
   // SPLIT, in its default 'split' type, fans a single multi-bit bus out
-  // into `bits` (2-8) individual 1-bit pins. It's deliberately drawn as
-  // bare wire, not a gate body: a vertical "trunk" with each tap every
-  // `space` grid cells (reusing the standard 12px pin stub for each tap's
-  // little leg), starting right where a one-grid-cell 45° lead-in from the
-  // single `bits`-wide pin meets the trunk. Tap i reads/writes bit i (0 =
-  // topmost, nearest the diagonal = LSB) — arbitrary but fixed, so wiring
-  // is predictable; engine.js's SPLIT compute() matches this order. Each
-  // tap is labeled with its bit index, on whichever side of the trunk its
-  // stub *isn't* on, so the label never sits under the pin's own leg.
+  // into individual pins. It's deliberately drawn as bare wire, not a gate
+  // body: a vertical "trunk" with each tap every `space` grid cells
+  // (reusing the standard 12px pin stub for each tap's little leg),
+  // starting right where a one-grid-cell 45° lead-in from the single
+  // `bits`-wide pin meets the trunk. In the regular layout there's one
+  // 1-bit tap per bit (2-32), tap i reading/writing bit i (0 = topmost,
+  // nearest the diagonal = LSB) — arbitrary but fixed, so wiring is
+  // predictable; engine-core's SPLIT compute() matches this order. The
+  // custom layout instead has an independently-set NUMBER of taps, each
+  // carrying its own bit width (summing to `bits`) — geometrically
+  // identical (tap position only ever depends on COUNT and `space`, never
+  // on width, see splitGeometry), just labeled with the bit RANGE each tap
+  // covers instead of a single index once any tap is wider than 1 bit.
+  // Each tap is labeled on whichever side of the trunk its stub *isn't*
+  // on, so the label never sits under the pin's own leg.
   // 'merge' type is the exact reverse in every sense: the taps become
-  // inputs (many 1-bit values combining into one) and the diagonal pin
-  // becomes the output, AND the whole shape mirrors horizontally (taps
-  // move to the left, diagonal to the right) — so a right-facing 'merge'
-  // reads as the mirror image of a right-facing 'split' (equivalently: the
-  // same picture a left-facing 'split' already draws), making the two
-  // types visually distinguishable at a glance even before you trace which
-  // way the pins point.
-  // All three of bits/space/type are per-instance like MUX's muxInputs, so
-  // geometry is built/cached the same way — see engine's splitGeometry for
-  // what trunkX/tapX/diagX/taps/topY/lastY mean; this just adds the body
-  // that draws the trunk, the diagonal lead-in, and each tap's label.
-  function buildSplitVis(n, space, merge) {
-    const geo = splitGeometry(n, space, merge ? 'merge' : 'split');
+  // inputs (many values combining into one) and the diagonal pin becomes
+  // the output, AND the whole shape mirrors horizontally (taps move to the
+  // left, diagonal to the right) — so a right-facing 'merge' reads as the
+  // mirror image of a right-facing 'split' (equivalently: the same picture
+  // a left-facing 'split' already draws), making the two types visually
+  // distinguishable at a glance even before you trace which way the pins
+  // point.
+  // bits/space/type/layout/pinBits are all per-instance like MUX's
+  // muxInputs, so geometry is built/cached the same way — see engine's
+  // splitGeometry for what trunkX/tapX/diagX/taps/topY/lastY mean; this
+  // just adds the body that draws the trunk, the diagonal lead-in, and
+  // each tap's label.
+  function buildSplitVis(pinWidths, space, merge) {
+    const geo = splitGeometry(pinWidths.length, space, merge ? 'merge' : 'split');
+    // Each tap's label is its bit RANGE (a running offset across the
+    // pinWidths array), not its own array index — those only coincide
+    // when every earlier tap is exactly 1 bit wide, which is always true
+    // in the regular layout (pinWidths here is just an array of 1s) but
+    // not once a custom layout has a wider tap earlier in the list.
+    let offset = 0;
+    const labels = pinWidths.map(width => {
+      const lo = offset; offset += width;
+      return width>1 ? `${lo}-${offset-1}` : String(lo);
+    });
     return { ...geo,
       body:()=><g>
         {/* Invisible fat hit-area — the visible body is just two thin
@@ -174,18 +191,24 @@ defineModule('gates', ['engine'], (engine) => {
           <g key={i}>
             <line x1={geo.trunkX} y1={p.y} x2={merge ? geo.trunkX-8 : geo.trunkX+8} y2={p.y} stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>
             <text x={merge ? geo.trunkX+6 : geo.trunkX-6} y={p.y+3} textAnchor={merge ? 'start' : 'end'}
-                  fontFamily="var(--mono)" fontSize="8" fontWeight="600" fill="var(--ink)" opacity="0.6">{i}</text>
+                  fontFamily="var(--mono)" fontSize="8" fontWeight="600" fill="var(--ink)" opacity="0.6">{labels[i]}</text>
           </g>
         ))}
       </g> };
   }
   const splitVisCache = {};
+  // `n` is either a plain tap count (regular layout — one 1-bit pin per
+  // bit, 2-32) or an array of per-pin bit widths (custom layout, each
+  // entry 1-32) — both normalize to a pinWidths array before anything
+  // else runs, so buildSplitVis only ever deals with the array shape.
   function splitVis(n, space, type) {
-    const bits = Math.max(2, Math.min(8, n|0||2));
+    const pinWidths = Array.isArray(n)
+      ? n.map(w=>Math.max(1,Math.min(32,w|0||1)))
+      : Array(Math.max(2, Math.min(32, n|0||2))).fill(1);
     const sp = Math.max(1, Math.min(16, space|0||1));
     const merge = type==='merge';
-    const key = bits+'_'+sp+'_'+(merge?'m':'s');
-    return splitVisCache[key] || (splitVisCache[key] = buildSplitVis(bits, sp, merge));
+    const key = pinWidths.join(',')+'_'+sp+'_'+(merge?'m':'s');
+    return splitVisCache[key] || (splitVisCache[key] = buildSplitVis(pinWidths, sp, merge));
   }
   VIS.SPLIT = splitVis(2, 1, 'split');
 
@@ -354,7 +377,10 @@ defineModule('gates', ['engine'], (engine) => {
     if (comp.kind==='OUTPUT') return outputVis(comp.bitWidth, comp.displayMode);
     if (comp.kind==='CONST') return constVis(comp.bitWidth, comp.displayMode);
     if (comp.kind==='MUX') return muxVis(comp.muxInputs, comp.muxSelectLocation);
-    if (comp.kind==='SPLIT') return splitVis(comp.bits, comp.space, comp.splitType);
+    if (comp.kind==='SPLIT') {
+      const custom = comp.layout==='custom' && Array.isArray(comp.pinBits) && comp.pinBits.length;
+      return splitVis(custom ? comp.pinBits : comp.bits, comp.space, comp.splitType);
+    }
     return VIS[comp.kind];
   }
 
@@ -755,7 +781,58 @@ function NumberField({ className, value, min, max, onCommit }) {
     onBlur={()=>{focused.current=false; setText(String(value));}}/>;
 }
 
-function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag, onComponentChanged, snapGrid=true }) {
+// SPLIT's own property rows (Type/Layout/Bits/Space) — pulled out of
+// gatePanel below so the properties panel and the "SPLIT Custom Layout"
+// dialog's options column (see the 'app' module) render the exact same
+// fields off the exact same mutators instead of two hand-copied lists that
+// could drift out of sync. `extra` is an optional slot for fields only the
+// dialog shows (its "Number of Pins" row), rendered right after Space.
+// `showLayout` lets the dialog omit the Layout row entirely — you can only
+// reach the dialog once Layout is already Custom, and flipping it back to
+// Regular from inside a dialog about configuring the custom layout would
+// just leave the rest of the dialog showing controls for a layout that's
+// no longer active, so that switch belongs on the main panel only.
+function SplitPropFields({ circuit, comp, onComponentChanged, extra, showLayout=true }) {
+  const customPinCount = comp.layout==='custom' && Array.isArray(comp.pinBits) ? comp.pinBits.length : null;
+  return <>
+    <div className="prop-option">
+      <span className="prop-label">Type</span>
+      <select className="prop-input"
+              value={comp.splitType||'split'}
+              onChange={e=>{circuit.setSplitType(comp.id,e.target.value);onComponentChanged?.();}}>
+        <option value="split">Split</option>
+        <option value="merge">Merge</option>
+      </select>
+    </div>
+    {showLayout && <div className="prop-option">
+      <span className="prop-label">Layout</span>
+      <select className="prop-input"
+              value={comp.layout||'regular'}
+              onChange={e=>{circuit.setSplitLayout(comp.id,e.target.value);onComponentChanged?.();}}>
+        <option value="regular">Regular</option>
+        <option value="custom">Custom</option>
+      </select>
+    </div>}
+    <div className="prop-option">
+      <span className="prop-label">Bits</span>
+      {/* In the custom layout, Bits can't drop below the current pin count
+          — every pin needs at least 1 bit — so the field's own minimum
+          tracks that instead of the regular layout's flat floor of 2. */}
+      <NumberField className="prop-input" min={customPinCount ? Math.max(2,customPinCount) : 2} max={32}
+              value={comp.bits||2}
+              onCommit={n=>{circuit.setSplitBits(comp.id,n);onComponentChanged?.();}}/>
+    </div>
+    <div className="prop-option">
+      <span className="prop-label">Space</span>
+      <NumberField className="prop-input" min={1} max={16}
+              value={comp.space||1}
+              onCommit={n=>{circuit.setSplitSpace(comp.id,n);onComponentChanged?.();}}/>
+    </div>
+    {extra}
+  </>;
+}
+
+function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag, onComponentChanged, onOpenSplitLayout, snapGrid=true }) {
   const svgRef = useRef(null);
   const [view, setView] = useState({x:0,y:0,zoom:1});
   const [wiringFrom, setWiringFrom] = useState(null);
@@ -1530,6 +1607,16 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
   const gatePanel = ['NOT', 'AND','OR','NAND','NOR','XOR','XNOR','MUX','SHFT','EXTND','SPLIT'].includes(selComp?.kind) ? (()=>{
     return (
       <div className="prop-panel" onMouseDown={e=>e.stopPropagation()}>
+        {selComp.kind==='SPLIT' && selComp.layout==='custom' && (
+          <button className="split-menu-btn" title="Custom layout..."
+                  onClick={()=>onOpenSplitLayout?.()}>
+            <svg width="10" height="10" viewBox="0 0 10 10">
+              <circle cx="5" cy="1.5" r="1.3" fill="currentColor"/>
+              <circle cx="5" cy="5"   r="1.3" fill="currentColor"/>
+              <circle cx="5" cy="8.5" r="1.3" fill="currentColor"/>
+            </svg>
+          </button>
+        )}
         <div className="prop-title">{selComp.kind} Properties</div>
         {selComp.kind==='EXTND' ? <>
           <div className="prop-option">
@@ -1544,29 +1631,7 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
                     value={selComp.bitWidthOut||1}
                     onCommit={n=>{circuit.setExtBitWidthOut(selComp.id,n);onComponentChanged?.();}}/>
           </div>
-        </> : selComp.kind==='SPLIT' ? <>
-          <div className="prop-option">
-            <span className="prop-label">Type</span>
-            <select className="prop-input"
-                    value={selComp.splitType||'split'}
-                    onChange={e=>{circuit.setSplitType(selComp.id,e.target.value);onComponentChanged?.();}}>
-              <option value="split">Split</option>
-              <option value="merge">Merge</option>
-            </select>
-          </div>
-          <div className="prop-option">
-            <span className="prop-label">Bits</span>
-            <NumberField className="prop-input" min={2} max={8}
-                    value={selComp.bits||2}
-                    onCommit={n=>{circuit.setSplitBits(selComp.id,n);onComponentChanged?.();}}/>
-          </div>
-          <div className="prop-option">
-            <span className="prop-label">Space</span>
-            <NumberField className="prop-input" min={1} max={16}
-                    value={selComp.space||1}
-                    onCommit={n=>{circuit.setSplitSpace(selComp.id,n);onComponentChanged?.();}}/>
-          </div>
-        </> : <div className="prop-option">
+        </> : selComp.kind==='SPLIT' ? <SplitPropFields circuit={circuit} comp={selComp} onComponentChanged={onComponentChanged}/> : <div className="prop-option">
           <span className="prop-label">Bits</span>
           <NumberField className="prop-input" min={1} max={32}
                   value={selComp.bitWidth||1}
@@ -1930,7 +1995,7 @@ function InflightPulse({a,b,pts=[],pendingValue,pendingStart,delayMs}) {
   return <g pointerEvents="none"><circle cx={x} cy={y} r="7" fill={col} opacity=".22"/><circle cx={x} cy={y} r="3.5" fill={col}/></g>;
 }
 
-return { Canvas };
+return { Canvas, SplitPropFields, NumberField };
 });
 </script>
 
@@ -2000,8 +2065,9 @@ return { Palette };
 defineModule('app', ['state', 'engine', 'gates', 'canvas', 'palette'], (state, engine, gates, canvas, palette) => {
 'use strict';
 const{useState,useEffect,useCallback,useRef}=React;
-const{createCircuit,GATE_DEFS}=engine;
-const{Canvas}=canvas;
+const{createCircuit,GATE_DEFS,pinAbs,rotationCenter}=engine;
+const{GateBody,visForComp}=gates;
+const{Canvas,SplitPropFields,NumberField}=canvas;
 const{Palette}=palette;
 
 // Custom gates are only ever placed via the palette after an Import, so any
@@ -2108,6 +2174,18 @@ function App(){
   const[equation,setEquation]=useState('');
   const[equationToLoad,setEquationToLoad]=useState('');
   const[showSettings, setShowSettings]=useState(false);
+  const[showSplitLayout, setShowSplitLayout]=useState(false);
+  // The component the properties panel is currently showing — Canvas
+  // computes its own copy of this internally for its own rendering, but
+  // App needs one too so the "SPLIT Custom Layout" dialog (rendered here,
+  // not inside Canvas, since Dialog/App own every other dialog) can read
+  // and mutate it directly.
+  const selComp = selectedId ? circuit.components.get(selectedId) : null;
+  // Closes the dialog if its component gets deleted/deselected/changed
+  // kind out from under it — the dialog's own `selComp?.kind==='SPLIT'`
+  // render guard already prevents a crash on its own, this just keeps
+  // `showSplitLayout` itself from being left stuck true with nothing to show.
+  useEffect(()=>{ if(showSplitLayout && selComp?.kind!=='SPLIT') setShowSplitLayout(false); }, [selComp, showSplitLayout]);
   const[propagationMode, setPropagationMode]=useState("length");
   // "continuous": the wire's lit boundary tracks the in-flight pulse's
   // exact position (splitWirePath). "discrete": it only advances once a
@@ -2401,6 +2479,7 @@ function App(){
                 paletteDrag={palDrag}
                 onClearPaletteDrag={()=>setPalDrag(null)}
                 onComponentChanged={refresh}
+                onOpenSplitLayout={()=>setShowSplitLayout(true)}
                 snapGrid={true}/>
         <div className="fc">
           <span className="fc-n">{n}</span><span className="fc-lbl">gates</span>
@@ -2492,12 +2571,178 @@ function App(){
       </div>
     </Dialog>}
 
+    {showSplitLayout && selComp?.kind==='SPLIT' &&
+      <Dialog title="SPLIT Custom Layout" onClose={()=>setShowSplitLayout(false)} className="split-layout-modal">
+        <div className="split-layout-body">
+          <div className="split-layout-preview">
+            <SplitLayoutPreview circuit={circuit} comp={selComp} onComponentChanged={refresh}/>
+          </div>
+          {/* .prop-grid for the same label/input column alignment as every
+              other properties panel — SplitPropFields supplies Type/Bits/
+              Space (the exact same rows and mutators the main properties
+              panel uses; showLayout={false} since you can only get here
+              once Layout is already Custom, so switching it back to
+              Regular belongs on the main panel, not this dialog), `extra`
+              adds the dialog-only "Number of Pins" row right after Space,
+              and Facing (shared by every gate kind, not SPLIT-specific) is
+              repeated here too so every property that affects the preview
+              is reachable without leaving the dialog. */}
+          <div className="split-layout-options prop-grid">
+            <SplitPropFields circuit={circuit} comp={selComp} onComponentChanged={refresh} showLayout={false} extra={
+              selComp.layout==='custom' && Array.isArray(selComp.pinBits) &&
+                <div className="prop-option">
+                  <span className="prop-label">Number of Pins</span>
+                  <NumberField className="prop-input" min={2} max={selComp.bits||2}
+                          value={selComp.pinBits.length}
+                          onCommit={n=>{circuit.setSplitPinCount(selComp.id,n);refresh();}}/>
+                </div>
+            }/>
+            <div className="prop-option">
+              <span className="prop-label">Facing</span>
+              <select className="prop-input"
+                      value={selComp.facing}
+                      onChange={e=>{circuit.setFacing(selComp.id,e.target.value);refresh();}}>
+                <option value="right">Right</option>
+                <option value="left">Left</option>
+                <option value="up">Up</option>
+                <option value="down">Down</option>
+              </select>
+            </div>
+          </div>
+        </div>
+        <div className="dialog-actions">
+          <button className="btn ghost" onClick={()=>setShowSplitLayout(false)}>Exit</button>
+        </div>
+      </Dialog>}
+
   </div>;
 }
 
-function Dialog({title,children,onClose}){
+// Live preview for the "SPLIT Custom Layout" dialog: renders the actual
+// GateBody (so it stays pixel-identical to the real canvas, facing
+// included) plus one small NumberField per tap, positioned just past that
+// tap's own stub, on whichever side it actually points given the
+// component's current facing/mirroring — and keeps the trunk itself
+// centered in the preview no matter which way it's rotated/mirrored.
+function SplitLayoutPreview({circuit, comp, onComponentChanged}) {
+  const pinBits = Array.isArray(comp.pinBits) ? comp.pinBits : [];
+  if (!pinBits.length) return null;
+  const merge = comp.splitType==='merge';
+  const dir = merge ? 'in' : 'out';
+  // x:0,y:0 so every position computed below lands directly in this
+  // preview's own local coordinate space — pinAbs's math is purely
+  // relative to comp.x/y, so zeroing them out reuses that math outside
+  // the live canvas the same way the palette's own drag-preview does.
+  const previewComp = {...comp, x:0, y:0};
+  const vis = visForComp(previewComp);
+  // SHAPE_SCALE draws the splitter itself twice its normal size (line
+  // weights included, since an SVG scale transform magnifies stroke width
+  // along with everything else) for legibility — applied only to the
+  // GateBody drawing and the geometry used to place fields around it, NOT
+  // to the fields' own boxes, which stay their normal UI size (NF_W/NF_H
+  // fit a 2-digit value plus the native spinner buttons regardless of how
+  // big the shape gets).
+  const SHAPE_SCALE = 2;
+  const NF_W = 42, NF_H = 20, STUB_OFFSET = 14, PAD = 14;
+
+  // Mirrors GateBody's/pinAbs's exact transform (engine-geometry.js) but
+  // for an arbitrary LOCAL point instead of just a registered pin — used
+  // below both to find which absolute-space direction a tap's stub points
+  // in (for any facing) and to find the shape's own true rendered bounding
+  // box, without duplicating engine-geometry.js's own pin table. This is
+  // presentation-only math (placing overlay controls, sizing/centering the
+  // preview canvas), so it lives here rather than in the geometry engine.
+  // Returns the point already multiplied by SHAPE_SCALE, since every
+  // caller below wants it in the same scaled space the shape is drawn in.
+  const {cx,cy} = rotationCenter(vis);
+  function transformLocal(p) {
+    const m = previewComp.facing==='left' ? {x: vis.w-p.x, y: p.y} : (()=>{
+      const angle = previewComp.facing==='up' ? -90 : previewComp.facing==='down' ? 90 : 0;
+      const rad = angle*Math.PI/180;
+      const dx=p.x-cx, dy=p.y-cy;
+      return {x: cx+dx*Math.cos(rad)-dy*Math.sin(rad), y: cy+dx*Math.sin(rad)+dy*Math.cos(rad)};
+    })();
+    return {x: m.x*SHAPE_SCALE, y: m.y*SHAPE_SCALE};
+  }
+
+  // splitGeometry always puts the trunk at local x = w/2 (trunkX), spanning
+  // the local box's full height (vis.h IS the trunk's own span) — so
+  // rotationCenter's (cx,cy), which is just (w/2,h/2) snapped to the grid,
+  // already sits ON the trunk, at its vertical midpoint, regardless of
+  // facing. Transforming that one point gives "where the trunk's own
+  // center lands" for any rotation/mirror, with no facing-specific casing.
+  const trunkCenter = transformLocal({x:cx, y:cy});
+
+  // Each tap's field position, computed the same way regardless of facing:
+  // find the tap's own transformed (scaled) position, probe 1 LOCAL px
+  // further along its outward direction (output stubs point toward local
+  // +x — GateBody's pinStub(p,'right') — input stubs toward local -x,
+  // pinStub(p,'left')) and transform that too; subtracting the two cancels
+  // out any translation (the mirror case) and leaves a pure outward unit
+  // vector that's correct for any facing (the SHAPE_SCALE factor cancels
+  // out of the subtraction too, so it doesn't need dividing back out).
+  const fields = pinBits.map((width,i) => {
+    const localPin = dir==='out' ? vis.outputs[i] : vis.inputs[i];
+    if (!localPin) return null;
+    const pinAbsPos = transformLocal(localPin);
+    const probeLocal = {x: localPin.x + (dir==='out' ? 1 : -1), y: localPin.y};
+    const probeAbs = transformLocal(probeLocal);
+    const ux = probeAbs.x-pinAbsPos.x, uy = probeAbs.y-pinAbsPos.y;
+    const len = Math.hypot(ux,uy) || 1;
+    const x0 = pinAbsPos.x + (ux/len)*STUB_OFFSET - NF_W/2;
+    const y0 = pinAbsPos.y + (uy/len)*STUB_OFFSET - NF_H/2;
+    const sumOthers = pinBits.reduce((a,b,j)=> j===i ? a : a+b, 0);
+    const maxForPin = Math.max(1, (comp.bits||2) - sumOthers);
+    return {i, x0, y0, width, maxForPin};
+  });
+
+  // The shape's TRUE rendered bounding box (already in scaled space, since
+  // transformLocal applies SHAPE_SCALE) — transforming the local box's 4
+  // corners (rather than assuming vis.w/vis.h describe the on-screen
+  // footprint directly) is what makes this correct for 'up'/'down'
+  // facings too: rotating a non-square shape 90° swaps which of vis.w/
+  // vis.h is the visual width vs. height, and a naive vis.w×vis.h canvas
+  // would size (and scroll) the wrong axis and clip part of the rotated
+  // shape.
+  const corners = [{x:0,y:0},{x:vis.w,y:0},{x:0,y:vis.h},{x:vis.w,y:vis.h}].map(transformLocal);
+  let minX = Math.min(...corners.map(c=>c.x)), maxX = Math.max(...corners.map(c=>c.x));
+  let minY = Math.min(...corners.map(c=>c.y)), maxY = Math.max(...corners.map(c=>c.y));
+  for (const f of fields) {
+    if (!f) continue;
+    minX = Math.min(minX, f.x0); maxX = Math.max(maxX, f.x0+NF_W);
+    minY = Math.min(minY, f.y0); maxY = Math.max(maxY, f.y0+NF_H);
+  }
+  minX -= PAD; maxX += PAD; minY -= PAD; maxY += PAD;
+
+  // Size the canvas symmetrically around the trunk's own center (rather
+  // than just wrapping the content tightly) so the trunk always lands
+  // exactly in the middle, at the cost of some blank space on whichever
+  // side has less content — the same reasoning either axis.
+  const halfW = Math.max(trunkCenter.x-minX, maxX-trunkCenter.x);
+  const halfH = Math.max(trunkCenter.y-minY, maxY-trunkCenter.y);
+  const shiftX = halfW - trunkCenter.x, shiftY = halfH - trunkCenter.y;
+
+  return (
+    <svg width={halfW*2} height={halfH*2}>
+      <g transform={`translate(${shiftX},${shiftY})`}>
+        <g transform={`scale(${SHAPE_SCALE})`}>
+          <GateBody comp={previewComp}/>
+        </g>
+        {fields.map(f => f && (
+          <foreignObject key={f.i} x={f.x0} y={f.y0} width={NF_W} height={NF_H}>
+            <NumberField className="pin-bits-input" min={1} max={f.maxForPin}
+                    value={f.width}
+                    onCommit={n=>{circuit.setSplitPinBits(comp.id,f.i,n);onComponentChanged?.();}}/>
+          </foreignObject>
+        ))}
+      </g>
+    </svg>
+  );
+}
+
+function Dialog({title,children,onClose,className}){
   return <div className="modal-bg" onClick={onClose}>
-    <div className="modal" onClick={e=>e.stopPropagation()}>
+    <div className={"modal"+(className?' '+className:'')} onClick={e=>e.stopPropagation()}>
       <div className="modal-title">{title}</div>
       {children}
     </div>
