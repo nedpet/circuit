@@ -63,20 +63,15 @@ defineModule('engine-core', [], () => {
       const merge = comp.splitType === 'merge';
       const wideDir = merge ? 'out' : 'in';
       if (dir === wideDir) return wide;
-      // Tap pins are 1 bit each in the regular layout; in the custom
-      // layout each tap carries whatever width was assigned to it (see
-      // GATE_DEFS.SPLIT.compute below for how that maps onto the trunk).
+      // Regular splitters have 1 bit on each tap pin
+      // Custom splitters have assigned bits to each tap pin
       if (comp.layout === 'custom' && Array.isArray(comp.pinBits)) return comp.pinBits[idx]||1;
       return 1;
     }
     const fixed = FIXED_WIDTH_PINS[comp.kind];
     if (fixed && fixed[dir] && fixed[dir].has(idx)) return 1;
-    // A custom gate's ports each carry their own fixed width (set by
-    // registerCustomGate from the bitWidth of the INPUT/OUTPUT it was built
-    // from), unrelated to one another and to any single comp.bitWidth — so
-    // it's recorded per-pin on the GATE_DEF itself (inWidths/outWidths)
-    // rather than fitting the single-bitWidth-per-component shape every
-    // other kind above uses.
+
+    // Each custom gate's pins carry their own width; width is not associated to the component
     const def = GATE_DEFS[comp.kind];
     const widths = def && (dir === 'in' ? def.inWidths : def.outWidths);
     if (widths) return widths[idx] || 1;
@@ -89,8 +84,7 @@ defineModule('engine-core', [], () => {
     if (c.kind === 'MUX') return (c.muxInputs||2) + 1;
     if (c.kind === 'SPLIT') {
       if (c.splitType !== 'merge') return GATE_DEFS.SPLIT.inputs;
-      // In merge mode, one input pin per tap — in the custom layout that's
-      // however many pins pinBits describes, not necessarily c.bits.
+      // In merge mode, one input pin per tap, but a custom layout is described by pinBits
       return c.layout==='custom' && Array.isArray(c.pinBits) ? c.pinBits.length : (c.bits||2);
     }
     return GATE_DEFS[c.kind].inputs;
@@ -101,13 +95,8 @@ defineModule('engine-core', [], () => {
               compute:(i,s,w) => [maskVal(s.value||0, w||1)] },
     OUTPUT: { kind:'OUTPUT',  label:'OUT',   inputs:1, outputs:0, family:'io',
               compute:()=>[] },
-    // alwaysRecompute: a CLOCK has zero inputs, so its `inputVals` never
-    // changes — step()'s dirty-check (engine-circuit.js) would otherwise
-    // read that as "nothing to do" forever after the first tick and never
-    // notice the tick loop flipping s.value out from under it. This is the
-    // one gate kind whose output legitimately changes on its own, so it
-    // opts out of the dirty-check instead of trying to make the check
-    // itself understand time.
+    // Since clock changes automatically and not as a result of a change in its inputs,
+    // alwaysRecompute is true to opt out of step()'s dirty check
     CLOCK:  { kind:'CLOCK',   label:'CLK',   inputs:0, outputs:1, family:'io', alwaysRecompute:true,
               compute:(i,s) => [s.value?1:0] },
     CONST:  { kind:'CONST',   label:'CONST', inputs:0, outputs:1, family:'io',
@@ -168,12 +157,9 @@ defineModule('engine-core', [], () => {
               } } ,
     // 'split': one multibit input split into many outputs
     // 'merge': many inputs merge into one multibit output
-    // Regular layout: every tap is 1 bit, so output/input i reads/writes
-    // bit i of the trunk directly (0 = topmost pin = LSB).
-    // Custom layout: taps can be wider than 1 bit, so each tap instead
-    // reads/writes a contiguous slice of the trunk — comp.pinBits gives
-    // each tap's width in order, and offset (the running sum of the
-    // widths before it) gives where that slice starts.
+    // Regular layout: every tap is 1 bit, so output/input i reads/writes bit i of the trunk (0 = topmost pin = LSB)
+    // Custom layout: each tap instead reads/writes a contiguous slice of the trunk 
+    // comp.pinBits gives each tap's width in order, and offset gives where that slice starts
     SPLIT:  { kind:'SPLIT', label:'SPLITTER', inputs:1, outputs:32, family:'misc',
               compute:(inputVals,s,w,comp) => {
                 const n = (comp&&comp.bits)||2;

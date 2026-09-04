@@ -427,19 +427,8 @@ defineModule('engine-routing', ['engine-geometry'], (geometry) => {
       wire[end.side] = {x:finalPos.x, y:finalPos.y};
     }
 
-    // The segment just moved can also flatten whichever segment sits right
-    // beside it — its shared knot slid exactly onto the neighbor knot it
-    // didn't move (the one just outside the dragged segment). Once that
-    // happens neither knot marks a real corner anymore, so both waypoints
-    // — and any junction bookkeeping this wire owns at their old spot —
-    // are dropped, same as the user deleting that corner by hand. Skipped
-    // whenever that neighbor is itself the wire's own endpoint (nothing to
-    // drop there — see the `ends` handling above) or a pinned knot (a
-    // component pin or a live branch anchor always stays; collapsing INTO
-    // one is what the anchor+stub path in computeSegmentMove is for, not
-    // this), and whenever some OTHER wire is still anchored at the
-    // collapsing position, since dropping it out from under that wire
-    // would orphan it.
+    // Deletes knots made irrelevant when moving a segment flattens another
+    // Skips if the knot is an endpoint or a pinned knot
     if (moved) {
       const hasLiveBranchAt = p => [...circuit.wires.values()].some(w => w.id!==wire.id &&
         ((!isWireTerminal(w.from) && same(terminalCoords(w.from,circuit), p)) ||
@@ -448,13 +437,10 @@ defineModule('engine-routing', ['engine-geometry'], (geometry) => {
         const j = [...circuit.junctions].find(jj=>jj.sourceWireId===wire.id && same(jj, p));
         if (j) circuit.junctions.delete(j);
       };
-      // Where the dragged segment actually landed in the (possibly
-      // anchor+stub-lengthened) knot list — mirrors computeSegmentMove's
-      // own `segIndex = newKnots.length-1`.
+      // Where the dragged segment actually landed in the (possibly anchor+stub-lengthened) knot list
       const finalSegIndex = d.segIndex + (d.startPinned ? 1 : 0);
 
-      // The neighbor beyond the moved segment's END, i.e. knots[segIndex+2]
-      // — only real (interior) if it's not the wire's own `to` endpoint.
+      // Remove the next segment's irrelevant knots if necessary
       if (!d.endPinned && d.segIndex+2 <= n-2) {
         const nextKnot = d.knots[d.segIndex+2];
         const newEnd = {x: d.knots[d.segIndex+1].x+dx, y: d.knots[d.segIndex+1].y+dy};
@@ -463,8 +449,7 @@ defineModule('engine-routing', ['engine-geometry'], (geometry) => {
           wire.points.splice(finalSegIndex, 2); // points[i] === knots[i+1], so knots[segIndex+1..+2] live at finalSegIndex..+1
         }
       }
-      // The neighbor before the moved segment's START, i.e. knots[segIndex-1]
-      // — only real (interior) if it's not the wire's own `from` endpoint.
+      // Remove the previous segment's irrelevant knots if necessary
       if (!d.startPinned && d.segIndex-1 >= 1) {
         const prevKnot = d.knots[d.segIndex-1];
         const newStart = {x: d.knots[d.segIndex].x+dx, y: d.knots[d.segIndex].y+dy};

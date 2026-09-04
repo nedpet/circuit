@@ -21,17 +21,7 @@ defineModule('engine-geometry', ['state'], (state) => {
     const h = count*MUX_PIN_GAP; // 80 for count=2
     const inputs = Array.from({length:count},(_,i)=>({x:0,y:MUX_TOP_MARGIN+i*MUX_PIN_GAP}));
     const outY = h/2, bt=6, bb=h-6; // input (left) edge's own corners -- fixed, so its length (bb-bt) never changes with n
-    // Output (right) edge's own corners -- rt (top) and rb (bottom) --
-    // are solved for instead of a fixed .25/.75 split of bb, so the
-    // select pin (which sits wherever the diagonal edges cross x=W*0.5 --
-    // always each edge's exact midpoint, since BX sits the same distance
-    // in from both sides -- offset by its STUB-px stub) lands on a grid
-    // line like every other pin: (bt+rt)/2-STUB=0 gives rt=2*STUB-bt; rb
-    // mirrors it (h-rt), the same way the two select-pin locations
-    // mirror each other, so aligning the top edge's corner aligns the
-    // bottom edge's too. Doesn't depend on h at all (bt is fixed), so 0
-    // is always a valid target -- rt sits comfortably between bt and bb
-    // regardless of how many inputs the mux has.
+    // Ensures select pin lands on the grid
     const rt = 2*STUB - bt, rb = h - rt;
     const selectY = bottom ? h : 0;
     inputs.push({x:W*0.5,y:selectY,dir: bottom ? 'down' : 'up'});
@@ -41,13 +31,8 @@ defineModule('engine-geometry', ['state'], (state) => {
   // Returns the width, height, input/output locations,
   // x-coords of the vertical trunk, tap pins, and wide (trunk-side) pin,
   // coords of the tap pins, and y-coords of the top and bottom tap pins
-  // for a splitter with n taps, space units between taps, and type (merge or split).
-  // n is the number of TAPS, not necessarily the trunk's bit width — in the
-  // regular layout they're the same (one tap per bit), but the custom
-  // layout can have fewer/more taps than trunk bits, each carrying its own
-  // width (see engine-core's pinBitWidthAt/GATE_DEFS.SPLIT.compute); tap
-  // *position* only ever depends on the count and spacing, never on any
-  // tap's individual width, so this function doesn't need to know widths.
+  // for a splitter with n taps, space units between taps, and type (merge or split)
+  // n is the number of TAPS, not necessarily the trunk's bit width
   const SPLIT_UNIT = 20; // matches the widget's own 20px grid snap
   function splitGeometry(n, space, type) {
     const bits = Math.max(2, Math.min(32, n|0||2));
@@ -70,10 +55,7 @@ defineModule('engine-geometry', ['state'], (state) => {
   }
 
   // Returns the width of an input/output component with n cells
-  // BIT_CELL_W+BIT_GAP is exactly one grid unit (20px), and BIT_PAD*2+BIT_CELL_W
-  // is exactly two, so bitsRowWidth(n) always comes out to 20*(n+1) -- a grid
-  // multiple for every n, not just some -- which keeps the pin (on the box's
-  // far edge) grid-aligned after the component's own x/y gets snapped on drag.
+  // Ensures pins are grid-aligned after the component's own x/y gets snapped on drag
   const BIT_CELL_W=18, BIT_GAP=2, BIT_PAD=11;
   function bitsRowWidth(n) { return BIT_PAD*2 + n*BIT_CELL_W + Math.max(0,n-1)*BIT_GAP; }
 
@@ -93,11 +75,7 @@ defineModule('engine-geometry', ['state'], (state) => {
   function constGeometry(n, mode) {
     const digits = mode==='hex' ? Math.ceil(n/4) : n;
     const rawW = Math.max(40, digits*CONST_CHAR_W + CONST_PAD*2);
-    // Rounded up to the next grid unit (never down, so the text always still
-    // fits) -- same reasoning as bitsRowWidth, but simpler here since the
-    // body's just a centered readout, not a grid of individually-positioned
-    // cells, so a little extra width beyond the digits' own footprint just
-    // means slightly more breathing room either side rather than a gap.
+    // Rounded up to the next grid unit to ensure alignment
     const w = Math.ceil(rawW/20)*20, h = 40;
     return { w, h, inputs:[], outputs:[{x:w,y:20}] };
   }
@@ -333,27 +311,9 @@ defineModule('engine-geometry', ['state'], (state) => {
     return (wireLen / WIRE_REF_LEN) * delayMs;
   }
 
-  // The point an up/down-facing component's SVG rotation transform (and
-  // pinAbs below) pivots around — the shape's own geometric center,
-  // snapped to the nearest grid intersection rather than used exactly as
-  // drawn. Every pin already sits at a grid-aligned LOCAL position, and
-  // rotating a grid-aligned offset from a grid-aligned pivot by exactly
-  // 90 degrees always lands back on a grid-aligned offset (a pure
-  // 90-degree turn only swaps/negates the two axes — it never scales
-  // them) — so snapping the pivot is all a rotated pin needs to stay on
-  // the grid too, without requiring the shape's own w/h to itself be a
-  // 40px multiple (half of a plain 20px multiple can land on a 10px
-  // half-grid offset once rotation swaps it onto the other axis, which is
-  // exactly the gap this closes). Facing right/left never reads this at
-  // all (see pinAbs and GateBody's own mirror transform), so nothing
-  // about those changes.
-  //
-  // GATES' own rendering (GateBody's body/stub rotation, and the
-  // selection outline's matching one) must pivot on this exact same
-  // point, not the raw center — otherwise a pin circle (placed via
-  // pinAbs) would visually detach from the end of its stub (part of the
-  // rotated body) by up to 10px. Exported so both stay in sync with this
-  // single definition instead of three hand-copied rounding formulas.
+  // Returns the point an up/down-facing component's SVG rotation transform (and pinAbs) pivots around
+  // = the shape's geometric center snapped to the nearest grid intersection
+  // Not used for right/left-facing copmponents
   const GRID = 20;
   function rotationCenter(vis) {
     return { cx: Math.round((vis.w/2)/GRID)*GRID, cy: Math.round((vis.h/2)/GRID)*GRID };
