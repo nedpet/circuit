@@ -55,8 +55,7 @@ defineModule('gates', ['engine'], (engine) => {
   const VIS = {};
   const W=80,H=80,BX=12,YT=20,YB=60,YO=40,BT=6,BB=74;
 
-  // Fills in left-to-right as a pending output counts down its gate delay,
-  // so the bar reads as a progress indicator for the value about to land.
+  // The bar showing the progress for a gate delay, filling in left-to-right
   function PendingBar({pendingStart, delay, value}) {
     const [now, setNow] = React.useState(performance.now());
     React.useEffect(()=>{
@@ -67,13 +66,13 @@ defineModule('gates', ['engine'], (engine) => {
     return <rect x="20" y="-5" width={40*t} height="5" fill={value ? "var(--high)" : "var(--low)"}/>;
   }
 
-  // Shared by every gate's body: renders the PendingBar above the shape
-  // when the gate's single output is counting down its gate delay.
+  // Renders a PendingBar above a gate's shape during gate delay
   function pendingBar(comp) {
     return comp.pendingOutputVals && comp.pendingOutputVals[0]!==undefined &&
       <PendingBar pendingStart={comp.pendingOutputStart[0]} delay={comp.delay||0} value={comp.pendingOutputVals[0]}/>;
   }
 
+  // Basic logic gates
   VIS.AND  = { w:W,h:H, inputs:[{x:0,y:YT},{x:0,y:YB}], outputs:[{x:W,y:YO}],
     body:(f, comp)=><g>
       {pendingBar(comp)}
@@ -115,11 +114,9 @@ defineModule('gates', ['engine'], (engine) => {
       <path d={`M ${BX} ${BT} Q ${BX+14} ${YO}, ${BX} ${BB} Q ${W*.45} ${BB}, ${W-12} ${YO} Q ${W*.45} ${BT}, ${BX} ${BT} Z`} fill={f} stroke="var(--ink)" strokeWidth="2" strokeLinejoin="round"/>
       <circle cx={W-7} cy={YO} r="5" fill={f} stroke="var(--ink)" strokeWidth="2"/>
     </g> };
-  // MUX's pin geometry (per-instance, since its data-input count is) comes
-  // from engine's muxGeometry — see there for what bt/bb (the input-side
-  // edge's own top/bottom corners) and rt/rb (the output-side edge's own
-  // top/bottom corners) mean; this just adds the body that draws between
-  // them.
+
+  // MUX's pin locations and shape come from muxGeometry in engine-geometry.js
+  // This just draws the mux body, and caches each unique shape
   function buildMuxVis(n, bottom) {
     const geo = muxGeometry(n, bottom ? 'bottom' : 'top');
     return { ...geo,
@@ -137,42 +134,11 @@ defineModule('gates', ['engine'], (engine) => {
   }
   VIS.MUX = muxVis(2);
 
-  // SPLIT, in its default 'split' type, fans a single multi-bit bus out
-  // into individual pins. It's deliberately drawn as bare wire, not a gate
-  // body: a vertical "trunk" with each tap every `space` grid cells
-  // (reusing the standard 12px pin stub for each tap's little leg),
-  // starting right where a one-grid-cell 45° lead-in from the single
-  // `bits`-wide pin meets the trunk. In the regular layout there's one
-  // 1-bit tap per bit (2-32), tap i reading/writing bit i (0 = topmost,
-  // nearest the diagonal = LSB) — arbitrary but fixed, so wiring is
-  // predictable; engine-core's SPLIT compute() matches this order. The
-  // custom layout instead has an independently-set NUMBER of taps, each
-  // carrying its own bit width (summing to `bits`) — geometrically
-  // identical (tap position only ever depends on COUNT and `space`, never
-  // on width, see splitGeometry), just labeled with the bit RANGE each tap
-  // covers instead of a single index once any tap is wider than 1 bit.
-  // Each tap is labeled on whichever side of the trunk its stub *isn't*
-  // on, so the label never sits under the pin's own leg.
-  // 'merge' type is the exact reverse in every sense: the taps become
-  // inputs (many values combining into one) and the diagonal pin becomes
-  // the output, AND the whole shape mirrors horizontally (taps move to the
-  // left, diagonal to the right) — so a right-facing 'merge' reads as the
-  // mirror image of a right-facing 'split' (equivalently: the same picture
-  // a left-facing 'split' already draws), making the two types visually
-  // distinguishable at a glance even before you trace which way the pins
-  // point.
-  // bits/space/type/layout/pinBits are all per-instance like MUX's
-  // muxInputs, so geometry is built/cached the same way — see engine's
-  // splitGeometry for what trunkX/tapX/diagX/taps/topY/lastY mean; this
-  // just adds the body that draws the trunk, the diagonal lead-in, and
-  // each tap's label.
+  // SPLIT's pin locations and shape come from splitGeometry in engine-geometry.js
+  // THis just draws the body (trunk, diagonal, labels) and caches each unique shape
   function buildSplitVis(pinWidths, space, merge) {
     const geo = splitGeometry(pinWidths.length, space, merge ? 'merge' : 'split');
-    // Each tap's label is its bit RANGE (a running offset across the
-    // pinWidths array), not its own array index — those only coincide
-    // when every earlier tap is exactly 1 bit wide, which is always true
-    // in the regular layout (pinWidths here is just an array of 1s) but
-    // not once a custom layout has a wider tap earlier in the list.
+    // Each tap's label is its bit range (or just its bit, if only one) as indices in the array
     let offset = 0;
     const labels = pinWidths.map(width => {
       const lo = offset; offset += width;
@@ -180,10 +146,7 @@ defineModule('gates', ['engine'], (engine) => {
     });
     return { ...geo,
       body:()=><g>
-        {/* Invisible fat hit-area — the visible body is just two thin
-            strokes with nothing to fill, so without this, clicking to
-            select/drag the component anywhere off those exact pixels (the
-            wire-like point of the whole design) would silently miss it. */}
+        {/* Invisible fat hit-area to compensate for the low-width body-tea trunk */}
         <rect x="0" y="0" width={geo.w} height={geo.lastY} fill="transparent"/>
         <line x1={geo.trunkX} y1={geo.topY} x2={geo.diagX} y2="0" stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>
         <line x1={geo.trunkX} y1={geo.topY} x2={geo.trunkX} y2={geo.lastY} stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>
@@ -197,10 +160,8 @@ defineModule('gates', ['engine'], (engine) => {
       </g> };
   }
   const splitVisCache = {};
-  // `n` is either a plain tap count (regular layout — one 1-bit pin per
-  // bit, 2-32) or an array of per-pin bit widths (custom layout, each
-  // entry 1-32) — both normalize to a pinWidths array before anything
-  // else runs, so buildSplitVis only ever deals with the array shape.
+  // `n` is either a plain tap count (regular) or an array of per-pin bit widths (custom)
+  // both normalize to a pinWidths array so buildSplitVis only ever deals with the array shape
   function splitVis(n, space, type) {
     const pinWidths = Array.isArray(n)
       ? n.map(w=>Math.max(1,Math.min(32,w|0||1)))
@@ -212,17 +173,13 @@ defineModule('gates', ['engine'], (engine) => {
   }
   VIS.SPLIT = splitVis(2, 1, 'split');
 
-
+  // Single-bit INPUT
   VIS.INPUT = { w:60,h:40, inputs:[], outputs:[{x:60,y:20}],
     body:(f,comp)=>{
       const on=comp.state.value;
       return <g>
         <rect x="4" y="4" width="52" height="32" rx="16" fill={on?'#fef3c7':'#f3f3f1'} stroke="var(--ink)" strokeWidth="2"/>
-        {/* data-knob marks just the switch's knob as the click-to-toggle
-            target — read back the same way BitCells' data-bit is, off the
-            real hit-tested event target — so a click on the rest of the
-            body (the track, the label) drags/selects like anywhere else
-            on a component instead of also toggling the value. */}
+        {/* data-knob marks switch's knob as the click-to-toggle target */}
         <circle cx={on?40:20} cy="20" r="11" fill="white" stroke="var(--ink)" strokeWidth="1.5" data-knob="1" style={{cursor:'pointer'}}/>
       </g>;
     },
@@ -241,174 +198,7 @@ defineModule('gates', ['engine'], (engine) => {
     },
   };
 
-  // Multi-bit INPUT/OUTPUT: each pin still carries exactly one bus value (an
-  // integer, masked to comp.bitWidth in engine.js), so pin *count* never
-  // changes — only how wide the component is drawn to show that many bits.
-  // Cells render leftmost = most-significant bit. `data-bit` is read back by
-  // Canvas's existing drag/click detection (onCompMouseDown/onUp) via plain
-  // DOM event-target bubbling, so no extra handler plumbing is needed here.
-  const BIT_CELL_H=24; // BIT_CELL_W/BIT_GAP/BIT_PAD (and bitsRowWidth) come from engine — see the destructure above.
-  function BitCells({ n, value, editable }) {
-    const cy=20;
-    return Array.from({length:n},(_,i)=>{
-      const bit=n-1-i;
-      const on=(value>>>bit)&1;
-      const cx=BIT_PAD+i*(BIT_CELL_W+BIT_GAP);
-      return <g key={bit}>
-        <rect x={cx} y={cy-BIT_CELL_H/2} width={BIT_CELL_W} height={BIT_CELL_H} rx="4"
-              data-bit={editable?bit:undefined}
-              fill={on?'#fef3c7':'#f3f3f1'} stroke="var(--low)" strokeWidth="1.5"
-              style={editable?{cursor:'pointer'}:undefined}/>
-        <text x={cx+BIT_CELL_W/2} y={cy+4} textAnchor="middle" fontFamily="var(--mono)" fontSize="12"
-              fontWeight="600" fill="var(--ink)" opacity="0.55" pointerEvents="none">{on?'1':'0'}</text>
-      </g>;
-    });
-  }
-  // One cell per hex digit (4 bits/cell) instead of one cell per bit, so a
-  // hex-mode INPUT/OUTPUT is narrower than its binary counterpart — reuses
-  // regValueText's zero-padded string so the digits always match the text
-  // readout used elsewhere (e.g. REG). `data-shift` (the low bit of that
-  // digit's nibble) is read back the same way BitCells' `data-bit` is, and
-  // clicking bumps the whole nibble by 1 rather than toggling a single bit.
-  function HexCells({ n, value, editable }) {
-    const cy=20, text=regValueText(value, n, 'hex'), digits=text.length;
-    return text.split('').map((ch,i)=>{
-      const shift=(digits-1-i)*4;
-      const cx=BIT_PAD+i*(BIT_CELL_W+BIT_GAP);
-      return <g key={i}>
-        <rect x={cx} y={cy-BIT_CELL_H/2} width={BIT_CELL_W} height={BIT_CELL_H} rx="4"
-              data-shift={editable?shift:undefined}
-              fill="#f3f3f1" stroke="var(--low)" strokeWidth="1.5"
-              style={editable?{cursor:'pointer'}:undefined}/>
-        <text x={cx+BIT_CELL_W/2} y={cy+4} textAnchor="middle" fontFamily="var(--mono)" fontSize="12"
-              fontWeight="600" fill="var(--ink)" opacity="0.55" pointerEvents="none">{ch}</text>
-      </g>;
-    });
-  }
-  // BitCells/HexCells always draw MSB-leftmost/LSB-rightmost; that reading
-  // order needs to stay put regardless of which way the component faces, so
-  // flipping facing right<->left doesn't relabel which physical slot shows
-  // which bit. GateBody mirrors a facing:'left' component with
-  // `translate(w,0) scale(-1,1)`; applying that same transform a second
-  // time here cancels it (two mirrors = identity), so the cell row renders
-  // identically either way. Tagged data-stable so unmirrorText — which
-  // otherwise counter-mirrors every <text> it finds — leaves this subtree
-  // alone instead of correcting it a second time.
-  function stableBlock(comp, w, children) {
-    return comp.facing==='left'
-      ? <g data-stable="true" transform={`translate(${w} 0) scale(-1 1)`}>{children}</g>
-      : <g>{children}</g>;
-  }
-  // hex mode packs 4 bits/cell, so its cell count (and thus w) differs from
-  // binary's one-cell-per-bit layout — cached per (bitWidth, mode) pair since
-  // the box width itself changes, not just the digits drawn inside it.
-  function buildInputVis(n, hex) {
-    const {w, h, inputs, outputs} = inputOutputGeometry(n, hex ? 'hex' : 'bin', false);
-    return { w, h, inputs, outputs,
-      body:(f,comp)=><g>
-        <rect x="2" y="4" width={w-4} height="32" rx="8" fill="#f3f3f1" stroke="var(--ink)" strokeWidth="2"/>
-        {stableBlock(comp, w, hex ? HexCells({n, value:comp.state.value||0, editable:true}) : BitCells({n, value:comp.state.value||0, editable:true}))}
-      </g>,
-      // See VIS.INPUT's mirrorTexts comment.
-      mirrorTexts:(comp)=>[{x:-15, y:26, anchor:'end', fontSize:16, opacity:0.8, text:comp.label}],
-    };
-  }
-  // Same hex/binary cell-count split as buildInputVis. The input pin sits at
-  // x=0 regardless, so resizing never moves a wire.
-  function buildOutputVis(n, hex) {
-    const {w, h, inputs, outputs} = inputOutputGeometry(n, hex ? 'hex' : 'bin', true);
-    return { w, h, inputs, outputs,
-      body:(f,comp)=><g>
-        <rect x="2" y="4" width={w-4} height="32" rx="8" fill="#f3f3f1" stroke="var(--ink)" strokeWidth="2"/>
-        {stableBlock(comp, w, hex ? HexCells({n, value:comp.inputVals[0]||0}) : BitCells({n, value:comp.inputVals[0]||0, editable:false}))}
-      </g>,
-      // See VIS.OUTPUT's mirrorTexts comment.
-      mirrorTexts:(comp)=>[{x:w+15, y:26, anchor:'start', fontSize:16, opacity:0.8, text:comp.label}],
-    };
-  }
-  const inputVisCache={}, outputVisCache={};
-  function inputVis(bw, mode) {
-    const n=Math.max(1,Math.min(32,bw|0||1));
-    if (n<=1) return VIS.INPUT;
-    const hex = mode==='hex';
-    const key = n+(hex?'h':'b');
-    return inputVisCache[key] || (inputVisCache[key]=buildInputVis(n, hex));
-  }
-  function outputVis(bw, mode) {
-    const n=Math.max(1,Math.min(32,bw|0||1));
-    if (n<=1) return VIS.OUTPUT;
-    const hex = mode==='hex';
-    const key = n+(hex?'h':'b');
-    return outputVisCache[key] || (outputVisCache[key]=buildOutputVis(n, hex));
-  }
-  // CONST's multi-bit body deliberately does NOT reuse INPUT/OUTPUT's
-  // per-bit cell grid — that made a multi-bit CONST visually indistinguishable
-  // from a multi-bit INPUT/OUTPUT at a glance. Instead it's just one string
-  // (the same regValueText formatting REG's readout uses), echoing the
-  // plain single-digit look the 1-bit CONST circle already has. Digit count
-  // — and so box width — depends only on n/hex (regValueText zero-pads to a
-  // fixed length), not on the actual value, so it can be sized here same as
-  // bitsRowWidth is for the cell-grid components.
-  function buildConstVis(n, hex) {
-    const {w, h, inputs, outputs} = constGeometry(n, hex ? 'hex' : 'bin');
-    return { w, h, inputs, outputs,
-      body:(f,comp)=>{
-        const text = regValueText(comp.state.value||0, n, hex?'hex':'bin');
-        return <g>
-          <rect x="2" y="7" width={w-4} height="26" rx="10" fill="#f3f3f1" stroke="var(--ink)" strokeWidth="2"/>
-          <text x={w/2} y="26" fontFamily="var(--mono)" fontSize="16" fontWeight="600" textAnchor="middle" fill="var(--ink)" opacity="0.8">{text}</text>
-        </g>;
-      }
-    };
-  }
-  const constVisCache={};
-  function constVis(bw, mode) {
-    const n=Math.max(1,Math.min(32,bw|0||1));
-    if (n<=1) return VIS.CONST;
-    const hex = mode==='hex';
-    const key = n+(hex?'h':'b');
-    return constVisCache[key] || (constVisCache[key]=buildConstVis(n, hex));
-  }
-  // Single point every consumer (rendering, pin geometry, wiring) should go
-  // through instead of `VIS[comp.kind]` directly, since INPUT/OUTPUT/CONST,
-  // MUX and SPLIT no longer have a fixed size — everything else still does.
-  function visForComp(comp) {
-    if (comp.kind==='INPUT') return inputVis(comp.bitWidth, comp.displayMode);
-    if (comp.kind==='OUTPUT') return outputVis(comp.bitWidth, comp.displayMode);
-    if (comp.kind==='CONST') return constVis(comp.bitWidth, comp.displayMode);
-    if (comp.kind==='MUX') return muxVis(comp.muxInputs, comp.muxSelectLocation);
-    if (comp.kind==='SPLIT') {
-      const custom = comp.layout==='custom' && Array.isArray(comp.pinBits) && comp.pinBits.length;
-      return splitVis(custom ? comp.pinBits : comp.bits, comp.space, comp.splitType);
-    }
-    return VIS[comp.kind];
-  }
-
-  VIS.CLOCK = { w:60,h:40, inputs:[], outputs:[{x:60,y:20}],
-    body:(f,comp)=>{
-      const on=comp.state.value, paused=comp.state.paused;
-      return <g>
-        <rect x="4" y="4" width="52" height="32" rx="8" fill={paused?'#f3f3f1':'#fefce8'} stroke="var(--ink)" strokeWidth="2"/>
-        {paused ? <>
-          <rect x="20" y="13" width="6" height="14" rx="2" fill="var(--ink)" opacity="0.3"/>
-          <rect x="30" y="13" width="6" height="14" rx="2" fill="var(--ink)" opacity="0.3"/>
-        </> : <path d="M 12 28 L 18 28 L 18 14 L 28 14 L 28 28 L 38 28 L 38 14 L 44 14"
-              fill="none" stroke={on?'var(--high)':'var(--ink)'}
-              strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>}
-      </g>;
-    }
-  };
-
-  VIS.CONST = { w:40,h:40, inputs:[], outputs:[{x:40,y:20}],
-    body:(f,comp)=>{
-      const on=comp.state.value;
-      return <g>
-        <circle cx="18" cy="20" r="13" fill={on==1?'#fde68a':'#f3f3f1'} stroke="var(--ink)" strokeWidth="2"/>
-        <text x="18" y="26" fontFamily="var(--mono)" fontSize="16" fontWeight="600" textAnchor="middle" fill="var(--ink)" opacity="0.8">{comp.state.value}</text>
-      </g>;
-    }
-  };
-
+  // Single-bit OUTPUT
   VIS.OUTPUT = { w:40,h:40, inputs:[{x:0,y:20}], outputs:[],
     body:(f,comp)=>{
       const on=comp.inputVals[0];
@@ -438,6 +228,146 @@ defineModule('gates', ['engine'], (engine) => {
     },
   };
 
+  // Multi-bit INPUT/OUTPUT
+  // One cell per bit
+  const BIT_CELL_H=24; // BIT_CELL_W/BIT_GAP/BIT_PAD (and bitsRowWidth) come from engine
+  function BitCells({ n, value, editable }) {
+    const cy=20;
+    return Array.from({length:n},(_,i)=>{
+      const bit=n-1-i;
+      const on=(value>>>bit)&1;
+      const cx=BIT_PAD+i*(BIT_CELL_W+BIT_GAP);
+      return <g key={bit}>
+        <rect x={cx} y={cy-BIT_CELL_H/2} width={BIT_CELL_W} height={BIT_CELL_H} rx="4"
+              data-bit={editable?bit:undefined}
+              fill={on?'#fef3c7':'#f3f3f1'} stroke="var(--low)" strokeWidth="1.5"
+              style={editable?{cursor:'pointer'}:undefined}/>
+        <text x={cx+BIT_CELL_W/2} y={cy+4} textAnchor="middle" fontFamily="var(--mono)" fontSize="12"
+              fontWeight="600" fill="var(--ink)" opacity="0.55" pointerEvents="none">{on?'1':'0'}</text>
+      </g>;
+    });
+  }
+  // One cell per hex digit (4 bits/cell)
+  // Clicking on an editable cell increments the nibble 
+  function HexCells({ n, value, editable }) {
+    const cy=20, text=regValueText(value, n, 'hex'), digits=text.length;
+    return text.split('').map((ch,i)=>{
+      const shift=(digits-1-i)*4;
+      const cx=BIT_PAD+i*(BIT_CELL_W+BIT_GAP);
+      return <g key={i}>
+        <rect x={cx} y={cy-BIT_CELL_H/2} width={BIT_CELL_W} height={BIT_CELL_H} rx="4"
+              data-shift={editable?shift:undefined}
+              fill="#f3f3f1" stroke="var(--low)" strokeWidth="1.5"
+              style={editable?{cursor:'pointer'}:undefined}/>
+        <text x={cx+BIT_CELL_W/2} y={cy+4} textAnchor="middle" fontFamily="var(--mono)" fontSize="12"
+              fontWeight="600" fill="var(--ink)" opacity="0.55" pointerEvents="none">{ch}</text>
+      </g>;
+    });
+  }
+  // BitCells/HexCells always draw MSB-leftmost/LSB-rightmost; that reading
+  // order needs to stay put regardless of which way the component faces, so
+  // flipping facing right<->left doesn't relabel which physical slot shows
+  // which bit. GateBody mirrors a facing:'left' component with
+  // `translate(w,0) scale(-1,1)`; applying that same transform a second
+  // time here cancels it (two mirrors = identity), so the cell row renders
+  // identically either way. Tagged data-stable so unmirrorText — which
+  // otherwise counter-mirrors every <text> it finds — leaves this subtree
+  // alone instead of correcting it a second time.
+  function stableBlock(comp, w, children) {
+    return comp.facing==='left'
+      ? <g data-stable="true" transform={`translate(${w} 0) scale(-1 1)`}>{children}</g>
+      : <g>{children}</g>;
+  }
+
+  // Cell count and thus width differs based on hex mode or bin mode
+  // Thus cached per bitWidth and mode
+  function buildInputVis(n, hex) {
+    const {w, h, inputs, outputs} = inputOutputGeometry(n, hex ? 'hex' : 'bin', false);
+    return { w, h, inputs, outputs,
+      body:(f,comp)=><g>
+        <rect x="2" y="4" width={w-4} height="32" rx="8" fill="#f3f3f1" stroke="var(--ink)" strokeWidth="2"/>
+        {stableBlock(comp, w, hex ? HexCells({n, value:comp.state.value||0, editable:true}) : BitCells({n, value:comp.state.value||0, editable:true}))}
+      </g>,
+      mirrorTexts:(comp)=>[{x:-15, y:26, anchor:'end', fontSize:16, opacity:0.8, text:comp.label}],
+    };
+  }
+  // The input pin sits at x=0 regardless, so resizing never moves a wire
+  function buildOutputVis(n, hex) {
+    const {w, h, inputs, outputs} = inputOutputGeometry(n, hex ? 'hex' : 'bin', true);
+    return { w, h, inputs, outputs,
+      body:(f,comp)=><g>
+        <rect x="2" y="4" width={w-4} height="32" rx="8" fill="#f3f3f1" stroke="var(--ink)" strokeWidth="2"/>
+        {stableBlock(comp, w, hex ? HexCells({n, value:comp.inputVals[0]||0}) : BitCells({n, value:comp.inputVals[0]||0, editable:false}))}
+      </g>,
+      mirrorTexts:(comp)=>[{x:w+15, y:26, anchor:'start', fontSize:16, opacity:0.8, text:comp.label}],
+    };
+  }
+  const inputVisCache={}, outputVisCache={};
+  function inputVis(bw, mode) {
+    const n=Math.max(1,Math.min(32,bw|0||1));
+    if (n<=1) return VIS.INPUT;
+    const hex = mode==='hex';
+    const key = n+(hex?'h':'b');
+    return inputVisCache[key] || (inputVisCache[key]=buildInputVis(n, hex));
+  }
+  function outputVis(bw, mode) {
+    const n=Math.max(1,Math.min(32,bw|0||1));
+    if (n<=1) return VIS.OUTPUT;
+    const hex = mode==='hex';
+    const key = n+(hex?'h':'b');
+    return outputVisCache[key] || (outputVisCache[key]=buildOutputVis(n, hex));
+  }
+
+
+  // Single-bit CONST
+  VIS.CONST = { w:40,h:40, inputs:[], outputs:[{x:40,y:20}],
+    body:(f,comp)=>{
+      const on=comp.state.value;
+      return <g>
+        <circle cx="18" cy="20" r="13" fill={on==1?'#fde68a':'#f3f3f1'} stroke="var(--ink)" strokeWidth="2"/>
+        <text x="18" y="26" fontFamily="var(--mono)" fontSize="16" fontWeight="600" textAnchor="middle" fill="var(--ink)" opacity="0.8">{comp.state.value}</text>
+      </g>;
+    }
+  };
+
+  // Multi-bit CONST, differentiated from input/output by displaying a single string rather than cells
+  // Digit count and thus width depends only on n/hex, so width is calculated here
+  function buildConstVis(n, hex) {
+    const {w, h, inputs, outputs} = constGeometry(n, hex ? 'hex' : 'bin');
+    return { w, h, inputs, outputs,
+      body:(f,comp)=>{
+        const text = regValueText(comp.state.value||0, n, hex?'hex':'bin');
+        return <g>
+          <rect x="2" y="7" width={w-4} height="26" rx="10" fill="#f3f3f1" stroke="var(--ink)" strokeWidth="2"/>
+          <text x={w/2} y="26" fontFamily="var(--mono)" fontSize="16" fontWeight="600" textAnchor="middle" fill="var(--ink)" opacity="0.8">{text}</text>
+        </g>;
+      }
+    };
+  }
+  const constVisCache={};
+  function constVis(bw, mode) {
+    const n=Math.max(1,Math.min(32,bw|0||1));
+    if (n<=1) return VIS.CONST;
+    const hex = mode==='hex';
+    const key = n+(hex?'h':'b');
+    return constVisCache[key] || (constVisCache[key]=buildConstVis(n, hex));
+  }
+
+  VIS.CLOCK = { w:60,h:40, inputs:[], outputs:[{x:60,y:20}],
+    body:(f,comp)=>{
+      const on=comp.state.value, paused=comp.state.paused;
+      return <g>
+        <rect x="4" y="4" width="52" height="32" rx="8" fill={paused?'#f3f3f1':'#fefce8'} stroke="var(--ink)" strokeWidth="2"/>
+        {paused ? <>
+          <rect x="20" y="13" width="6" height="14" rx="2" fill="var(--ink)" opacity="0.3"/>
+          <rect x="30" y="13" width="6" height="14" rx="2" fill="var(--ink)" opacity="0.3"/>
+        </> : <path d="M 12 28 L 18 28 L 18 14 L 28 14 L 28 28 L 38 28 L 38 14 L 44 14"
+              fill="none" stroke={on?'var(--high)':'var(--ink)'}
+              strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>}
+      </g>;
+    }
+  };
+
   VIS.SEVEN = { w:W*1.25, h:H*1.75, inputs:[{x:W*0.25,y:0,dir:'up'}, {x:W*0.5,y:0,dir:'up'}, {x:W*0.75,y:0,dir:'up'}, {x:W,y:0,dir:'up'}, {x:W*0.25,y:H*1.75,dir:'down'}, {x:W*0.5,y:H*1.75,dir:'down'}, {x:W*0.75,y:H*1.75,dir:'down'}], outputs:[],
     body:(f,comp)=><g>
         <rect x="10" y="10" width="80" height="120" rx="7" fill="#f3f3f1" stroke="var(--ink)" strokeWidth="2"/>
@@ -461,9 +391,7 @@ defineModule('gates', ['engine'], (engine) => {
   VIS.JKFF = {w:80,h:120, inputs:[{x:0,y:20},{x:0,y:60},{x:0,y:100}],outputs:[{x:80,y:40}], body:(f,comp)=><g>{pendingBar(comp)}{ffRect(f,120)}{ffTxt(14,24,'J')}{ffTxt(14,64,'K')}{ffTxt(14,104,'▷')}{ffTxt(62,44,'Q')}<text x="40" y="110" fontFamily="var(--ui)" fontSize="9" textAnchor="middle" fill="var(--ink)" opacity="0.38">JK</text></g>};
 
   // REG's D input and Q output are the only pins that scale with bitWidth
-  // (EN/CLK/RESET stay 1-bit control lines — enforced in engine.js), so only
-  // the little value readout above the box needs to grow; the box itself and
-  // its pin layout stay fixed, unlike INPUT/OUTPUT's whole-body resize.
+  // Only the little value readout above the box resizes, the box itself and its pin layout stay fixed
   function regValueText(value, bitWidth, mode) {
     const v = (value||0) >>> 0;
     if (mode === 'hex') return v.toString(16).toUpperCase().padStart(Math.ceil(bitWidth/4), '0');
@@ -501,8 +429,6 @@ defineModule('gates', ['engine'], (engine) => {
         </g>;
       }};
 
-  // Single in/out (unlike SHFT's value+shift-amount pair), centered to match
-  // the output's y=40 — GATE_DEFS.EXTND has inputs:1.
   VIS.EXTND = {w:80,h:80,  inputs:[{x:0,y:40}], outputs:[{x:80,y:40}],
       body:(f,comp)=>{
         return <g>
@@ -512,10 +438,9 @@ defineModule('gates', ['engine'], (engine) => {
         </g>;
       }};
 
-  // Per-pin facing: each pin stub normally points 'left' (inputs) or 'right'
-  // (outputs) toward the gate body, but a pin can override this with its own
-  // `dir` ('left'|'right'|'up'|'down') to poke out a different side — e.g. a
-  // mux's select pin facing 'up' — independent of the whole gate's `facing`.
+  // Draws a little line between the pin and a component's body
+  // Each input usually points left and output right, but pins can override this
+  // with `dir` ('left'|'right'|'up'|'down')
   const PIN_DIR_VEC = { left:[-1,0], right:[1,0], up:[0,-1], down:[0,1] };
   function pinStub(p, defaultDir) {
     const [dx,dy] = PIN_DIR_VEC[p.dir||defaultDir];
@@ -574,6 +499,19 @@ defineModule('gates', ['engine'], (engine) => {
     return node;
   }
 
+  // Returns the SVG for this component
+  function visForComp(comp) {
+    if (comp.kind==='INPUT') return inputVis(comp.bitWidth, comp.displayMode);
+    if (comp.kind==='OUTPUT') return outputVis(comp.bitWidth, comp.displayMode);
+    if (comp.kind==='CONST') return constVis(comp.bitWidth, comp.displayMode);
+    if (comp.kind==='MUX') return muxVis(comp.muxInputs, comp.muxSelectLocation);
+    if (comp.kind==='SPLIT') {
+      const custom = comp.layout==='custom' && Array.isArray(comp.pinBits) && comp.pinBits.length;
+      return splitVis(custom ? comp.pinBits : comp.bits, comp.space, comp.splitType);
+    }
+    return VIS[comp.kind];
+  }
+
   function GateBody({ comp }) {
     const def=GATE_DEFS[comp.kind], vis=visForComp(comp);
     if (!vis) return null;
@@ -612,18 +550,17 @@ defineModule('gates', ['engine'], (engine) => {
     </g>;
   }
 
-  // Registers a saved circuit as a placeable gate: a white rounded box sized
-  // to fit its inputs (left) / outputs (right), simulated as a black box by
-  // running a private nested circuit to settling on every compute() call.
+  // Registers a saved circuit as a placeable gate
+  // The visual is a simple white rounded box sized to fit its inputs (left) / outputs (right)
+  // Simulated by running a private nested circuit to settling on every compute() call
   const CUSTOM_PIN_MARGIN = 20, CUSTOM_PIN_GAP = 40;
   function customPinYs(n, h) {
     if (n <= 1) return [h/2];
     const usable = h - CUSTOM_PIN_MARGIN*2;
     return Array.from({length:n}, (_,i)=>CUSTOM_PIN_MARGIN + usable*i/(n-1));
   }
-  // Greedy word-wrap for the gate-name label, sized for a monospace font at
-  // fontSize 10 (~6px/char); a single word longer than the line is hard-broken
-  // so it can't overflow the box regardless.
+  // Greedy word-wrap for the gate-name label
+  // A single word longer than the line is hard-broken
   function wrapLabel(text, maxChars) {
     const words = String(text).split(/\s+/).filter(Boolean);
     const lines = [];
@@ -644,28 +581,19 @@ defineModule('gates', ['engine'], (engine) => {
     const kindKey = 'CUSTOM:'+name;
     const tmp = engine.createCircuit();
     tmp.load(data);
-    // Ordered by y so the box's pin stack visually matches how the inputs/
-    // outputs were laid out top-to-bottom in the saved circuit, not by
-    // creation order.
+    // Ordered by y so the vis's pin stack matches how the inputs/outputs
+    // outputs were laid out top-to-bottom in the saved circuit
     const ins  = [...tmp.ioComponents.values()].filter(c=>c.kind==='INPUT').sort((a,b)=>a.y-b.y);
     const outs = [...tmp.ioComponents.values()].filter(c=>c.kind==='OUTPUT').sort((a,b)=>a.y-b.y);
     const inIds=ins.map(c=>c.ioId), outIds=outs.map(c=>c.ioId);
     const inLabels=ins.map(c=>c.label), outLabels=outs.map(c=>c.label);
-    // Each port's width comes straight off the INPUT/OUTPUT it was built
-    // from (already 1-32, clamped by addComponent) — a custom gate's pins
-    // are NOT all one width like a plain gate's comp.bitWidth; each is
-    // whatever the sub-circuit's matching port was wired up as. Recorded
-    // per-pin on the def itself since pinBitWidthAt (engine-core) has no
-    // other per-instance place to read a custom gate's widths from.
+    // Each port's width comes straight off the INPUT/OUTPUT it was built from
+    // Widths recorded per-pin on the def itself since pinBitWidthAt (engine-core) 
+    // has no other per-instance place to read a custom gate's widths from
     const inWidths=ins.map(c=>c.bitWidth||1), outWidths=outs.map(c=>c.bitWidth||1);
-    // Whether this gate's own output can drift over time even while its
-    // (outer) inputVals stay fixed — true if its sub-circuit contains a
-    // live CLOCK, directly or through another custom gate that's already
-    // carrying the same flag (dependencies always register before the
-    // custom gates that use them — see hydrateCustomGates). step()'s
-    // dirty-check (engine-circuit.js) reads this to know it isn't safe to
-    // skip recomputing this kind just because nothing obviously changed —
-    // skipping would silently freeze a clock buried anywhere inside it.
+    // Whether this gate's own output can drift over time even while its inputVals stay fixed
+    // Applies if its sub-circuit contains a live CLOCK, directly or recursively 
+    // Used by step()'s dirty-check 
     const alwaysRecompute = [...tmp.components.values()].some(c => {
       const d = GATE_DEFS[c.kind];
       return d && d.alwaysRecompute;
@@ -684,25 +612,14 @@ defineModule('gates', ['engine'], (engine) => {
       compute(inputVals, state) {
         if (!state.sub) { state.sub = engine.createCircuit(); state.sub.load(data); }
         const sub = state.sub;
-        // Pass the port's full bus value through untouched — sub's own
-        // INPUT compute (engine-core) masks it to that port's own bitWidth,
-        // same as a top-level INPUT would. Coercing to a single bit here
-        // (as before multi-bit support) silently dropped every bit above
-        // bit 0 of a wide input.
-        // markComponentDirty: an INPUT has zero inputVals, so step()'s
-        // dirty-check (engine-circuit.js) would otherwise see this port as
-        // "unchanged" on every call after the first and skip recomputing it
-        // forever — same reason toggleInput/setConstValue/etc. call it too.
+        // markComponentDirty: an INPUT has zero inputVals, so step()'s dirty-check
+        // would otherwise see this port as unchanged on every call
         inIds.forEach((ioId,i)=>{ const c=sub.ioComponents.get(ioId); if (c) { c.state.value = inputVals[i]||0; sub.markComponentDirty(c.id); } });
         for (let i=0;i<10;i++) sub.step(performance.now(), 0, true);
         return outIds.map(ioId=>{ const c=sub.ioComponents.get(ioId); return c ? (c.inputVals[0]||0) : 0; });
       }
     };
 
-    // Ports wider than 1 bit get a "[n]" suffix on their label so the
-    // box's pin list doubles as a legend for what registerCustomGate just
-    // recorded in inWidths/outWidths — otherwise a width mismatch (drawn
-    // in red on the wire, see wireBitMismatch) would be the only clue.
     const pinLabel = (lbl, w) => w>1 ? `${lbl}` : lbl;
 
     VIS[kindKey] = {
@@ -2542,10 +2459,6 @@ function App(){
     </Dialog>}
 
     {showSettings&&<Dialog title="Settings" onClose={()=>setShowSettings(false)}>
-      {/* .prop-grid so both rows' selects start at the same x position —
-          without it each row is its own flex line, and "Propagation Mode"
-          vs "Propagation Style" being different lengths would leave the
-          two dropdowns staggered instead of lined up. */}
       <div className="prop-grid">
         <div className="prop-option">
           <span className="prop-label">Propagation Mode</span>
@@ -2577,16 +2490,6 @@ function App(){
           <div className="split-layout-preview">
             <SplitLayoutPreview circuit={circuit} comp={selComp} onComponentChanged={refresh}/>
           </div>
-          {/* .prop-grid for the same label/input column alignment as every
-              other properties panel — SplitPropFields supplies Type/Bits/
-              Space (the exact same rows and mutators the main properties
-              panel uses; showLayout={false} since you can only get here
-              once Layout is already Custom, so switching it back to
-              Regular belongs on the main panel, not this dialog), `extra`
-              adds the dialog-only "Number of Pins" row right after Space,
-              and Facing (shared by every gate kind, not SPLIT-specific) is
-              repeated here too so every property that affects the preview
-              is reachable without leaving the dialog. */}
           <div className="split-layout-options prop-grid">
             <SplitPropFields circuit={circuit} comp={selComp} onComponentChanged={refresh} showLayout={false} extra={
               selComp.layout==='custom' && Array.isArray(selComp.pinBits) &&
