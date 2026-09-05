@@ -12,19 +12,8 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
   const { isWireTerminal, wireSegmentPoints, wireDelayForLength, pinAbs } = geometry;
   const { removeWireCascading, pruneDeadJunctions } = routing;
 
-  // Runs `mutate` (some change to a geometry-affecting field on `c`, e.g.
-  // bitWidth, muxInputs, or a SPLIT's bits/space) and shifts c.x/c.y by
-  // however much that changed the absolute position of pin
-  // `anchorKind`/`anchorIdx` on `c`, so that pin — and whatever wire is
-  // attached to it — stays exactly where it was, and the shape visibly
-  // grows/shrinks away from it instead of dragging it along.
-  //
-  // Comparing two real pinAbs calls (rather than hand-deriving "this
-  // field grew by N px, so shift x/y by such-and-such") makes this
-  // automatically correct for EVERY facing: pinAbs already knows how to
-  // turn a change in local geometry into a change in absolute position
-  // for any rotation, so this doesn't need its own copy of that math, and
-  // doesn't need to special-case which facing "grows" which edge either.
+  // Mutates the component c (some geometric change, like changing bits on an input)
+  // Ensures that the anchor pin doesn't shift by adjusting c.x/c.y
   function compensateAnchor(c, anchorKind, anchorIdx, mutate) {
     const before = pinAbs(c, anchorKind, anchorIdx);
     mutate();
@@ -32,12 +21,8 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
     c.x -= (after.x - before.x);
     c.y -= (after.y - before.y);
   }
-  // Which pin (index 0) anchors an INPUT/OUTPUT/CONST's shape when its box
-  // resizes — INPUT/CONST grow away from their single output pin; OUTPUT
-  // grows away from its single input pin. Everything else that resizes
-  // with bitWidth (REG) keeps a fixed footprint regardless (only its
-  // little value readout grows — see setDisplayMode), so it has no anchor
-  // pin at all, and this just applies the change directly.
+
+  // Anchors an input/output/const on its pin when it resizes from bit change
   function ioAnchorPin(kind) {
     if (kind==='INPUT' || kind==='CONST') return 'out';
     if (kind==='OUTPUT') return 'in';
@@ -50,31 +35,18 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
     compensateAnchor(c, anchorKind, 0, apply);
   }
 
-  // step()'s dirty-check (see the "Compute outputs" loop below): whether
-  // two inputVals snapshots are identical, so a component whose inputs
-  // haven't actually changed since the last tick can skip re-running
-  // compute() and just reuse what it returned last time. Plain value
-  // comparison is enough — inputVals are always flat arrays of 0/1 or
-  // small ints, never objects.
+  // Checks if two inputVals snapshots are identical, used for step()'s dirty check
   function arraysEqual(a, b) {
     if (!a || !b || a.length !== b.length) return false;
     for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
     return true;
   }
-  // Forces a component's compute() to actually run next tick even though
-  // its inputVals haven't changed — for every setter below that changes
-  // something OTHER than inputVals that compute() also reads (bitWidth,
-  // comp.muxInputs, comp.shiftMode, a CONST's own state.value, ...). Without
-  // this, e.g. widening a gate's bitWidth wouldn't visibly remask its
-  // output until some unrelated input next flips.
+  // Forces a component's compute() to run 
+  // Used when inputVals isn't changed but something else is (bitWidth, comp.muxInuts, etc)
   function markDirty(c) { c._lastInputVals = undefined; }
 
-  // Validates a candidate SPLIT custom-layout pin-width array against a
-  // trunk width: must be an array of 2..bits positive integers summing
-  // exactly to bits (every trunk bit assigned to exactly one pin). Returns
-  // the array unchanged if valid, otherwise null so callers (addComponent,
-  // setSplitLayout) can fall back to a fresh default instead of trusting
-  // stale/hand-edited data.
+  // Validates a splitter's candidate custom layout, a pin-width array (pinBits) against its trunk width (bits)
+  // Returns the array unchanged if valid, returns null otherwise
   function validSplitPinBits(pinBits, bits) {
     if (!Array.isArray(pinBits) || pinBits.length<2 || pinBits.length>bits) return null;
     let sum = 0;
@@ -85,11 +57,9 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
     return sum===bits ? pinBits : null;
   }
 
-  // Constructs a fresh, empty circuit instance: the mutable component/wire/
-  // junction store, plus every operation — simulation stepping, mutation,
-  // (de)serialization — that acts on it. Everything below lives in this
-  // closure so it can share `components`/`wires`/`junctions`/id counters
-  // without threading them through every call.
+  // Constructs a fresh, empty circuit instance: 
+  // Components/wires/junctions, and every operation on these (simulation stepping, mutation, serialization)
+  // Everything lives in this closure so that id counters can be easily shared
   function createCircuit() {
     let nextId = 1;
     let nextIoId = 1;
@@ -110,12 +80,7 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
       const muxN = kind==='MUX' ? Math.max(2,Math.min(4,Math.round(muxInputs||2))) : undefined;
       const splitBitsN = kind==='SPLIT' ? Math.max(2,Math.min(32,Math.round(bits||2))) : undefined;
       const splitTypeV = kind==='SPLIT' ? (splitType==='merge' ? 'merge' : 'split') : undefined;
-      // The custom layout's per-pin widths, sanity-checked against the
-      // resolved bit count above (see validSplitPinBits) — an invalid or
-      // absent array (fresh placement, legacy save, hand-edited JSON)
-      // falls back to the same one-pin-per-bit shape the regular layout
-      // uses, so a freshly-flipped 'custom' component never looks
-      // different from 'regular' until the user actually customizes it.
+      // An invalid splitter custom layout reverts back to one pin per bit
       const splitLayoutV = kind==='SPLIT' ? (layout==='custom' ? 'custom' : 'regular') : undefined;
       const splitPinBitsV = kind==='SPLIT' && splitLayoutV==='custom'
         ? (validSplitPinBits(pinBits, splitBitsN) || Array(splitBitsN).fill(1))
@@ -232,40 +197,23 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
       return srcWidth !== pinBitWidthAt(dst, 'in', wire.to.pin);
     }
 
-    // A wire's own effective delay budget, in component mode: the flat
-    // `delayMs` nominal for a normal (non-branch) wire, or, for a wire
-    // that's itself a branch, whatever wireSourceValue below already
-    // worked out was left of it (`wire._ownDelay`, stored as a side
-    // effect there — see the comment down there for why it has to be
-    // computed from the PARENT's own effective delay rather than the flat
-    // nominal for the recursive convergence to hold across chains of
-    // branches-of-branches).
-    // Length mode ignores this entirely — it's already correctly additive
-    // by real geometric distance, with no shared "total budget" to
-    // subdivide, so `nominalDelay` (already length-derived) passes through.
+    // Returns a wire's own effective delay budget
+    // In component mode: `delayMs` for a non-branch wire, and for branch wires, 
+    // whatever wireSourceValue below already worked out was left of it (w._ownDelay)
+    // In length mode: `nominalDelay` is already length-derived so it passes through
     function wireOwnDelay(w, nominalDelay) {
       if (state.widgetState.propagationMode !== 'component') return nominalDelay;
       return typeof w._ownDelay === 'number' ? w._ownDelay : nominalDelay;
     }
 
     // A no-op placeholder for callers that don't care about a branch's
-    // own delay bookkeeping (reachMs/ownDelay) — see wireSourceValue below.
+    // own delay bookkeeping (reachMs/ownDelay) 
     const NO_REACH = {reachMs: 0, ownDelay: undefined};
 
-    // Returns {value, reachMs, ownDelay} for the source of the wire, either
-    // a pin or a junction. `value` is the value (0 or 1) currently visible
-    // there. For branches, `reachMs`/`ownDelay` describe how long the
-    // signal takes to reach the branchpoint on the parent wire, and how
-    // much delay budget is left over after that — see wireOwnDelay above
-    // for how that composes across chains of branches. These are NOT
-    // written onto `wire` here — only step()'s caller does that, and only
-    // at the exact moment `wire.pendingStart` itself gets (re)committed.
-    // That matters: this function keeps recomputing every tick, but once
-    // `src` finishes ITS OWN transition (pendingValue clears) partway
-    // through this wire's wait, there's nothing left here to recompute —
-    // the values from the tick this wire's own transition began need to
-    // stay put, exactly like `wire.pendingStart` itself already does,
-    // rather than being clobbered back to "no branch" on every later tick.
+    // Returns {value, reachMs, ownDelay} for the source of the wire, either a pin or a junction 
+    // `value` is the value (0 or 1) currently visible there
+    // For branches, `reachMs` describes how long the signal takes to reach the branchpoint on the parent wire, 
+    // `ownDelay` describes how much delay budget is left over after that 
     function wireSourceValue(wire, circuit, now, instant) {
       if (isWireTerminal(wire.from)) {
         const src = circuit.components.get(wire.from.compId);
@@ -305,18 +253,10 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
               }
 
               const t = totalLen > 0 ? distToJunction / totalLen : 0;
-              // The signal reaches the junction at pendingStart + t * (src's
-              // own EFFECTIVE delay budget) — in length mode that budget is
-              // src's real geometric delay (so this is a straight physical-
-              // distance fraction, same as always). In component mode it's
-              // whatever src's own wireOwnDelay resolved to — which, if src
-              // is itself a branch, is already reduced below the flat
-              // nominal. Reading src's ACTUAL effective delay here (not the
-              // flat nominal) is what lets this recurse correctly: this
-              // wire's own remaining budget below is carved out of what its
-              // parent actually had left, not a fresh flat delayMs, so an
-              // arbitrarily deep chain of branches-of-branches still lands
-              // on the same commit instant as the original root.
+              // The signal reaches the junction at pendingStart + t * (src's own effective delay budget)
+              // In length mode, that budget is src's real geometric delay
+              // In component mode, it's whatever src's own wireOwnDelay resolved to, 
+              // which could be less than the flat nominal if it is a branch
               const srcKnots = wireSegmentPoints(src, circuit);
               let srcTotalLen = 0;
               for (let i = 0; i < srcKnots.length - 1; i++) {
@@ -359,22 +299,9 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
           }
         }
       }
-      // Compute outputs and hold each change for the gate's own `delay` (ms)
+      // Computes outputs and holds each change for the gate's own `delay` (ms)
       // before it becomes visible on the output pin
-      //
-      // compute() only actually runs when this component's inputVals
-      // changed since the last tick it ran (or def.alwaysRecompute opts it
-      // out of the check, e.g. CLOCK) — otherwise the exact same inputVals
-      // would just recompute the exact same outs, so the cached c._lastOuts
-      // from last time is reused instead. For a plain gate that's a trivial
-      // saving; for a CUSTOM gate it's the difference that matters — its
-      // compute() runs an entire sub-circuit for up to 10 sub-steps, and
-      // that cost was previously paid every tick for every instance
-      // regardless of whether anything fed into it had changed, compounding
-      // with every level of custom-gate nesting. A settled circuit's
-      // inputVals stop changing almost everywhere, so this turns "replay
-      // the whole nested tree every frame forever" into "only the part
-      // that's actually still settling."
+      // Only computes when the component's inputVals have changed since the last tick 
       for (const c of components.values()) {
         const def = GATE_DEFS[c.kind];
         const dirty = def.alwaysRecompute || !arraysEqual(c.inputVals, c._lastInputVals);
@@ -385,15 +312,11 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
         for (let i=0;i<outs.length;i++) {
           if (outs[i]!==c.pendingOutputVals[i]) {
             if (outs[i]===c.outputVals[i]) {
-              // Input reverted before the pending change ever landed — nothing
-              // to propagate, so drop the in-flight change instead of letting
-              // it commit as a stale glitch once the old timer expires.
+              // Input reverted before the pending change ever landed, so drop the in-flight change
               c.pendingOutputVals[i] = undefined;
               c.pendingOutputStart[i] = undefined;
             } else {
-              // New target value: restart the delay from now instead of
-              // keeping the original countdown, so the output always lands
-              // one full delay after the most recent input change.
+              // New target value, so restart the delay from now 
               c.pendingOutputVals[i] = outs[i];
               c.pendingOutputStart[i] = now;
             }
@@ -413,14 +336,9 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
         const {value: srcVal, reachMs, ownDelay} = w.bitMismatch ? {value:0, ...NO_REACH} : wireSourceValue(w, circuitRef, now, instant);
         if (srcVal!==w.pendingValue && srcVal!==w.value) {
           w.pendingValue=srcVal; w.pendingStart=now;
-          // Commit this wire's own reachMs/ownDelay (see wireSourceValue)
-          // ONLY at the exact tick its transition begins, same as
-          // pendingStart just above — NOT every tick, since `src` (this
-          // wire's parent, if it's a branch) can go on to finish ITS OWN
-          // transition partway through this wire's wait, at which point
-          // recomputing here would have nothing left to compute from and
-          // would wrongly wipe these back to "not a branch".
-          w._reachMs = reachMs; w._ownDelay = ownDelay;
+          // Commit this wire's own reachMs/ownDelay exactly when its transition begins
+          // not every tick, since `src` can go on to finish its own transition while
+          // this wire is still going, and recomputing would thus wrongly wipe them
         }
       }
       for (const w of wires.values()) {
@@ -429,10 +347,6 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
         for (let i = 0; i < knots.length - 1; i++) {
           wireLen += Math.hypot(knots[i+1].x - knots[i].x, knots[i+1].y - knots[i].y);
         }
-        // wireOwnDelay: in component mode, a branch (w._reachMs>0, set by the
-        // wireSourceValue pass just above) gets credit for however much of
-        // its budget was already spent reaching its own pendingStart, so it
-        // still lands on the same commit instant as its ultimate root wire.
         const wireDelay = wireOwnDelay(w, wireDelayForLength(wireLen, delayMs));
 
         if (typeof w.pendingValue !== 'undefined' && now - (w.pendingStart || 0) >= wireDelay) {
@@ -499,31 +413,20 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
       nextIoId=Math.max(data.nextIoId||1,nextIoId);
     }
 
-    // Resets the io-pin id/label counter back to io1/'A'. Called on a full
-    // canvas clear so a fresh circuit doesn't keep counting up from wherever
-    // the previous one left off — see addComponent's ioId assignment above.
+    // Resets the io-pin id/label counter back to io1/'A'
+    // Called on a full canvas clear so a fresh circuit starts anew
     function resetIoIds() { nextIoId = 1; }
 
     // Return for createCircuit(): returns all properties and methods the app may need to access after build
     return {
       components, wires, ioComponents, junctions,
       addComponent, removeComponent, addWire, removeWire, step, serialize, load, resetIoIds,
-      // Exposed so the renderer's own pulse/waypoint-lighting animation (see
-      // circuit_widget.html's wireProgress) can use the SAME effective delay
-      // a branch actually commits on, instead of independently recomputing
-      // the flat geometric one — see wireOwnDelay's own comment above for
-      // why a branch's real delay isn't just wireDelayForLength(wireLen).
+      // Exposed so the renderer's own pulse/waypoint-lighting animation (circuit_widget.html's wireProgress) 
+      // can use the same effective delay a branch actually commits on
       wireOwnDelay,
-      // Forces `id`'s compute() to actually run next tick even though its
-      // inputVals haven't changed — see markDirty above. Exposed for
-      // callers outside this module that mutate a component's state
-      // directly instead of through one of the setters below, which all
-      // already call markDirty themselves. Specifically: a CUSTOM gate's
-      // own compute() (circuit_widget.html) pokes its sub-circuit's INPUT
-      // ports' state.value this same way every time it runs, and an INPUT
-      // has zero inputVals — so without this, that port's own compute()
-      // would look "unchanged" forever after its first run and the whole
-      // custom gate would freeze on its first-ever result.
+      // Forces `id`'s compute() to actually run next tick even though its inputVals haven't changed, see markDirty above
+      // Exposed for callers outside this module that mutate a component's state directly instead of 
+      // through one of the setters below, which all already call markDirty themselves
       markComponentDirty(id) {
         const c = components.get(id);
         if (c) markDirty(c);
@@ -556,12 +459,7 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
       setBitWidth(id,w){
         const c=components.get(id); if(!c||!BIT_WIDTH_KINDS.has(c.kind)) return;
         const width=Math.max(1,Math.min(32,Math.round(w)||1));
-        // INPUT/OUTPUT/CONST are the only BIT_WIDTH_KINDS whose box actually
-        // resizes with bitWidth (see ioAnchorPin) — everything else keeps a
-        // fixed footprint and just carries wider values internally. That
-        // resize has one pin (INPUT/CONST: output; OUTPUT: input) which
-        // should stay put so an attached wire doesn't visibly jump — see
-        // compensateIOAnchor. It also applies the new bitWidth itself.
+        // Resize an input, output, or constant (everything else stays the same when bitWidth changes)
         compensateIOAnchor(c, width, c.displayMode);
         if (c.kind==='INPUT' || c.kind==='CONST') c.state.value = maskVal(c.state.value||0, width);
         if (c.kind==='REG') c.state.q = maskVal(c.state.q||0, width);
@@ -583,11 +481,7 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
       setDisplayMode(id,mode){
         const c=components.get(id); if(!c||(c.kind!=='REG'&&c.kind!=='OUTPUT'&&c.kind!=='INPUT'&&c.kind!=='CONST')) return;
         const newMode = mode==='hex' ? 'hex' : 'bin';
-        // REG's box and pin layout stay fixed regardless of mode — only its
-        // little value readout grows (see gates.js's regValueText comment)
-        // — so compensateIOAnchor just applies the mode change for it; it
-        // only ever moves x/y for OUTPUT/INPUT/CONST, the kinds whose box
-        // actually resizes. It also applies the new mode itself.
+        // Applies the mode change, doesn't actually shift it like it does for input/output/const
         compensateIOAnchor(c, c.bitWidth, newMode);
       },
       // Sets SHFT's shift direction/mode (logical left, logical right, or arithmetic right)
@@ -602,14 +496,11 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
         const newN=Math.max(2,Math.min(4,Math.round(n)||2));
         const oldN=c.muxInputs||2;
         if (newN===oldN) return;
-        // Input pin 0 always sits at the same local position regardless of
-        // input count (see muxGeometry) — the anchor pin to keep put as
-        // the body grows/shrinks to fit the new count, same reasoning as
-        // compensateIOAnchor.
+        // Anchors around the first input pin 
         compensateAnchor(c, 'in', 0, () => { c.muxInputs=newN; });
         markDirty(c);
         // Wires connected to the select pin need to have their index updated
-        // Wires connected to now deleted inputs are also deleted
+        // Wires connected to now deleted inputs are also deleted (maybe change this to leave it hanging?)
         for (const [wid,w] of wires) {
           if (w.to.compId!==id || typeof w.to.pin!=='number') continue;
           if (w.to.pin===oldN) w.to={...w.to, pin:newN};
@@ -622,15 +513,9 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
         c.muxSelectLocation = loc==='bottom' ? 'bottom' : 'top';
       },
       // Changes SPLIT's total bit count (clamped 2-32)
-      // In the custom layout, per-pin widths must keep summing to this
-      // total, so a change here cascades onto the LAST pin: growing the
-      // total hands the whole increase to it; shrinking it takes bits back
-      // from it (and, once it's down to 1, the next-to-last pin, and so
-      // on) — the same "last pin absorbs the change" rule setSplitPinCount
-      // uses for adding/removing a pin, just applied to a width change
-      // instead of a count change. That means the total can never drop
-      // below the current pin count (every pin needs >=1 bit), so the
-      // effective minimum is raised accordingly for custom layouts.
+      // In the custom layout, growing the total adds a bit to the last pin,
+      // shrinking the total takes a bit away from the last pin with >1 bits
+      // in order to preserve pin bits summing to the total bit count
       setSplitBits(id,n){
         const c=components.get(id); if(!c||c.kind!=='SPLIT') return;
         const custom = c.layout==='custom' && Array.isArray(c.pinBits);
@@ -638,11 +523,7 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
         const newN=Math.max(floor,Math.min(32,Math.round(n)||2));
         const oldN=c.bits||2;
         if (newN===oldN) return;
-        // The diagonal (wide-bus) pin always sits at the same local
-        // position regardless of bit count (see splitGeometry) — the
-        // anchor pin to keep put as the trunk grows/shrinks to fit the
-        // new count. Its kind (in for 'split' mode, out for 'merge')
-        // follows splitType, same as everywhere else that pin is found.
+        // Anchors to the multi-bit pin as the trunk grows/shrinks
         compensateAnchor(c, c.splitType==='merge' ? 'out' : 'in', 0, () => {
           c.bits=newN;
           if (custom) {
@@ -660,10 +541,9 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
           }
         });
         markDirty(c);
-        // Drop any wires still attached to now deleted pins (regular
-        // layout only — in custom mode this width change never changes
-        // the pin COUNT, so nothing here is actually deleted, but the
-        // check is harmless to leave in place for both).
+        // Drop any wires still attached to now deleted pins
+        // Only actually does it for a regular layout, 
+        // since width change doesn't change pin count in a custom layout 
         const merge = c.splitType==='merge';
         const pinCount = custom ? c.pinBits.length : newN;
         for (const [wid,w] of wires) {
@@ -674,9 +554,7 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
       // Sets the spacing (in grid units, clamped 1-8) between SPLIT's single-bit pins
       setSplitSpace(id,n){
         const c=components.get(id); if(!c||c.kind!=='SPLIT') return;
-        // Same anchor-preservation reasoning as setSplitBits — space also
-        // changes the trunk's own length (see splitGeometry), just via a
-        // different field.
+        // Anchors to the multi-bit pin as the trunk grows/shrinks
         compensateAnchor(c, c.splitType==='merge' ? 'out' : 'in', 0, () => {
           c.space=Math.max(1,Math.min(16,Math.round(n)||1));
         });
@@ -699,13 +577,9 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
         const c=components.get(id); if(!c||c.kind!=='SPLIT') return;
         const t = layout==='custom' ? 'custom' : 'regular';
         if (t===c.layout) return;
-        // Entering custom: reuse whatever pinBits is already sitting on
-        // this component (from a previous custom session) if it's still
-        // valid for the current bit count, so flipping layout back and
-        // forth doesn't throw away a customization the user already made.
-        // If it's missing or stale (e.g. `bits` changed while regular),
-        // fall back to the same one-pin-per-bit shape the regular layout
-        // already shows, so the flip itself never causes a visual jump.
+        // When switching to custom mode, reuse whatever pinBits is already sitting on
+        // from a previous custom session if it's still valid for the current bit count
+        // Basically preserves customization when flipping back and forth
         const pinCountBefore = c.layout==='custom' && Array.isArray(c.pinBits) ? c.pinBits.length : (c.bits||2);
         compensateAnchor(c, c.splitType==='merge' ? 'out' : 'in', 0, () => {
           c.layout = t;
@@ -724,13 +598,10 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
           }
         }
       },
-      // Changes SPLIT's number of pins in the custom layout (clamped 2 to
-      // the current total bit count, since every pin needs >=1 bit).
-      // Growing adds a new 1-bit pin and steals that bit from the last
-      // pin that has one to spare; shrinking removes the last pin and
-      // hands its bits to the (new) last pin — repeated once per pin
-      // added/removed, so total bits never changes here, only how they're
-      // divided up.
+      // Changes SPLIT's number of pins in the custom layout 
+      // Clamped 2 to the current total bit count, since every pin needs >=1 bit
+      // Growing adds a new 1-bit pin and steals that bit from the last pin that has one to spare
+      // Shrinking removes the last pin and hands its bits to the new last pin
       setSplitPinCount(id,n){
         const c=components.get(id); if(!c||c.kind!=='SPLIT'||c.layout!=='custom'||!Array.isArray(c.pinBits)) return;
         const total = c.bits||2;
@@ -760,12 +631,9 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
           if (t.compId===id && typeof t.pin==='number' && t.pin>=c.pinBits.length) wires.delete(wid);
         }
       },
-      // Sets a single pin's own bit width in the custom layout, clamped to
-      // 1..(total bits minus every OTHER pin's width) so the pins always
-      // keep summing to the total. Never moves any pin (tap position only
-      // depends on pin count/spacing, never on individual widths — see
-      // splitGeometry), so unlike the other SPLIT setters this doesn't
-      // need compensateAnchor.
+      // Sets a single pin's own bit width in the custom layout
+      // clamped to 1..(total bits minus every other pin's width) so the pins always sum to the total
+      // Never moves any pin (tap position only depends on pin count/spacing), so no compensateAnchor needed
       setSplitPinBits(id,idx,n){
         const c=components.get(id); if(!c||c.kind!=='SPLIT'||c.layout!=='custom'||!Array.isArray(c.pinBits)) return;
         if (idx<0 || idx>=c.pinBits.length) return;
@@ -812,12 +680,10 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
         const c=components.get(id);
         c.delay=d;
       },
-      // Snapshots `id`'s full configuration for copy/paste: everything
-      // serialize() keeps except id/ioId/position, which pasteComponent
-      // assigns fresh. An IO's label gets "_copy" appended right here, off
-      // the ORIGINAL label at copy time, so pasting the same clipboard
-      // repeatedly doesn't stack more suffixes on top of each other.
-      // Returns null if `id` isn't a component.
+      // Snapshots `id`'s full configuration for copy/paste
+      // Keeps everything serialize() keeps except id/ioId/position, which pasteComponent assigns upon paste
+      // An IO's label gets "_copy" appended off the original label at copy time so "_copy"s don't stack
+      // Returns null if `id` isn't a component
       copyComponent(id){
         const c = components.get(id); if (!c) return null;
         const isIO = c.kind==='INPUT' || c.kind==='OUTPUT';
@@ -829,20 +695,14 @@ defineModule('engine-circuit', ['state','engine-core','engine-geometry','engine-
           bitWidthIn:c.bitWidthIn, bitWidthOut:c.bitWidthOut,
           bits:c.bits, space:c.space, splitType:c.splitType,
           layout:c.layout, pinBits:c.pinBits?[...c.pinBits]:undefined,
-          // Only the sliver of `state` that's real configuration rather
-          // than ephemeral runtime carries over — mirrors serialize(),
-          // with one deliberate difference: a CLOCK drops paused/lastTick,
-          // so a pasted copy always starts fresh and running instead of
-          // possibly landing paused mid-cycle.
+          // Only keeps a clock's state
           state: c.kind==='INPUT'||c.kind==='CONST' ? {value:c.state.value}
                : c.kind==='CLOCK' ? {period:c.state.period} : {},
         };
       },
-      // Recreates a copyComponent() snapshot at (x,y) — the paste half of
-      // copy/paste. Same two-step reconstruction load() uses per saved
-      // component: addComponent() for everything its own params cover,
-      // then direct field assignment for the rest. Always wireless, same
-      // as a fresh placement from the palette.
+      // Recreates a copyComponent() snapshot at (x,y)
+      // Same two-step reconstruction load() uses per saved component: 
+      // addComponent() for everything its own params cover, then direct field assignment for the rest
       pasteComponent(snapshot,x,y){
         if (!snapshot) return null;
         const c = addComponent(snapshot.kind, x, y, snapshot.facing, snapshot.delay, snapshot.label,
