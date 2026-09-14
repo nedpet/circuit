@@ -13,6 +13,35 @@
      shared and unmodified with circuit_widget.html */
   .mips-submit-btn { width:100%; justify-content:center; margin-top:8px; }
   .mips-multiline { min-height:140px; resize:vertical; font-family:var(--mono); font-size:12px; line-height:1.5; }
+  .registers-mode { width:auto; padding:4px 8px; font-size:11px; }
+  /* Shrinks to exactly fit the register grid (plus the modal's own
+     padding) — .modal's own max-width:calc(100vw - 32px) still caps it on
+     a small screen, where .registers-scroll takes over with a scrollbar. */
+  .modal.registers-modal { width:fit-content; }
+  /* Lets the grid scroll horizontally instead of overflowing the modal
+     when the screen is too small to fit it, while still centering it
+     when it DOES fit — the same safe-centering trick styles.css's own
+     .split-layout-preview uses (flex + margin:auto on the child, which
+     only claims space it actually has, so it can never clip a too-wide
+     child down to unreachable). */
+  .registers-scroll { display:flex; overflow-x:auto; padding-bottom:2px; }
+  /* 4 rows x 8 columns, filled top-to-bottom then left-to-right. Columns
+     size to their widest entry (not an even 1fr split) so values still
+     line up cleanly even though names/numbers vary in width. */
+  .registers-grid {
+    display:grid; grid-template-columns:repeat(8,max-content); grid-template-rows:repeat(4,auto);
+    grid-auto-flow:column; gap:8px 14px; margin:8px auto 0; flex-shrink:0;
+    font-family:var(--mono); font-size:12px;
+  }
+  /* Each register gets its own outlined chip — separates them clearly at a
+     glance — with the value pinned to the right edge of the chip so every
+     value in a column lines up regardless of the name/number's width. */
+  .reg-entry {
+    display:flex; justify-content:space-between; align-items:baseline; gap:12px;
+    padding:5px 10px; border-radius:6px; background:var(--panel); border:1px solid var(--border);
+    white-space:nowrap;
+  }
+  .reg-value { font-weight:600; }
 </style>
 </head>
 <body>
@@ -471,6 +500,15 @@ defineModule('gates', ['engine'], (engine) => {
       {pinLabel(80,28,'RegWrite','middle')}
       {pinLabel(140,64,'ReadData1','end')}
       {pinLabel(140,144,'ReadData2','end')}
+      {/* Opens the live "Registers" dialog (see App/RegistersDialog) */}
+      <g style={{cursor:'pointer'}}>
+        <rect data-registers-menu="1" x="122" y="16" width="20" height="20" rx="4" fill="var(--bg)" stroke="var(--border-md)" strokeWidth="1"/>
+        <g pointerEvents="none">
+          <circle cx="132" cy="21" r="1.3" fill="var(--ink)" opacity="0.7"/>
+          <circle cx="132" cy="26" r="1.3" fill="var(--ink)" opacity="0.7"/>
+          <circle cx="132" cy="31" r="1.3" fill="var(--ink)" opacity="0.7"/>
+        </g>
+      </g>
     </g>,
   };
   GATE_DEFS.REGISTERS = { kind:'REGISTERS', label:'REGISTERS', inputs:5, outputs:2, family:'misc',
@@ -825,7 +863,7 @@ const segSelId = (wireId, segIndex) => `${wireId}#seg${segIndex}`;
 
 const GRID = 20;
 
-function Canvas({ circuit, onSelect, selectedId }) {
+function Canvas({ circuit, onSelect, selectedId, onOpenRegisters }) {
   const svgRef = useRef(null);
   const [view, setView] = useState({x:0,y:0,zoom:1});
   const [isPanning, setIsPanning] = useState(false);
@@ -884,6 +922,10 @@ function Canvas({ circuit, onSelect, selectedId }) {
 
   const onCompSelect=(e,comp)=>{
     e.stopPropagation(); if(e.button!==0)return;
+    if (e.target.dataset && e.target.dataset.registersMenu!==undefined) {
+      onOpenRegisters?.(comp.id);
+      return;
+    }
     onSelect(comp.id);
   };
   // Selects whichever segment of the wire the click landed nearest to —
@@ -1202,6 +1244,7 @@ function App(){
   const [selectedId,setSelectedId] = useState(null);
   const [delayMs,setDelayMs] = useState(600);
   const [showSettings,setShowSettings] = useState(false);
+  const [registersFor,setRegistersFor] = useState(null); // id of the REGISTERS component whose dialog is open, if any
   const [propagationMode,setPropagationMode] = useState("length");
   // "continuous": wires light up as the pulse passes; "discrete": segments
   // only light up once fully crossed
@@ -1247,6 +1290,10 @@ function App(){
     <div className="tb">
       <span className="tb-title">MIPS Microprocessor Simulator</span>
       <div className="tb-sep"/>
+      <button className="btn ghost" style={{height:26,fontSize:12}} onClick={()=>{
+        const r=[...circuit.components.values()].find(c=>c.kind==='REGISTERS');
+        if (r) setRegistersFor(r.id);
+      }}>Registers</button>
       <button className="btn ghost" style={{height:26,fontSize:12}} onClick={()=>setShowSettings(true)}>Settings</button>
       {/* Propagation delay */}
       <div className="tb-delay">
@@ -1262,7 +1309,8 @@ function App(){
       <div className="canvas-wrap">
         <Canvas circuit={circuit}
                 selectedId={selectedId}
-                onSelect={setSelectedId}/>
+                onSelect={setSelectedId}
+                onOpenRegisters={setRegistersFor}/>
       </div>
     </div>
 
@@ -1291,16 +1339,63 @@ function App(){
         <button className="btn ghost" onClick={()=>setShowSettings(false)}>Exit</button>
       </div>
     </Dialog>}
+
+    {registersFor && circuit.components.get(registersFor) &&
+      <RegistersDialog comp={circuit.components.get(registersFor)} onClose={()=>setRegistersFor(null)}/>}
   </div>;
 }
 
-function Dialog({title,children,onClose}){
+function Dialog({title,children,onClose,className,headerExtra}){
   return <div className="modal-bg" onClick={onClose}>
-    <div className="modal" onClick={e=>e.stopPropagation()}>
-      <div className="modal-title">{title}</div>
+    <div className={"modal"+(className?' '+className:'')} onClick={e=>e.stopPropagation()}>
+      <div className="modal-title" style={headerExtra?{display:'flex',alignItems:'center',justifyContent:'space-between'}:undefined}>
+        <span>{title}</span>
+        {headerExtra}
+      </div>
       {children}
     </div>
   </div>;
+}
+
+// Standard MIPS register file naming, index = register number
+const REG_NAMES = ['zero','at','v0','v1','a0','a1','a2','a3','t0','t1','t2','t3','t4','t5','t6','t7',
+                    's0','s1','s2','s3','s4','s5','s6','s7','t8','t9','k0','k1','gp','sp','fp','ra'];
+
+// Live view into one REGISTERS component's 32 register values — `comp` is
+// the live, mutable component object from `circuit.components`, so this
+// re-renders every animation frame (same pattern Canvas itself uses) to
+// track the simulation as it runs rather than showing a frozen snapshot.
+function RegistersDialog({ comp, onClose }) {
+  const [mode, setMode] = useState('hex'); // 'hex' | 'bin'
+  const [, tick] = useState(0);
+  useEffect(()=>{
+    let r; const l=()=>{tick(n=>n+1); r=requestAnimationFrame(l);};
+    r=requestAnimationFrame(l);
+    return ()=>cancelAnimationFrame(r);
+  }, []);
+  const regs = (comp.state && comp.state.regs) || [];
+  return <Dialog title="Registers" onClose={onClose} className="registers-modal" headerExtra={
+    <select className="prop-input registers-mode" value={mode} onChange={e=>setMode(e.target.value)}>
+      <option value="hex">Hexadecimal</option>
+      <option value="bin">Binary</option>
+    </select>
+  }>
+    <div className="registers-scroll">
+      <div className="registers-grid">
+        {REG_NAMES.map((name,i)=>{
+          const v = regs[i]||0;
+          const text = mode==='hex' ? (v>>>0).toString(16).toUpperCase() : (v>>>0).toString(2);
+          return <div key={i} className="reg-entry">
+            <span>{`$${name} ($${i}):`}</span>
+            <span className="reg-value">{text}</span>
+          </div>;
+        })}
+      </div>
+    </div>
+    <div className="dialog-actions">
+      <button className="btn ghost" onClick={onClose}>Exit</button>
+    </div>
+  </Dialog>;
 }
 
 ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
