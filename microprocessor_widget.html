@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8"/>
-<title>MIPS Microprocessor Simulator — Beamer+</title>
+<title>Microprocessor Simulator — Beamer+</title>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -44,9 +44,12 @@
 
 <script type="text/babel">
 /* ═══ GATES ════════════════════════════════════════════════════════════════
-   Unchanged from circuit_widget.html — gate/component visuals aren't part
-   of this read-only-shell pass. New microprocessor-specific visuals (ALU,
-   control unit, ...) are future work. */
+   Same base gate visuals as circuit_widget.html, plus the MIPS datapath
+   components (ALU/REGISTERS/INSTRUCTION/MEMORY/CONTROL) ported over from
+   circuit_widget.html's own "Temporary" palette group once a circuit built
+   there needs to display here — see the block below VIS.EXTND. Keep the
+   two copies in sync by hand; there's no shared file backing them (see
+   circuit_widget.html's load-order comment for why). */
 defineModule('gates', ['engine'], (engine) => {
   'use strict';
   const {
@@ -426,6 +429,201 @@ defineModule('gates', ['engine'], (engine) => {
           <path d="M 32 65 L 37 61 L 37 63 L 43 63 L 43 61 L 48 65 L 43 69 L 43 67 L 37 67 L 37 69 Z" fill="var(--ink)" opacity="0.85"/>
         </g>;
       }};
+
+  // ═══ MIPS datapath components ═══════════════════════════════
+  const pinLabel = (x,y,text,anchor,size=9)=>
+    <text x={x} y={y} textAnchor={anchor} fontFamily="var(--mono)" fontSize={size} fill="var(--ink)" opacity="0.7">{text}</text>;
+
+  VIS.ALU = { w:160, h:200,
+    inputs: [
+      {x:0,y:40},               // A
+      {x:0,y:160},              // B
+      {x:80,y:180,dir:'down'},  // Op
+    ],
+    outputs: [
+      {x:160,y:100},            // Result
+      {x:80,y:20,dir:'up'},     // Zero
+    ],
+    body:(f)=><g>
+      <path d="M 12 0 L 12 80 L 32 100 L 12 120 L 12 200 L 148 140 L 148 60 Z" fill={f} stroke="var(--ink)" strokeWidth="2" strokeLinejoin="round"/>
+      <text x="80" y="104" textAnchor="middle" fontFamily="var(--ui)" fontSize="12" fontWeight="600" fill="var(--ink)" opacity="0.4">ALU</text>
+      {pinLabel(20,44,'A')}
+      {pinLabel(20,164,'B')}
+      {pinLabel(80,158,'Op','middle')}
+      {pinLabel(144,104,'Result','end')}
+      {pinLabel(80,44,'Zero','middle')}
+    </g>,
+  };
+  GATE_DEFS.ALU = { kind:'ALU', label:'ALU', inputs:3, outputs:2, family:'misc',
+    inWidths:[32,32,3], outWidths:[32,1],
+    compute:()=>[0,0] }; // no functionality yet
+
+  VIS.REGISTERS = { w:160, h:200,
+    inputs: [
+      {x:0,y:40},               // ReadReg1
+      {x:0,y:80},               // ReadReg2
+      {x:0,y:120},              // WriteReg
+      {x:0,y:160},              // WriteData
+      {x:80,y:0,dir:'up'},      // RegWrite
+    ],
+    outputs: [
+      {x:160,y:60},             // ReadData1
+      {x:160,y:140},            // ReadData2
+    ],
+    body:(f)=><g>
+      <rect x="12" y="12" width="136" height="176" rx="6" fill={f} stroke="var(--ink)" strokeWidth="2"/>
+      <text x="80" y="104" textAnchor="middle" fontFamily="var(--ui)" fontSize="11" fontWeight="600" fill="var(--ink)" opacity="0.4">REGISTERS</text>
+      {pinLabel(20,44,'ReadReg1')}
+      {pinLabel(20,84,'ReadReg2')}
+      {pinLabel(20,124,'WriteReg')}
+      {pinLabel(20,164,'WriteData')}
+      {pinLabel(80,28,'RegWrite','middle')}
+      {pinLabel(140,64,'ReadData1','end')}
+      {pinLabel(140,144,'ReadData2','end')}
+    </g>,
+  };
+  GATE_DEFS.REGISTERS = { kind:'REGISTERS', label:'REGISTERS', inputs:5, outputs:2, family:'misc',
+    inWidths:[5,5,5,32,1], outWidths:[32,32],
+    // No CLK pin in this design, so this is level-sensitive: it writes
+    // whenever compute() runs (an input changed) with RegWrite high,
+    // rather than on a clock edge like REG/DFF elsewhere in this file.
+    // $0 is hardwired to 0, as in real MIPS.
+    compute:([readReg1,readReg2,writeReg,writeData,regWrite], state) => {
+      if (!state.regs) state.regs = new Array(32).fill(0);
+      const w = writeReg & 31;
+      if (regWrite && w !== 0) state.regs[w] = writeData >>> 0;
+      const r1 = (readReg1 & 31) === 0 ? 0 : (state.regs[readReg1 & 31]||0);
+      const r2 = (readReg2 & 31) === 0 ? 0 : (state.regs[readReg2 & 31]||0);
+      return [r1, r2];
+    } };
+
+  VIS.INSTRUCTION = { w:120, h:240,
+    inputs: [
+      {x:0,y:120},              // Instruction
+      {x:60,y:0,dir:'up'},      // IRWrite
+    ],
+    outputs: [
+      {x:120,y:60},             // 26-31
+      {x:120,y:100},            // 21-25
+      {x:120,y:140},            // 16-20
+      {x:120,y:180},            // 0-15
+    ],
+    body:(f)=><g>
+      <rect x="12" y="12" width="96" height="216" rx="6" fill={f} stroke="var(--ink)" strokeWidth="2"/>
+      <text x="60" y="124" textAnchor="middle" fontFamily="var(--ui)" fontSize="10" fontWeight="600" fill="var(--ink)" opacity="0.4">INSTRUCTION</text>
+      {pinLabel(60,24,'IRWrite','middle')}
+      {pinLabel(100,64,'26-31','end')}
+      {pinLabel(100,104,'21-25','end')}
+      {pinLabel(100,144,'16-20','end')}
+      {pinLabel(100,184,'0-15','end')}
+    </g>,
+  };
+  // Latches Instruction into its own state whenever IRWrite is high (same
+  // no-CLK-pin, level-sensitive simplification as REGISTERS), then splits
+  // whatever's currently latched into its MIPS field ranges — so it holds
+  // its old value, rather than re-splitting live, while IRWrite is low.
+  GATE_DEFS.INSTRUCTION = { kind:'INSTRUCTION', label:'INSTRUCTION', inputs:2, outputs:4, family:'misc',
+    inWidths:[32,1], outWidths:[6,5,5,16],
+    compute:([instr,irWrite], state) => {
+      if (irWrite) state.instr = instr>>>0;
+      const v = state.instr||0;
+      return [
+        (v>>>26)&0x3F,  // bits 31-26
+        (v>>>21)&0x1F,  // bits 25-21
+        (v>>>16)&0x1F,  // bits 20-16
+        v&0xFFFF,       // bits 15-0
+      ];
+    } };
+
+  VIS.MEMORY = { w:160, h:200,
+    inputs: [
+      {x:40,y:0,dir:'up'},      // MemRead
+      {x:120,y:0,dir:'up'},     // MemWrite
+      {x:0,y:60},               // Address
+      {x:0,y:140},              // WriteData
+    ],
+    outputs: [
+      {x:160,y:100},            // MemData
+    ],
+    body:(f)=><g>
+      <rect x="12" y="12" width="136" height="176" rx="6" fill={f} stroke="var(--ink)" strokeWidth="2"/>
+      <text x="80" y="84" textAnchor="middle" fontFamily="var(--ui)" fontSize="11" fontWeight="600" fill="var(--ink)" opacity="0.4">MEMORY</text>
+      {pinLabel(40,26,'MemRead','middle')}
+      {pinLabel(120,26,'MemWrite','middle')}
+      {pinLabel(20,64,'Address')}
+      {pinLabel(20,144,'WriteData')}
+      {pinLabel(140,104,'MemData','end')}
+    </g>,
+  };
+  GATE_DEFS.MEMORY = { kind:'MEMORY', label:'MEMORY', inputs:4, outputs:1, family:'misc',
+    inWidths:[1,1,32,32], outWidths:[32],
+    // Sparse map keyed by address — reads of an address never written
+    // default to 0. MemData reads 0 whenever MemRead is off.
+    compute:([memRead,memWrite,address,writeData], state) => {
+      if (!state.mem) state.mem = new Map();
+      if (memWrite) state.mem.set(address>>>0, writeData>>>0);
+      return [memRead ? (state.mem.get(address>>>0)||0) : 0];
+    } };
+
+  VIS.CONTROL = { w:200, h:160,
+    inputs: [
+      {x:100,y:160,dir:'down'},  // Opcode
+    ],
+    outputs: [
+      {x:0,y:20,dir:"left"},    // PCWriteCond
+      {x:0,y:40,dir:"left"},    // PCWrite
+      {x:0,y:60,dir:"left"},    // IorD
+      {x:0,y:80,dir:"left"},    // MemRead
+      {x:0,y:100,dir:"left"},   // MemWrite
+      {x:0,y:120,dir:"left"},   // MemReg
+      {x:0,y:140,dir:"left"},   // IRWrite
+      {x:200,y:20},  // PCSource
+      {x:200,y:40},  // ALUOp
+      {x:200,y:60},  // ALUSrcB
+      {x:200,y:80},  // ALUSrcA
+      {x:200,y:100}, // RegWrite
+      {x:200,y:120}, // RegDst
+    ],
+    body:(f)=><g>
+      <rect x="60" y="12" width="80" height="136" rx="8" fill={f} stroke="var(--ink)" strokeWidth="2"/>
+      {/* The rect is inset 60px from each output pin (room for the labels),
+          well beyond the 12px reach of GateBody's automatic pin stub — fill
+          the rest of the gap by hand so each output visibly connects to
+          the body instead of dead-ending in empty space. */}
+      <line x1="12" y1="20" x2="60" y2="20" stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>
+      <line x1="12" y1="40" x2="60" y2="40" stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>
+      <line x1="12" y1="60" x2="60" y2="60" stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>
+      <line x1="12" y1="80" x2="60" y2="80" stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>
+      <line x1="12" y1="100" x2="60" y2="100" stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>
+      <line x1="12" y1="120" x2="60" y2="120" stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>
+      <line x1="12" y1="140" x2="60" y2="140" stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>
+      <line x1="188" y1="20" x2="140" y2="20" stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>
+      <line x1="188" y1="40" x2="140" y2="40" stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>
+      <line x1="188" y1="60" x2="140" y2="60" stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>
+      <line x1="188" y1="80" x2="140" y2="80" stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>
+      <line x1="188" y1="100" x2="140" y2="100" stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>
+      <line x1="188" y1="120" x2="140" y2="120" stroke="var(--ink)" strokeWidth="2" strokeLinecap="round"/>
+      <text x="100" y="84" textAnchor="middle" fontFamily="var(--ui)" fontSize="10" fontWeight="600" fill="var(--ink)" opacity="0.4">CONTROL</text>
+      {pinLabel(100,138,'Opcode','middle')}
+      {pinLabel(6,17,'PCWriteCond',undefined,7.5)}
+      {pinLabel(6,37,'PCWrite',undefined,7.5)}
+      {pinLabel(6,57,'IorD',undefined,7.5)}
+      {pinLabel(6,77,'MemRead',undefined,7.5)}
+      {pinLabel(6,97,'MemWrite',undefined,7.5)}
+      {pinLabel(6,117,'MemReg',undefined,7.5)}
+      {pinLabel(6,137,'IRWrite',undefined,7.5)}
+      {pinLabel(194,17,'PCSource','end',7.5)}
+      {pinLabel(194,37,'ALUOp','end',7.5)}
+      {pinLabel(194,57,'ALUSrcB','end',7.5)}
+      {pinLabel(194,77,'ALUSrcA','end',7.5)}
+      {pinLabel(194,97,'RegWrite','end',7.5)}
+      {pinLabel(194,117,'RegDst','end',7.5)}
+    </g>,
+  };
+  // No functionality yet — real control-signal decoding comes later
+  GATE_DEFS.CONTROL = { kind:'CONTROL', label:'CONTROL', inputs:1, outputs:13, family:'misc',
+    inWidths:[6], outWidths:[1,1,1,1,1,1,1, 2,3,2,1,1,1],
+    compute:()=>new Array(13).fill(0) };
 
   // Draws a little line between the pin and a component's body
   // Each input usually points left and output right, but pins can override this
@@ -959,13 +1157,17 @@ const{createCircuit}=engine;
 const{Canvas}=canvas;
 const{MipsInput}=mipsInput;
 
+// The MIPS datapath built in circuit_widget.html's "Temporary" palette
+// group, exported via its Save feature and pasted in here. Re-export and
+// replace this whenever the datapath changes — see circuit_widget.html's
+// own gates module for the matching ALU/REGISTERS/INSTRUCTION/MEMORY/
+// CONTROL definitions, which must stay in sync with this file's copy.
+const MIPS_DATAPATH_DATA = {"components":[{"id":"c1","ioId":"","kind":"CONTROL","x":400,"y":60,"facing":"right","delay":0,"label":"@","state":{}},{"id":"c2","ioId":"","kind":"REGISTERS","x":580,"y":320,"facing":"right","delay":0,"label":"@","state":{}},{"id":"c3","ioId":"","kind":"INSTRUCTION","x":260,"y":260,"facing":"right","delay":0,"label":"@","state":{}},{"id":"c8","ioId":"","kind":"SPLIT","x":400,"y":240,"facing":"up","delay":0,"label":"@","bits":26,"space":1,"splitType":"merge","layout":"custom","pinBits":[16,5,5],"state":{}},{"id":"c12","ioId":"","kind":"MUX","x":480,"y":420,"facing":"right","delay":0,"label":"@","bitWidth":5,"muxInputs":2,"muxSelectLocation":"top","state":{}},{"id":"c15","ioId":"","kind":"SPLIT","x":420,"y":440,"facing":"right","delay":0,"label":"@","bits":16,"space":1,"splitType":"split","layout":"custom","pinBits":[11,5],"state":{}},{"id":"c21","ioId":"","kind":"MUX","x":480,"y":500,"facing":"right","delay":0,"label":"@","bitWidth":32,"muxInputs":2,"muxSelectLocation":"bottom","state":{}},{"id":"c23","ioId":"","kind":"MEMORY","x":40,"y":280,"facing":"right","delay":0,"label":"@","state":{}},{"id":"c25","ioId":"","kind":"REG","x":280,"y":520,"facing":"right","delay":0,"label":"@","bitWidth":32,"displayMode":"hex","state":{}},{"id":"c32","ioId":"","kind":"MUX","x":-60,"y":300,"facing":"right","delay":0,"label":"@","bitWidth":32,"muxInputs":2,"muxSelectLocation":"top","state":{}},{"id":"c35","ioId":"","kind":"REG","x":-180,"y":280,"facing":"right","delay":0,"label":"@","bitWidth":32,"displayMode":"hex","state":{}},{"id":"c38","ioId":"","kind":"MUX","x":820,"y":340,"facing":"right","delay":0,"label":"@","bitWidth":32,"muxInputs":2,"muxSelectLocation":"top","state":{}},{"id":"c39","ioId":"","kind":"MUX","x":820,"y":440,"facing":"right","delay":0,"label":"@","bitWidth":32,"muxInputs":4,"muxSelectLocation":"top","state":{}},{"id":"c44","ioId":"","kind":"CONST","x":800,"y":640,"facing":"left","delay":0,"label":"@","bitWidth":32,"displayMode":"hex","state":{"value":4}},{"id":"c46","ioId":"","kind":"EXTND","x":540,"y":580,"facing":"right","delay":0,"label":"@","bitWidthIn":16,"bitWidthOut":32,"state":{}},{"id":"c47","ioId":"","kind":"SHFT","x":680,"y":600,"facing":"right","delay":0,"label":"@","bitWidth":32,"shiftMode":"left","state":{}},{"id":"c52","ioId":"","kind":"CONST","x":620,"y":640,"facing":"right","delay":0,"label":"@","bitWidth":5,"displayMode":"hex","state":{"value":2}},{"id":"c60","ioId":"","kind":"ALU","x":920,"y":340,"facing":"right","delay":0,"label":"@","state":{}},{"id":"c69","ioId":"","kind":"MUX","x":1320,"y":160,"facing":"right","delay":0,"label":"@","bitWidth":32,"muxInputs":3,"muxSelectLocation":"top","state":{}},{"id":"c73","ioId":"","kind":"SHFT","x":1020,"y":240,"facing":"right","delay":0,"label":"@","bitWidth":26,"shiftMode":"left","state":{}},{"id":"c74","ioId":"","kind":"CONST","x":920,"y":280,"facing":"right","delay":0,"label":"@","bitWidth":5,"displayMode":"hex","state":{"value":2}},{"id":"c78","ioId":"","kind":"SPLIT","x":1260,"y":260,"facing":"right","delay":0,"label":"@","bits":32,"space":1,"splitType":"merge","layout":"custom","pinBits":[28,4],"state":{}},{"id":"c79","ioId":"","kind":"EXTND","x":1120,"y":240,"facing":"right","delay":0,"label":"@","bitWidthIn":26,"bitWidthOut":28,"state":{}},{"id":"c85","ioId":"","kind":"SPLIT","x":1120,"y":320,"facing":"right","delay":0,"label":"@","bits":32,"space":1,"splitType":"split","layout":"custom","pinBits":[28,4],"state":{}},{"id":"c95","ioId":"","kind":"OR","x":200,"y":40,"facing":"left","delay":0,"label":"@","bitWidth":1,"state":{}},{"id":"c98","ioId":"","kind":"AND","x":300,"y":20,"facing":"left","delay":0,"label":"@","bitWidth":1,"state":{}},{"id":"c110","ioId":"","kind":"SPLIT","x":960,"y":640,"facing":"right","delay":0,"label":"@","bits":16,"space":1,"splitType":"split","layout":"custom","pinBits":[6,10],"state":{}}],"wires":[{"id":"w5","from":{"compId":"c3","pin":1,"type":"out"},"to":{"compId":"c2","pin":0,"type":"in"},"points":[{"x":440,"y":360}]},{"id":"w6","from":{"compId":"c3","pin":2,"type":"out"},"to":{"compId":"c2","pin":1,"type":"in"},"points":[{"x":420,"y":400},{"x":480,"y":400}]},{"id":"w7","from":{"compId":"c3","pin":0,"type":"out"},"to":{"compId":"c1","pin":0,"type":"in"},"points":[{"x":500,"y":320}]},{"id":"w9","from":{"x":440,"y":360},"to":{"compId":"c8","pin":2,"type":"in"},"points":[]},{"id":"w10","from":{"x":420,"y":400},"to":{"compId":"c8","pin":1,"type":"in"},"points":[]},{"id":"w11","from":{"compId":"c3","pin":3,"type":"out"},"to":{"compId":"c8","pin":0,"type":"in"},"points":[{"x":400,"y":440}]},{"id":"w13","from":{"compId":"c12","pin":0,"type":"out"},"to":{"compId":"c2","pin":2,"type":"in"},"points":[{"x":560,"y":440}]},{"id":"w16","from":{"compId":"c15","pin":1,"type":"out"},"to":{"compId":"c12","pin":1,"type":"in"},"points":[]},{"id":"w17","from":{"x":400,"y":440},"to":{"compId":"c15","pin":0,"type":"in"},"points":[]},{"id":"w18","from":{"x":480,"y":400},"to":{"compId":"c12","pin":0,"type":"in"},"points":[]},{"id":"w19","from":{"compId":"c1","pin":12,"type":"out"},"to":{"compId":"c12","pin":2,"type":"in"},"points":[{"x":600,"y":320},{"x":520,"y":320}]},{"id":"w20","from":{"compId":"c1","pin":6,"type":"out"},"to":{"compId":"c3","pin":1,"type":"in"},"points":[{"x":320,"y":200},{"x":320,"y":260}]},{"id":"w22","from":{"compId":"c21","pin":0,"type":"out"},"to":{"compId":"c2","pin":3,"type":"in"},"points":[{"x":580,"y":540}]},{"id":"w24","from":{"compId":"c23","pin":0,"type":"out"},"to":{"compId":"c3","pin":0,"type":"in"},"points":[{"x":240,"y":380}]},{"id":"w26","from":{"x":240,"y":380},"to":{"compId":"c25","pin":0,"type":"in"},"points":[{"x":240,"y":540}]},{"id":"w27","from":{"compId":"c25","pin":0,"type":"out"},"to":{"compId":"c21","pin":1,"type":"in"},"points":[]},{"id":"w28","from":{"compId":"c1","pin":4,"type":"out"},"to":{"compId":"c23","pin":1,"type":"in"},"points":[{"x":160,"y":160}]},{"id":"w29","from":{"compId":"c1","pin":3,"type":"out"},"to":{"compId":"c23","pin":0,"type":"in"},"points":[{"x":80,"y":140}]},{"id":"w31","from":{"compId":"c1","pin":2,"type":"out"},"to":{"compId":"c32","pin":2,"type":"in"},"points":[{"x":-20,"y":120}]},{"id":"w33","from":{"compId":"c32","pin":0,"type":"out"},"to":{"compId":"c23","pin":2,"type":"in"},"points":[]},{"id":"w36","from":{"compId":"c35","pin":0,"type":"out"},"to":{"compId":"c32","pin":0,"type":"in"},"points":[{"x":-80,"y":320}]},{"id":"w37","from":{"compId":"c1","pin":11,"type":"out"},"to":{"compId":"c2","pin":4,"type":"in"},"points":[{"x":660,"y":160},{"x":660,"y":320}]},{"id":"w40","from":{"compId":"c1","pin":10,"type":"out"},"to":{"compId":"c38","pin":2,"type":"in"},"points":[{"x":860,"y":140},{"x":860,"y":340}]},{"id":"w41","from":{"compId":"c2","pin":0,"type":"out"},"to":{"compId":"c38","pin":1,"type":"in"},"points":[{"x":740,"y":400}]},{"id":"w42","from":{"compId":"c2","pin":1,"type":"out"},"to":{"compId":"c39","pin":0,"type":"in"},"points":[{"x":780,"y":460}]},{"id":"w43","from":{"compId":"c1","pin":9,"type":"out"},"to":{"compId":"c39","pin":4,"type":"in"},"points":[{"x":800,"y":120},{"x":800,"y":440}]},{"id":"w45","from":{"compId":"c44","pin":0,"type":"out"},"to":{"compId":"c39","pin":1,"type":"in"},"points":[{"x":800,"y":500}]},{"id":"w48","from":{"compId":"c46","pin":0,"type":"out"},"to":{"compId":"c47","pin":0,"type":"in"},"points":[{"x":640,"y":620}]},{"id":"w51","from":{"x":400,"y":440},"to":{"compId":"c46","pin":0,"type":"in"},"points":[{"x":400,"y":620}]},{"id":"w58","from":{"x":640,"y":620},"to":{"compId":"c39","pin":2,"type":"in"},"points":[{"x":640,"y":540}]},{"id":"w59","from":{"compId":"c47","pin":0,"type":"out"},"to":{"compId":"c39","pin":3,"type":"in"},"points":[{"x":760,"y":580}]},{"id":"w63","from":{"compId":"c38","pin":0,"type":"out"},"to":{"compId":"c60","pin":0,"type":"in"},"points":[]},{"id":"w65","from":{"x":400,"y":620},"to":{"compId":"c110","pin":0,"type":"in"},"points":[{"x":400,"y":680},{"x":940,"y":680},{"x":940,"y":640}]},{"id":"w66","from":{"compId":"c1","pin":8,"type":"out"},"to":{"compId":"c60","pin":2,"type":"in"},"points":[{"x":1220,"y":100},{"x":1220,"y":540},{"x":1000,"y":540},{"x":1000,"y":520}]},{"id":"w67","from":{"compId":"c52","pin":0,"type":"out"},"to":{"compId":"c47","pin":1,"type":"in"},"points":[]},{"id":"w68","from":{"x":780,"y":460},"to":{"compId":"c23","pin":3,"type":"in"},"points":[{"x":780,"y":700},{"x":40,"y":700}]},{"id":"w72","from":{"compId":"c8","pin":0,"type":"out"},"to":{"compId":"c73","pin":0,"type":"in"},"points":[]},{"id":"w75","from":{"compId":"c74","pin":0,"type":"out"},"to":{"compId":"c73","pin":1,"type":"in"},"points":[]},{"id":"w76","from":{"x":-80,"y":320},"to":{"compId":"c38","pin":0,"type":"in"},"points":[{"x":-80,"y":240},{"x":820,"y":240},{"x":820,"y":320}]},{"id":"w80","from":{"compId":"c73","pin":0,"type":"out"},"to":{"compId":"c79","pin":0,"type":"in"},"points":[]},{"id":"w81","from":{"compId":"c79","pin":0,"type":"out"},"to":{"compId":"c78","pin":0,"type":"in"},"points":[]},{"id":"w82","from":{"compId":"c78","pin":0,"type":"out"},"to":{"compId":"c69","pin":2,"type":"in"},"points":[]},{"id":"w87","from":{"compId":"c85","pin":1,"type":"out"},"to":{"compId":"c78","pin":1,"type":"in"},"points":[{"x":1260,"y":360}]},{"id":"w90","from":{"compId":"c1","pin":7,"type":"out"},"to":{"compId":"c69","pin":3,"type":"in"},"points":[{"x":1360,"y":80},{"x":1360,"y":160}]},{"id":"w96","from":{"compId":"c1","pin":1,"type":"out"},"to":{"compId":"c95","pin":1,"type":"in"},"points":[]},{"id":"w99","from":{"compId":"c1","pin":0,"type":"out"},"to":{"compId":"c98","pin":1,"type":"in"},"points":[]},{"id":"w100","from":{"compId":"c98","pin":0,"type":"out"},"to":{"compId":"c95","pin":0,"type":"in"},"points":[]},{"id":"w101","from":{"compId":"c60","pin":1,"type":"out"},"to":{"compId":"c98","pin":0,"type":"in"},"points":[{"x":1000,"y":360},{"x":1000,"y":40}]},{"id":"w105","from":{"compId":"c95","pin":0,"type":"out"},"to":{"compId":"c35","pin":1,"type":"in"},"points":[{"x":-200,"y":80},{"x":-200,"y":320}]},{"id":"w106","from":{"compId":"c69","pin":0,"type":"out"},"to":{"compId":"c35","pin":0,"type":"in"},"points":[{"x":1400,"y":220},{"x":1400,"y":20},{"x":-180,"y":20}]},{"id":"w107","from":{"compId":"c1","pin":5,"type":"out"},"to":{"compId":"c21","pin":2,"type":"in"},"points":[{"x":220,"y":180},{"x":220,"y":640},{"x":520,"y":640}]},{"id":"w111","from":{"compId":"c110","pin":0,"type":"out"},"to":{"x":1000,"y":660},"points":[]},{"id":"w112","from":{"compId":"c39","pin":0,"type":"out"},"to":{"compId":"c60","pin":1,"type":"in"},"points":[{"x":900,"y":500}]},{"id":"w116","from":{"compId":"c110","pin":0,"type":"out"},"to":{"compId":"c60","pin":2,"type":"in"},"points":[]},{"id":"w117","from":{"x":820,"y":320},"to":{"compId":"c85","pin":0,"type":"in"},"points":[]},{"id":"w120","from":{"compId":"c60","pin":0,"type":"out"},"to":{"compId":"c69","pin":0,"type":"in"},"points":[{"x":1240,"y":440},{"x":1240,"y":220},{"x":1240,"y":180}]},{"id":"w121","from":{"x":1240,"y":220},"to":{"compId":"c69","pin":1,"type":"in"},"points":[]},{"id":"w123","from":{"x":1240,"y":440},"to":{"compId":"c32","pin":1,"type":"in"},"points":[{"x":1240,"y":720},{"x":460,"y":720},{"x":-60,"y":720}]},{"id":"w124","from":{"x":460,"y":720},"to":{"compId":"c21","pin":0,"type":"in"},"points":[{"x":460,"y":520}]}],"junctions":[{"x":440,"y":360,"sourceWireId":"w5"},{"x":420,"y":400,"sourceWireId":"w6"},{"x":400,"y":440,"sourceWireId":"w11"},{"x":480,"y":400,"sourceWireId":"w6"},{"x":600,"y":320,"sourceWireId":"w19"},{"x":520,"y":320,"sourceWireId":"w19"},{"x":240,"y":380,"sourceWireId":"w24"},{"x":220,"y":120,"sourceWireId":"w31"},{"x":-20,"y":120,"sourceWireId":"w31"},{"x":640,"y":620,"sourceWireId":"w48"},{"x":400,"y":620,"sourceWireId":"w51"},{"x":1120,"y":700,"sourceWireId":"w65"},{"x":1220,"y":540,"sourceWireId":"w66"},{"x":780,"y":460,"sourceWireId":"w42"},{"x":-80,"y":320,"sourceWireId":"w36"},{"x":-200,"y":80,"sourceWireId":"w105"},{"x":-200,"y":320,"sourceWireId":"w105"},{"x":-180,"y":20,"sourceWireId":"w106"},{"x":220,"y":180,"sourceWireId":"w107"},{"x":220,"y":640,"sourceWireId":"w107"},{"x":520,"y":640,"sourceWireId":"w107"},{"x":1020,"y":700,"sourceWireId":"w65"},{"x":820,"y":240,"sourceWireId":"w76"},{"x":800,"y":440,"sourceWireId":"w43"},{"x":820,"y":320,"sourceWireId":"w76"},{"x":1240,"y":440,"sourceWireId":"w120"},{"x":1240,"y":180,"sourceWireId":"w120"},{"x":1240,"y":220,"sourceWireId":"w120"},{"x":1260,"y":360,"sourceWireId":"w87"},{"x":-60,"y":720,"sourceWireId":"w123"},{"x":460,"y":720,"sourceWireId":"w123"}],"nextId":125,"nextIoId":2};
+
 function App(){
   const [circuit] = useState(() => {
     const c = createCircuit();
-    // TODO: load the real MIPS datapath here once it's designed, e.g.
-    //   c.load(MIPS_DATAPATH_DATA);
-    // (or it may arrive at runtime via the Beamer+ 'widget-set-state'
-    // postMessage handler below — see the WIDGET_CONFIG effect.)
+    c.load(MIPS_DATAPATH_DATA);
     return c;
   });
   state.widgetState.circuit = circuit;
