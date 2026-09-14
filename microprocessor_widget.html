@@ -12,6 +12,7 @@
   /* MIPS-instruction sidebar addition only — styles.css itself stays
      shared and unmodified with circuit_widget.html */
   .mips-submit-btn { width:100%; justify-content:center; margin-top:8px; }
+  .mips-multiline { min-height:140px; resize:vertical; font-family:var(--mono); font-size:12px; line-height:1.5; }
 </style>
 </head>
 <body>
@@ -358,19 +359,6 @@ defineModule('gates', ['engine'], (engine) => {
               strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>}
       </g>;
     }
-  };
-
-  VIS.SEVEN = { w:W*1.25, h:H*1.75, inputs:[{x:W*0.25,y:0,dir:'up'}, {x:W*0.5,y:0,dir:'up'}, {x:W*0.75,y:0,dir:'up'}, {x:W,y:0,dir:'up'}, {x:W*0.25,y:H*1.75,dir:'down'}, {x:W*0.5,y:H*1.75,dir:'down'}, {x:W*0.75,y:H*1.75,dir:'down'}], outputs:[],
-    body:(f,comp)=><g>
-        <rect x="10" y="10" width="80" height="120" rx="7" fill="#f3f3f1" stroke="var(--ink)" strokeWidth="2"/>
-        <rect x="27" y="16" width="46" height="8" fill={comp.inputVals[2]?'#ff3333':'#aeaeae'}/>
-        <rect x="27" y="66" width="46" height="8" fill={comp.inputVals[0]?'#ff3333':'#aeaeae'}/>
-        <rect x="27" y="116" width="46" height="8" fill={comp.inputVals[5]?'#ff3333':'#aeaeae'}/>
-        <rect x="16" y="22" width="8" height="46" fill={comp.inputVals[1]?'#ff3333':'#aeaeae'}/>
-        <rect x="16" y="72" width="8" height="46" fill={comp.inputVals[4]?'#ff3333':'#aeaeae'}/>
-        <rect x="76" y="22" width="8" height="46" fill={comp.inputVals[3]?'#ff3333':'#aeaeae'}/>
-        <rect x="76" y="72" width="8" height="46" fill={comp.inputVals[6]?'#ff3333':'#aeaeae'}/>
-      </g>
   };
 
   function ffRect(f,h){return<rect x="6" y="6" width="68" height={h-12} rx="7" fill={f} stroke="var(--ink)" strokeWidth="2"/>;}
@@ -1111,31 +1099,66 @@ return { Canvas };
 
 <script type="text/babel">
 /* ═══ MIPS INPUT ═══════════════════════════════════════════════════════════
-   Replaces circuit_widget.html's palette (drag-to-place gates) with a
-   single-instruction entry box, since components can no longer be added to
-   the canvas by hand here. Submit is currently a stub — parsing/executing
-   MIPS assembly against the datapath circuit is future work; the exact UI
-   of this area may change once that's designed. */
+   Replaces circuit_widget.html's palette (drag-to-place gates) with an
+   instruction entry box, since components can no longer be added to the
+   canvas by hand here. Three input modes: single-line (one instruction at
+   a time), multi-line (a whole block of assembly, typed or pasted), and
+   file upload (reads a local assembly file's text). Submit is currently a
+   stub in all three modes — parsing/executing MIPS assembly against the
+   datapath circuit, and running a multi-line/file block instruction by
+   instruction, is future work; the exact UI of this area may change once
+   that's designed. */
 defineModule('mipsInput', [], () => {
 'use strict';
-const { useState } = React;
+const { useState, useRef } = React;
 
 function MipsInput({ onSubmit }) {
+  const [mode, setMode] = useState('single'); // 'single' | 'multi' | 'file'
   const [text, setText] = useState('');
+  const fileInputRef = useRef(null);
+
+  const changeMode = (e) => { setMode(e.target.value); setText(''); };
+
   const submit = () => {
-    const instr = text.trim();
-    if (!instr) return;
-    onSubmit(instr);
+    const block = text.trim();
+    if (!block) return;
+    onSubmit(block); // TODO: once execution exists, split multi-line blocks on newlines and run them back to back
     setText('');
   };
+
+  const onFileChosen = (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = ''; // lets the same file be re-chosen later
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => onSubmit(String(reader.result||'')); // TODO: same back-to-back execution as multi-line, once implemented
+    reader.readAsText(file);
+  };
+
   return <div className="palette">
     <div className="pal-group">
-      <div className="pal-group-title">Instruction</div>
-      <input className="text-input" placeholder="e.g. add $t0, $t1, $t2"
-             value={text}
-             onChange={e=>setText(e.target.value)}
-             onKeyDown={e=>e.key==='Enter'&&submit()}/>
-      <button className="btn primary mips-submit-btn" onClick={submit}>Submit</button>
+      <select className="prop-input" value={mode} onChange={changeMode}>
+        <option value="single">Single-Line</option>
+        <option value="multi">Multi-Line</option>
+        <option value="file">File Upload</option>
+      </select>
+      {mode==='single' && <>
+        <input className="text-input" placeholder="e.g. add $t0, $t1, $t2"
+               value={text}
+               onChange={e=>setText(e.target.value)}
+               onKeyDown={e=>e.key==='Enter'&&submit()}/>
+        <button className="btn primary mips-submit-btn" onClick={submit}>Submit</button>
+      </>}
+      {mode==='multi' && <>
+        <textarea className="text-input mips-multiline" placeholder={"e.g.\nadd $t0, $t1, $t2\nsub $t1, $t2, $t3"}
+                  value={text}
+                  onChange={e=>setText(e.target.value)}/>
+        <button className="btn primary mips-submit-btn" onClick={submit}>Submit</button>
+      </>}
+      {mode==='file' && <>
+        <input ref={fileInputRef} type="file" accept=".s,.asm,.txt" style={{display:'none'}} onChange={onFileChosen}/>
+        <button className="btn primary mips-submit-btn" onClick={()=>fileInputRef.current?.click()}>Choose File…</button>
+      </>}
     </div>
   </div>;
 }
@@ -1233,11 +1256,6 @@ function App(){
         <Canvas circuit={circuit}
                 selectedId={selectedId}
                 onSelect={setSelectedId}/>
-        <div className="fc">
-          <span className="fc-n">{n}</span><span className="fc-lbl">gates</span>
-          <span className="fc-div"/>
-          <span className="fc-n">{circuit.wires.size}</span><span className="fc-lbl">wires</span>
-        </div>
       </div>
     </div>
   </div>;
