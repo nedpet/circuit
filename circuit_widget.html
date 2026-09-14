@@ -183,12 +183,9 @@ defineModule('gates', ['engine'], (engine) => {
         <circle cx={on?40:20} cy="20" r="11" fill="white" stroke="var(--ink)" strokeWidth="1.5" data-knob="1" style={{cursor:'pointer'}}/>
       </g>;
     },
-    // Rendered directly by GateBody (see mirrorTexts there) instead of
-    // through vis.body, so a facing:'left' INPUT doesn't pay
+    // Rendered directly by GateBody instead of through vis.body
+    // since many facing:'left' INPUTs can become expensive with
     // unmirrorText's recursive walk-and-clone cost across its whole body
-    // just to keep these two upright — with many INPUTs on screen (e.g.
-    // one per bit of a wide bus, all facing left for a tidy layout) that
-    // cost multiplies badly, frame after frame.
     mirrorTexts:(comp)=>{
       const on=comp.state.value;
       return [
@@ -213,12 +210,6 @@ defineModule('gates', ['engine'], (engine) => {
         </g>:null}
       </g>;
     },
-    // Rendered directly by GateBody (see mirrorTexts there) instead of
-    // through vis.body, so a facing:'left' OUTPUT doesn't pay
-    // unmirrorText's recursive walk-and-clone cost across its whole body
-    // just to keep these two upright — with many OUTPUTs on screen (e.g.
-    // one per bit of a wide bus, all facing left for a tidy layout) that
-    // cost multiplies badly, frame after frame.
     mirrorTexts:(comp)=>{
       const on=comp.inputVals[0];
       return [
@@ -264,15 +255,8 @@ defineModule('gates', ['engine'], (engine) => {
       </g>;
     });
   }
-  // BitCells/HexCells always draw MSB-leftmost/LSB-rightmost; that reading
-  // order needs to stay put regardless of which way the component faces, so
-  // flipping facing right<->left doesn't relabel which physical slot shows
-  // which bit. GateBody mirrors a facing:'left' component with
-  // `translate(w,0) scale(-1,1)`; applying that same transform a second
-  // time here cancels it (two mirrors = identity), so the cell row renders
-  // identically either way. Tagged data-stable so unmirrorText — which
-  // otherwise counter-mirrors every <text> it finds — leaves this subtree
-  // alone instead of correcting it a second time.
+  // Tagged data-stable so unmirrorText, which would counter-mirror every text it finds in a left-facing component,
+  // will ignore BitCells/HexCells which need to maintain a MSB-leftmost/LSB-rightmost order no matter the orientation
   function stableBlock(comp, w, children) {
     return comp.facing==='left'
       ? <g data-stable="true" transform={`translate(${w} 0) scale(-1 1)`}>{children}</g>
@@ -447,41 +431,19 @@ defineModule('gates', ['engine'], (engine) => {
     return { x1:p.x-dx*12, y1:p.y-dy*12, x2:p.x, y2:p.y };
   }
 
-  // Facing 'left' draws the gate body under `scale(-1 1)` so the shape and
-  // pins mirror correctly — but that flips glyphs too, rendering labels as
-  // mirror-writing. This walks the body's element tree and wraps every
-  // <text> in its own local counter-scale (pivoting on that text's own x),
-  // which cancels the ancestor flip for the glyphs while leaving the text's
-  // position subject to the same mirroring as everything else. textAnchor
-  // is flipped start<->end to match: a label anchored to grow rightward off
-  // its pin should grow leftward once that pin is on the mirrored side.
-  // Only recurses into plain SVG host elements (string types) and
-  // Fragments — real components (e.g. <PendingBar/>) are opaque here since
-  // their output doesn't exist until they render, so they're left under the
-  // ordinary mirror transform, same as before.
-  //
-  // A recursive walk-and-clone of the *entire* body, run fresh every
-  // frame, is fine for gates that show up a handful at a time, but INPUT
-  // and OUTPUT are routinely placed dozens deep (one per bus bit) — so
-  // they skip this altogether and apply the exact same wrapper directly,
-  // to just their own known label text, via vis.mirrorTexts (see
-  // GateBody). This still runs for whatever's left in their body (a rect,
-  // some circles), which is why it needs to stay correct in general, not
-  // just fast for the common case.
+  // For facing 'left' components (excluding INPUT/OUTPUT), unmirrors the would-be facing-left text
+  // Recursively searches the body's element tree for <text>s, ignoring real components like PendingBar since they don't exist until render
+  // textAnchor position is also flipped so that labels anchored to grow rightward will grow leftward when mirrored
   function unmirrorText(node) {
     if (Array.isArray(node)) return node.map(unmirrorText);
     if (!React.isValidElement(node)) return node;
-    // Already self-corrected (see stableBlock) — reprocessing its <text>
-    // descendants here would cancel that correction back out.
+    // Already self-corrected (see stableBlock)
     if (node.props?.['data-stable']) return node;
     if (node.type === 'text') {
       const x = node.props.x || 0;
       const anchor = node.props.textAnchor;
       const flipped = anchor==='start' ? 'end' : anchor==='end' ? 'start' : anchor;
-      // Carries the original element's key onto this wrapper — needed
-      // whenever the text came from a keyed list (e.g. SPLIT's per-tap bit
-      // labels), since `key` lives outside `.props` and isn't copied by
-      // just nesting the old element inside a new one.
+      // Carries the original element's key onto this wrapper 
       return <g key={node.key} transform={`translate(${x} 0) scale(-1 1) translate(${-x} 0)`}>
         {React.cloneElement(node, {textAnchor: flipped})}
       </g>;
@@ -491,7 +453,7 @@ defineModule('gates', ['engine'], (engine) => {
       // Spread array children back into positional args — passing a bare
       // array as the sole child triggers React's "list needs keys" check
       // (it assumes a .map() result), which the original static JSX
-      // children list never hit.
+      // children list never hit
       return Array.isArray(processed)
         ? React.cloneElement(node, {}, ...processed)
         : React.cloneElement(node, {}, processed);
@@ -660,27 +622,15 @@ const {
   computeEndpointRoute, finalizeEndpointRoute,
 } = engine;
 
-// A selected wire segment is identified by a composite string distinct
-// from any component id (which are plain 'c<n>'), so it can travel
-// through the same single selectedId/onSelect prop components already use
-// without the two ever colliding.
+// A selected wire segment is identified by a composite string distinct from any component id
+// so it can travel through the same single selectedId/onSelect prop components already use without the two ever colliding
 const segSelId = (wireId, segIndex) => `${wireId}#seg${segIndex}`;
 
 const GRID = 20;
 const snap = (v, on=true) => on ? Math.round(v/GRID)*GRID : v;
 
-// A plain controlled `<input type="number" value={x} onChange={...}>` fights
-// the user mid-edit: clearing "1" to type "8" makes the field momentarily
-// empty, Number('')||fallback immediately clamps that back to a valid
-// number, and the resulting re-render snaps the field's text back before
-// the next keystroke lands — so e.g. going from 1 to 8 only works by typing
-// the 8 *before* deleting the 1, never the more natural backspace-then-type
-// order. This decouples the field's displayed text from the committed
-// value: keystrokes that don't yet parse to a number in [min,max] (empty
-// included) update the local text only, without calling onCommit, so nothing
-// snaps back until the user actually reaches a valid value. Blurring with an
-// invalid/abandoned edit still in progress reverts the display to the last
-// committed value rather than leaving it stuck looking invalid.
+// Replaces the regular <input type="number" ...> since that refuses intermediate invalid values
+// NumberField updates the local text and commit the edit when the number is in [min,max]
 function NumberField({ className, value, min, max, onCommit }) {
   const [text, setText] = useState(String(value));
   const focused = useRef(false);
@@ -698,17 +648,10 @@ function NumberField({ className, value, min, max, onCommit }) {
     onBlur={()=>{focused.current=false; setText(String(value));}}/>;
 }
 
-// SPLIT's own property rows (Type/Layout/Bits/Space) — pulled out of
-// gatePanel below so the properties panel and the "SPLIT Custom Layout"
-// dialog's options column (see the 'app' module) render the exact same
-// fields off the exact same mutators instead of two hand-copied lists that
-// could drift out of sync. `extra` is an optional slot for fields only the
-// dialog shows (its "Number of Pins" row), rendered right after Space.
-// `showLayout` lets the dialog omit the Layout row entirely — you can only
-// reach the dialog once Layout is already Custom, and flipping it back to
-// Regular from inside a dialog about configuring the custom layout would
-// just leave the rest of the dialog showing controls for a layout that's
-// no longer active, so that switch belongs on the main panel only.
+// SPLIT's properties, pulled out of gatePanel so that both the properties panel and the custom layout dialog
+// show the exact same options column
+// `extra` is an optional slot for fields (really, just for "Number of Pins")
+// `showLayout` when true will omit the Layout property since the layout implies custom
 function SplitPropFields({ circuit, comp, onComponentChanged, extra, showLayout=true }) {
   const customPinCount = comp.layout==='custom' && Array.isArray(comp.pinBits) ? comp.pinBits.length : null;
   return <>
@@ -732,9 +675,7 @@ function SplitPropFields({ circuit, comp, onComponentChanged, extra, showLayout=
     </div>}
     <div className="prop-option">
       <span className="prop-label">Bits</span>
-      {/* In the custom layout, Bits can't drop below the current pin count
-          — every pin needs at least 1 bit — so the field's own minimum
-          tracks that instead of the regular layout's flat floor of 2. */}
+      {/* In the custom layout, Bits can't drop below the current pin count */}
       <NumberField className="prop-input" min={customPinCount ? Math.max(2,customPinCount) : 2} max={32}
               value={comp.bits||2}
               onCommit={n=>{circuit.setSplitBits(comp.id,n);onComponentChanged?.();}}/>
@@ -770,16 +711,9 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
   const onClearPalRef    = useRef(onClearPaletteDrag);
   const onSelectRef      = useRef(onSelect);
   const wiringFromRef    = useRef(wiringFrom);
-  // Copy/paste support. mousePosRef/mouseTrackedRef mirror mousePos into a
-  // ref (updated straight from onMove below, not via its own effect) so
-  // the Ctrl+V handler can read the latest position without resubscribing
-  // its listener on every mousemove; mouseTrackedRef distinguishes "mouse
-  // really is at world (0,0)" from "no mousemove has landed yet", which
-  // mousePos's own {x:0,y:0} initial value can't. clipboardRef holds the
-  // last copyComponent() snapshot, if any.
-  const mousePosRef      = useRef(mousePos);
-  const mouseTrackedRef  = useRef(false);
-  const clipboardRef     = useRef(null);
+  const mousePosRef      = useRef(mousePos);  // {x,y} for copy/paste support
+  const mouseTrackedRef  = useRef(false);     // whether the mouse has actually been moved, to differentiate no movement from real (0,0)
+  const clipboardRef     = useRef(null);      // holds the last copyComponent() snapshot, if any
   useEffect(()=>{viewRef.current=view;},[view]);
   useEffect(()=>{paletteDragRef.current=paletteDrag;},[paletteDrag]);
   useEffect(()=>{snapGridRef.current=snapGrid;},[snapGrid]);
@@ -1064,18 +998,11 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
     return()=>{window.removeEventListener('mousemove',onMove);window.removeEventListener('mouseup',onUp);};
   },[circuit, screenToWorld]);
 
-  // Copy/paste a single component (no wires — a pasted component always
-  // starts unconnected, same as one dropped fresh from the palette).
-  // Ctrl/Cmd+C snapshots the selected one (circuit.copyComponent covers
-  // exactly what "snapshot" includes — every configuration field, an
-  // IO's label with "_copy" appended, no wires); Ctrl/Cmd+V recreates it
-  // centered on the current mouse position (mousePosRef, grid-snapped
-  // like a palette drop), or at the world origin if the mouse hasn't
-  // moved over the page at all yet this load (mouseTrackedRef still
-  // false — mousePos's own {x:0,y:0} init can't tell that case apart
-  // from a real move to (0,0)). Ignored while a text field has focus,
-  // same guard the Delete/Backspace handler (see App) uses, so it
-  // doesn't fight normal text copy/paste there.
+  // Copy/paste a single component:
+  // Ctrl/Cmd+C snapshots the selected one, Ctrl/Cmd+V recreates it
+  // centered on the current mouse position (mousePosRef, grid-snapped like a palette drop), 
+  // or at the world origin if the mouse hasn't moved over the page at all yet this load 
+  // Ignored while a text field has focus
   useEffect(()=>{
     const fn=(e)=>{
       if(!(e.ctrlKey||e.metaKey)) return;
@@ -1102,11 +1029,7 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
     return()=>window.removeEventListener('keydown',fn);
   },[circuit, selectedId]);
 
-  // Scroll to zoom. Attached as a native listener (not JSX onWheel) because
-  // React registers wheel handlers as passive by default, so a synthetic
-  // onWheel's preventDefault() is silently ignored (and logs a warning) —
-  // {passive:false} here is what actually stops the page/browser from
-  // scrolling or zooming along with our own zoom.
+  // Scroll to zoom
   useEffect(()=>{
     const el = svgRef.current;
     if (!el) return;
@@ -1465,12 +1388,8 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
       </div>
     );
   })() : null;
-  // INPUT/OUTPUT/CONST share the same Bits/Format/Facing controls (CONST
-  // is bit-width-aware for the same reason INPUT is), and differ only in
-  // their very first row: INPUT/OUTPUT are named circuit ports (Label),
-  // while CONST is a fixed, unnamed tie-in value (Value) — everything else
-  // is identical, so one panel covers all three instead of two
-  // near-duplicates drifting apart.
+  // INPUT/OUTPUT/CONST share the same Bits/Format/Facing controls 
+  // differing only in their very first row: label for INPUT/OUTPUT vs value for CONST
   const ioPanel = selComp?.kind==='INPUT' || selComp?.kind==='OUTPUT' || selComp?.kind==='CONST' ? (()=>{
     const isConst = selComp.kind==='CONST';
     const maxVal = (selComp.bitWidth||1) >= 32 ? 0xFFFFFFFF : (2**(selComp.bitWidth||1) - 1);
@@ -1651,18 +1570,9 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
           const path=wirePath(a.x,a.y,b.x,b.y,pts);
           const high=w.value>0;
           const mismatch=w.bitMismatch;
-          // A wire mid-transition lights up as the signal actually reaches
-          // each point along it, rather than the whole wire holding its
-          // old color until the full wire delay elapses — pending/
-          // wireDelay/pendingT come from wireProgress (above), shared with
-          // the free-endpoint/waypoint lighting and the traveling
-          // InflightPulse dot below so all of them track the exact same
-          // progress, computed once instead of several times. Which of
-          // the two split functions actually draws the lit boundary is
-          // the one thing that depends on propagationStyle — see the
-          // "Signal color" comment just below for what each one looks
-          // like; everything downstream of pendingT (particles, waypoint
-          // and endpoint lighting) doesn't care which one ran.
+          // A wire mid-transition lights up as the signal actually reaches each point along it
+          // pending/wireDelay/pendingT come from wireProgress (above), shared with the free-endpoint/waypoint lighting
+          // and the traveling InflightPulse dot below so all of them track the same progress
           const progress = wireProgress.get(w.id);
           const {pending, wireDelay, pendingT} = progress;
           const split = pending
@@ -1670,18 +1580,13 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
                 ? splitWirePathAtSegment(a.x,a.y,b.x,b.y,pts,pendingT)
                 : splitWirePath(a.x,a.y,b.x,b.y,pts,pendingT))
             : null;
-          // Which of this wire's segments (if any) selectedId names — a
-          // composite id ('<wireId>#seg<index>', see segSelId), distinct
-          // from any component id, so it rides the same selectedId prop
-          // components use without colliding with one.
+          // Which of this wire's segments (if any) selectedId names 
           const selPrefix = w.id+'#seg';
           const selSeg = selectedId && selectedId.startsWith(selPrefix) ? Number(selectedId.slice(selPrefix.length)) : null;
           const selKnots = selSeg!=null ? wireKnots(a.x,a.y,b.x,b.y,pts) : null;
           const selA = selKnots && selKnots[selSeg], selB = selKnots && selKnots[selSeg+1];
           return <g key={w.id}>
-            {/* Selection bounding box — same dashed-rect language as a
-                selected component, padded around just the one selected
-                segment (not the whole wire) since selection is per-segment. */}
+            {/* Selection bounding box, padded around the selected segment*/}
             {selA && selB && <rect
                   x={Math.min(selA.x,selB.x)-8} y={Math.min(selA.y,selB.y)-8}
                   width={Math.abs(selB.x-selA.x)+16} height={Math.abs(selB.y-selA.y)+16}
@@ -1690,21 +1595,8 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
             {/* Shadow */}
             <path d={path} fill="none" stroke="var(--ink)" strokeWidth="3.5"
                   strokeLinejoin="round" strokeLinecap="round" opacity="0.07"/>
-            {/* Signal color — red instead of low/high when the pins on
-                either end disagree on bit width; the signal is held at 0
-                rather than crossing, so `high` is never true here too.
-                Mid-transition (split!=null), drawn as two strokes instead
-                of one: the part already reached, in the color it's
-                arriving AT, and the rest, still in the color it's coming
-                FROM. Where exactly the cut falls depends on
-                propagationStyle: "discrete" (splitWirePathAtSegment) cuts
-                at whichever corner is the furthest one entirely crossed,
-                never partway through a segment; "continuous"
-                (splitWirePath) cuts exactly where the in-flight pulse
-                currently is, tracking it smoothly rather than jumping
-                corner to corner. No CSS transition on either piece; the
-                geometry itself already animates frame to frame; a color
-                transition on top would just blur the two together. */}
+            {/* Signal color — red instead of low/high when the pins on either end disagree on bit width
+                Mid-transition (split!=null), drawn as one on stroke and one off stroke instead of one*/}
             {split
               ? <>
                   <path d={split.before} fill="none" stroke={w.pendingValue>0?'var(--high)':'var(--low)'}
@@ -1722,39 +1614,19 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
                   style={{cursor:'cell'}}
                   onMouseDown={e=>onWireEdgeDown(e,w)}
                   onContextMenu={e=>onWireContext(e,w)}/>
-            {/* Particles — confined to whichever part of the wire is
-                CURRENTLY actually high. Settled, that's simply the whole
-                wire when `high`. Mid-transition, `high` alone isn't
-                enough: it still reads true for the entire duration of a
-                high-to-low transition (w.value doesn't drop until the
-                full delay elapses), which would otherwise let particles
-                keep flowing across a stretch that's already visually
-                turned off, per the split above — so here they're confined
-                to just the not-yet-reached suffix instead, shrinking in
-                step with it. Arriving at high (pendingValue>0) is the
-                mirror case: nothing's actually high yet except the
-                already-reached prefix, which is where they start instead
-                of waiting for the whole wire to settle. */}
+            {/* Particles, confined to whichever part of the wire is actually high*/}
             {pending
               ? (w.pendingValue>0
                   ? <ParticleStream a={a} b={b} pts={pts} range={[0,pendingT]}/>
                   : high && <ParticleStream a={a} b={b} pts={pts} range={[pendingT,1]}/>)
               : high && <ParticleStream a={a} b={b} pts={pts}/>}
-            {/* In-flight pulse — the exact leading edge. Under "discrete"
-                propagationStyle this runs a bit ahead of the segment
-                coloring above, which only ever stops at a real corner;
-                under "continuous" the two always agree exactly. */}
+            {/* In-flight pulse: under "discrete" propagationStyle, this runs a bit ahead of the segment coloring above,
+                which only ever stops at a real corner, while under "continuous" the two always agree exactly */}
             {pending&&<InflightPulse a={a} b={b} pts={pts} pendingValue={w.pendingValue}
                                   pendingStart={w.pendingStart} delayMs={wireDelay}/>}
-            {/* Free endpoint handles — light up with their wire like a pin
-                does, junction or not; only the idle color differs (white
-                here vs. bg for a waypoint) since that was already each
-                handle's own resting color before signals entered into it.
-                `from` sits at distance 0 (where the signal originates, so
-                it flips to the new value almost the instant a transition
-                starts) and `to` at the full wireLen (so it only flips
-                once the signal has actually arrived there) — same
-                isWireHighAt every other per-point light-up below uses. */}
+            {/* Free endpoint handles: light up with their wire like a pin does
+                Only the idle color differs (white for endpoints vs. bg for a waypoint)
+                `from` sits at distance 0 (where the signal originates) and `to` at the full wireLen */}
             {!w.from.compId&&<circle cx={a.x} cy={a.y} r="6"
                       fill={isWireHighAt(progress,0)?'var(--high)':'white'}
                       stroke="var(--border-md)" strokeWidth="1.5"
@@ -1768,32 +1640,13 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
           </g>;
         })}
 
-        {/* Waypoint handles — a separate pass over every wire, rendered
-            after (so painted on top of) every wire's free-endpoint handles
-            above. A waypoint that's also a junction sits at the exact same
-            point as the branch wire's free `from` endpoint; when both were
-            rendered together per-wire, whichever wire was created later
-            painted on top and silently ate every click there, making the
-            original wire's own waypoint permanently unreachable — so a
-            junction could never gain a second branch. Keeping all waypoint
-            handles in one later pass means they always win that overlap,
-            regardless of which wire they belong to or when it was made.
-            Every corner lights up the same way a pin does — bg when idle,
-            --high when its host wire is carrying a signal — junction or
-            plain corner alike; neither dragging nor right-clicking a
-            corner distinguishes the two anymore either — see
-            onWaypointMouseDown/onWaypointContext. */}
+        {/* Waypoint handles: a separate pass over every wire, rendered over every wire's free-endpoint handles
+            Every corner lights up the same way a pin does: bg when idle, --high when its host wire carries a signal */}
         {wires.map(w=>(w.points||[]).map((pt,idx)=>{
-          // Skip the one dot a branch drag has already visually pulled
-          // away from — see draggedBranchAnchor above.
+          // Skip the one dot a branch drag has already visually pulled away from (see draggedBranchAnchor)
           if (draggedBranchAnchor && w.id===draggedBranchAnchor.parentWireId &&
               Math.abs(pt.x-draggedBranchAnchor.x)<1e-6 && Math.abs(pt.y-draggedBranchAnchor.y)<1e-6) return null;
-          // Lights up the moment the signal actually reaches THIS corner
-          // — pt is wire.points[idx], which sits at distances[idx+1] in
-          // wireProgress (knot 0 is `from`) — rather than waiting for the
-          // whole wire to finish settling, same as the free endpoints
-          // above and the wire's own path (splitWirePathAtSegment/
-          // splitWirePath, whichever propagationStyle picks).
+          // Lights up the moment the signal reaches this corner, same as the free endpoints and the wire's path
           const progress = wireProgress.get(w.id);
           const pointHigh = isWireHighAt(progress, progress.distances[idx+1]);
           return <circle key={w.id+'_wp'+idx} cx={pt.x} cy={pt.y} r="5"
@@ -1825,9 +1678,7 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
                 <circle cx={px} cy={py} r="6"
                         fill={comp.inputVals[i]?'var(--high)':'var(--bg)'}
                         stroke="var(--border-md)" strokeWidth="1.5"/>
-                {/* Fat invisible hit target — matches the wire hit-path pattern
-                    above, so a drop that's a few px off the visible pin still
-                    connects instead of landing as a free wire endpoint. */}
+                {/* Fat invisible hit target for easy connection*/}
                 <circle cx={px} cy={py} r="14" fill="transparent"
                         style={{cursor:'crosshair'}}
                         onMouseUp={e=>onInputPinUp(e,comp,i)}
@@ -1850,16 +1701,8 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
           </g>;
         })}
 
-        {/* Wiring preview — routed with the same routeManhattanPoints(...,
-            wf.dir||'h') call every onXxxUp handler uses to actually set
-            wire.points on drop, so the corner shown while dragging is the
-            one that will really result instead of always defaulting to
-            horizontal-first regardless of which way the drag went.
-            Skipped for type==='endpoint': that drag moves a real existing
-            wire, which is already being live-updated (via
-            computeEndpointRoute in onMove) and rendered in its actual
-            colors below — this generic dashed overlay would just be a
-            second, wrongly-routed line drawn on top of it. */}
+        {/* Wiring preview, routed with the same routeManhattanPoints call every onXxxUp handler uses
+            Skipped for type==='endpoint': which is already being live-updated and rendered in its actual colors */}
         {wiringFrom&&wiringFrom.type!=='endpoint'&&
           <path d={wirePath(wiringFrom.x,wiringFrom.y,mousePos.x,mousePos.y,
                              routeManhattanPoints({x:wiringFrom.x,y:wiringFrom.y},{x:mousePos.x,y:mousePos.y},wiringFrom.dir||'h'))}
@@ -1883,16 +1726,7 @@ function Canvas({ circuit, onSelect, selectedId, paletteDrag, onClearPaletteDrag
   </>;
 }
 
-// `range` (default [0,1]) confines the particles to whichever fraction of
-// the wire is CURRENTLY actually high — the whole thing when it's simply
-// settled high, but only part of it mid-transition (see the render site):
-// the already-reached prefix while arriving at high, or the not-yet-
-// reached suffix while leaving it, matching the same signal-arrival
-// tracking the wire's own color (splitWirePathAtSegment/splitWirePath)
-// and its waypoints (isWireHighAt) already follow. `tt` (each particle's
-// own 0-1 cycle position) gets remapped into that sub-range rather than
-// sampled directly, so particles never wander onto a stretch that's
-// already visually turned off.
+// `range` (default [0,1]) confines the particles to whichever fraction of the wire is currently actually high 
 function ParticleStream({a,b,pts=[],range}) {
   const [t,setT]=useState(0);
   useEffect(()=>{let r,l=performance.now();const fn=(now)=>{setT(p=>(p+(now-l)*.0006)%1);l=now;r=requestAnimationFrame(fn);};r=requestAnimationFrame(fn);return()=>cancelAnimationFrame(r);},[]);
@@ -1927,7 +1761,7 @@ const GROUPS=[
   {title:'Sinks',     kinds:['OUTPUT', 'SEVEN']},
   {title:'Logic',     kinds:['AND','OR','NOT','NAND','NOR','XOR','XNOR','MUX']},
   {title:'Flip-flops',kinds:['DFF','TFF','JKFF','SRFF']},
-  {title:'Miscellaneous',kinds:['REG', 'SHFT', 'EXTND', 'SPLIT']}, //temp
+  {title:'Miscellaneous',kinds:['REG', 'SHFT', 'EXTND', 'SPLIT']}, // temp (probably?)
   {title:'Custom',    kinds:[]},
 ];
 function Thumb({kind}){
@@ -1987,13 +1821,7 @@ const{GateBody,visForComp}=gates;
 const{Canvas,SplitPropFields,NumberField}=canvas;
 const{Palette}=palette;
 
-// Custom gates are only ever placed via the palette after an Import, so any
-// custom kind referenced by a saved circuit was necessarily imported at some
-// point — but registerCustomGate() only ever registered it in memory
-// (GATE_DEFS/VIS), never persisted it. Loading that circuit in a later
-// session (or before re-importing it in this one) crashed the moment
-// addComponent() hit a kind with no registered definition. This registry
-// makes Import durable across reloads instead of session-only.
+// Custom gate imports persist between sessions
 function loadCustomRegistry() {
   try { return JSON.parse(localStorage.getItem('dss_customs_v1')||'[]'); } catch { return []; }
 }
@@ -2012,12 +1840,9 @@ function extractCustomDeps(data) {
   }
   return names;
 }
-// Would redefining custom gate `name` as `data` make its own dependency
-// chain loop back to itself (directly, or through other custom gates)?
-// Checked against every OTHER custom gate's currently-registered
-// definition, with `name`'s entry swapped for the proposed new one — since
-// that's the only definition actually changing. Returns the cycle as a
-// name chain (e.g. ['C','A','B','C']) for the warning message, or null.
+
+// Checks whether a custom gate directly or recursively depends on itself
+// Returns the cycle as a list of custom gate names if so, or null otherwise
 function findCustomCycle(name, data) {
   const registryMap = new Map(loadCustomRegistry().map(e=>[e.name, e.data]));
   registryMap.set(name, data);
@@ -2034,11 +1859,9 @@ function findCustomCycle(name, data) {
   }
   return dfs(name) ? path : null;
 }
-// Re-registers every previously-imported custom gate on startup. A custom
-// gate's sub-circuit can itself contain another custom gate, and the
-// registry has no guaranteed order, so this can't just register in list
-// order — it retries whatever fails (missing dependency not registered yet)
-// until a full pass makes no more progress.
+// Re-registers every previously-imported custom gate on startup
+// Since custom gates may rely on other custom gates, it retries 
+// whatever fails to register until a full pass makes no more progress
 function hydrateCustomGates() {
   let pending = loadCustomRegistry();
   const kinds = [];
@@ -2074,11 +1897,7 @@ function App(){
   const[customKinds,setCustomKinds]=useState(()=>hydrateCustomGates());
   const[showSave,setShowSave]=useState(false);
   const[saveName,setSaveName]=useState('');
-  // Bottom-of-screen confirmation shown right after a save completes; see
-  // doSave. Keyed by `key` (not just text) so re-saving the same name back
-  // to back restarts the fade-out instead of the old timer silently
-  // clearing the brand-new toast.
-  const[toast,setToast]=useState(null);
+  const[toast,setToast]=useState(null); // save confirmation text
   const toastTimer=useRef(null);
   const showToast=(text)=>{
     if (toastTimer.current) clearTimeout(toastTimer.current);
@@ -2092,22 +1911,12 @@ function App(){
   const[equationToLoad,setEquationToLoad]=useState('');
   const[showSettings, setShowSettings]=useState(false);
   const[showSplitLayout, setShowSplitLayout]=useState(false);
-  // The component the properties panel is currently showing — Canvas
-  // computes its own copy of this internally for its own rendering, but
-  // App needs one too so the "SPLIT Custom Layout" dialog (rendered here,
-  // not inside Canvas, since Dialog/App own every other dialog) can read
-  // and mutate it directly.
-  const selComp = selectedId ? circuit.components.get(selectedId) : null;
-  // Closes the dialog if its component gets deleted/deselected/changed
-  // kind out from under it — the dialog's own `selComp?.kind==='SPLIT'`
-  // render guard already prevents a crash on its own, this just keeps
-  // `showSplitLayout` itself from being left stuck true with nothing to show.
+  const selComp = selectedId ? circuit.components.get(selectedId) : null; // the selected component
+  // Closes the dialog if its component gets deleted/deselected from under it
   useEffect(()=>{ if(showSplitLayout && selComp?.kind!=='SPLIT') setShowSplitLayout(false); }, [selComp, showSplitLayout]);
   const[propagationMode, setPropagationMode]=useState("length");
-  // "continuous": the wire's lit boundary tracks the in-flight pulse's
-  // exact position (splitWirePath). "discrete": it only advances once a
-  // whole segment is entirely crossed (splitWirePathAtSegment). See the
-  // "Signal color" render site in Canvas for where this actually gets read.
+  // "continuous": wires light up as the pulse passes 
+  // "discrete": segments only light up when fully crossed
   const[propagationStyle, setPropagationStyle]=useState("continuous");
 
 
@@ -2143,14 +1952,9 @@ function App(){
     const fn=(e)=>{
       if((e.key==='Delete'||e.key==='Backspace')&&selectedId){
         if(e.target.tagName==='INPUT')return;
-        // selectedId is either a real component id, or (see segSelId) a
-        // '<wireId>#seg<n>' composite naming a selected wire segment —
-        // mirrors right-clicking that exact same target: a component just
-        // goes, a selected segment deletes itself and every segment after
-        // it (toward wire.to), leaving everything before it alone, and
-        // cascades to every branch reading from the part being cut (see
-        // onWireContext / truncateWireAtSegment) rather than taking the
-        // whole host wire.
+        // selectedId is either a real component id, or 
+        // a selected wire segment '<wireId>#seg<n>' (see segSelId)
+        // deleting a segment deletes it and everything after it
         const hashIdx = selectedId.indexOf('#seg');
         if (hashIdx===-1) {
           circuit.removeComponent(selectedId);
@@ -2165,8 +1969,7 @@ function App(){
     window.addEventListener('keydown',fn);return()=>window.removeEventListener('keydown',fn);
   },[selectedId]);
 
-  // Ctrl/Cmd+S opens the save dialog instead of triggering the browser's
-  // save-page action.
+  // Ctrl/Cmd+S opens the save dialog
   useEffect(()=>{
     const fn=(e)=>{
       if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='s'&&circuit.components.size!==0){
@@ -2184,12 +1987,8 @@ function App(){
   const doSave=()=>{
     const name=saveName.trim()||`Circuit ${saved.length+1}`;
     const data=circuit.serialize();
-    // Saving over an existing name replaces that saved circuit, and if it's
-    // also a registered custom gate, updates that gate's definition too
-    // (below) — which can loop the custom-gate dependency graph back on
-    // itself (A uses B, B uses C, and this save would make C use A again).
-    // Check before touching anything, so a blocked save leaves both the
-    // saved-circuits list and the custom registry untouched.
+    // Saving over an existing name replaces that saved circuit
+    // which may lead to a circular definition, so it is prevented here
     if (customKinds.includes('CUSTOM:'+name)) {
       const cycle = findCustomCycle(name, data);
       if (cycle) {
@@ -2207,9 +2006,8 @@ function App(){
     showToast(`"${name}" ${isUpdate?'updated':'saved'}`);
   };
   const doLoad=(s)=>{circuit.load(s.data);setShowLoad(false);refresh();};
-  // This only stops a custom kind from being placed again — it deliberately
-  // doesn't touch GATE_DEFS/VIS, so components of that kind already sitting
-  // on the canvas keep simulating instead of crashing on the next step().
+  // Only removes the custom kind from the palette (not GATE_DEFS/VIS) so that
+  // components relying on it still work
   const removeCustomKind=(name)=>{
     removeFromCustomRegistry(name);
     setCustomKinds(prev=>prev.filter(k=>k!=='CUSTOM:'+name));
@@ -2217,10 +2015,6 @@ function App(){
   const delSaved=(name)=>{
     const n=saved.filter(s=>s.name!==name);
     setSaved(n);localStorage.setItem('dss_v2',JSON.stringify(n));
-    // A saved circuit and an imported custom gate are linked only by name,
-    // so drop the matching custom-gate registration too — otherwise it'd
-    // keep reappearing in the palette (and rehydrating on reload) after its
-    // source circuit is gone.
     removeCustomKind(name);
   };
   const onDeleteCustom=(kind)=>{
@@ -2521,12 +2315,9 @@ function App(){
   </div>;
 }
 
-// Live preview for the "SPLIT Custom Layout" dialog: renders the actual
-// GateBody (so it stays pixel-identical to the real canvas, facing
-// included) plus one small NumberField per tap, positioned just past that
-// tap's own stub, on whichever side it actually points given the
-// component's current facing/mirroring — and keeps the trunk itself
-// centered in the preview no matter which way it's rotated/mirrored.
+// Live preview for the "SPLIT Custom Layout" dialog: renders the GateBody plus one small NumberField per tap, 
+// positioned just past that tap's own stub on whichever side it points 
+// Keeps the trunk itself centered in the preview no matter which way it's rotated/mirrored
 function SplitLayoutPreview({circuit, comp, onComponentChanged}) {
   const pinBits = Array.isArray(comp.pinBits) ? comp.pinBits : [];
   if (!pinBits.length) return null;
