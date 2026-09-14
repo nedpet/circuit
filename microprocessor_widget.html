@@ -1198,13 +1198,15 @@ function App(){
   const refresh = useCallback(()=>tick(n=>n+1),[]);
   const [selectedId,setSelectedId] = useState(null);
   const [delayMs,setDelayMs] = useState(600);
+  const [showSettings,setShowSettings] = useState(false);
+  const [propagationMode,setPropagationMode] = useState("length");
+  // "continuous": wires light up as the pulse passes; "discrete": segments
+  // only light up once fully crossed
+  const [propagationStyle,setPropagationStyle] = useState("continuous");
 
   state.widgetState.delayMs = delayMs;
-  state.widgetState.propagationMode = "length";
-  // "continuous": wires light up as the pulse passes; "discrete": segments
-  // only light up once fully crossed — no Settings dialog to change this
-  // here, so it's just fixed at the original default.
-  state.widgetState.propagationStyle = "continuous";
+  state.widgetState.propagationMode = propagationMode;
+  state.widgetState.propagationStyle = propagationStyle;
   state.widgetState.particleDensity = 4;
 
   // Sim loop
@@ -1241,6 +1243,8 @@ function App(){
   return <div className="app">
     <div className="tb">
       <span className="tb-title">MIPS Microprocessor Simulator</span>
+      <div className="tb-sep"/>
+      <button className="btn ghost" style={{height:26,fontSize:12}} onClick={()=>setShowSettings(true)}>Settings</button>
       {/* Propagation delay */}
       <div className="tb-delay">
         <span>Propagation Delay</span>
@@ -1257,6 +1261,41 @@ function App(){
                 selectedId={selectedId}
                 onSelect={setSelectedId}/>
       </div>
+    </div>
+
+    {showSettings&&<Dialog title="Settings" onClose={()=>setShowSettings(false)}>
+      <div className="prop-grid">
+        <div className="prop-option">
+          <span className="prop-label">Propagation Mode</span>
+          <select className="prop-input"
+                    value={propagationMode}
+                    onChange={e=>setPropagationMode(e.target.value=="length" ? "length" : "component")}>
+              <option value="length">Length-Based Speed</option>
+              <option value="component">Component-Based Speed</option>
+          </select>
+        </div>
+        <div className="prop-option">
+          <span className="prop-label">Propagation Style</span>
+          <select className="prop-input"
+                    value={propagationStyle}
+                    onChange={e=>setPropagationStyle(e.target.value=="discrete" ? "discrete" : "continuous")}>
+              <option value="continuous">Continuous</option>
+              <option value="discrete">Discrete</option>
+          </select>
+        </div>
+      </div>
+      <div className="dialog-actions">
+        <button className="btn ghost" onClick={()=>setShowSettings(false)}>Exit</button>
+      </div>
+    </Dialog>}
+  </div>;
+}
+
+function Dialog({title,children,onClose}){
+  return <div className="modal-bg" onClick={onClose}>
+    <div className="modal" onClick={e=>e.stopPropagation()}>
+      <div className="modal-title">{title}</div>
+      {children}
     </div>
   </div>;
 }
