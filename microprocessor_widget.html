@@ -743,10 +743,59 @@ defineModule('gates', ['engine', 'state'], (engine, state) => {
       {pinLabel(194,117,'RegDst','end',7.5)}
     </g>,
   };
-  // No functionality yet — real control-signal decoding comes later
+  // Multicycle control FSM. No CLK pin — same implicit-clock pattern as
+  // REG's own override (reads state.widgetState.globalClock.value instead
+  // of a wired pin), with alwaysRecompute:true for the same reason REG
+  // needs it: a clock edge landing while Opcode happens to be steady would
+  // otherwise go unnoticed. comp.state.step (0-9) survives across cycles;
+  // outputs are a pure function of the CURRENT step, and step 1 (decode)
+  // branches on Opcode to pick where execution goes next. This is a
+  // faithful port of the classic Hennessy-Patterson multicycle FSM — it
+  // can be, now that ALUOut is a real register (see its own comment) —
+  // rather than the 2-cycle decide/commit workaround an earlier draft of
+  // this circuit needed before that existed.
+  //
+  // Output order: PCWriteCond,PCWrite,IorD,MemRead,MemWrite,MemReg,
+  // IRWrite, PCSource,ALUOp,ALUSrcB,ALUSrcA,RegWrite,RegDst — indices
+  // 0-12, matching VIS.CONTROL's outputs array exactly.
   GATE_DEFS.CONTROL = { kind:'CONTROL', label:'CONTROL', inputs:1, outputs:13, family:'green',
     inWidths:[6], outWidths:[1,1,1,1,1,1,1, 2,3,2,1,1,1],
-    compute:()=>new Array(13).fill(0) };
+    compute:([opcode], s) => {
+      const clk = state.widgetState.globalClock.value;
+      const rising = clk && !s.lastClk;
+      s.lastClk = clk;
+      if (s.step===undefined) s.step = 0;
+      if (rising) {
+        switch (s.step) {
+          case 0: s.step = 1; break;                                     // fetch -> decode
+          case 1:                                                        // decode -> dispatch by opcode
+            if (opcode===0x00) s.step = 6;                                 // R-type
+            else if (opcode===0x23 || opcode===0x2B) s.step = 2;           // lw / sw
+            else if (opcode===0x04) s.step = 8;                            // beq
+            else if (opcode===0x02) s.step = 9;                            // j
+            else s.step = 0;                                               // unrecognized -> refetch
+            break;
+          case 2: s.step = (opcode===0x23) ? 3 : 5; break;                // mem address -> lw read or sw write
+          case 3: s.step = 4; break;                                      // mem read -> lw writeback
+          case 6: s.step = 7; break;                                      // R-type execute -> writeback
+          default: s.step = 0;                                           // 4,5,7,8,9 all return to fetch
+        }
+      }
+      const o = [0,0,0,0,0,0,0, 0,0,0,0,0,0];
+      switch (s.step) {
+        case 0: o[3]=1; o[6]=1; o[9]=1; o[1]=1; break;   // fetch: MemRead, IRWrite, ALUSrcB=01(4), PCWrite
+        case 1: o[9]=3; break;                           // decode: ALUSrcB=11(imm<<2) -> precompute branch target into ALUOut
+        case 2: o[10]=1; o[9]=2; break;                  // mem address: ALUSrcA=reg, ALUSrcB=10(imm) -> ALUOut=rs+imm
+        case 3: o[3]=1; o[2]=1; break;                   // mem read: MemRead, IorD=ALUOut
+        case 4: o[5]=1; o[11]=1; break;                  // lw writeback: MemReg=MDR, RegWrite (RegDst=rt, default 0)
+        case 5: o[4]=1; o[2]=1; break;                   // mem write: MemWrite, IorD=ALUOut
+        case 6: o[10]=1; o[8]=2; break;                  // R-type execute: ALUSrcA=reg, ALUOp=10(funct)
+        case 7: o[11]=1; o[12]=1; break;                 // R-type writeback: RegWrite, RegDst=rd (MemReg=ALUOut, default 0)
+        case 8: o[10]=1; o[8]=1; o[0]=1; o[7]=1; break;  // branch complete: ALUSrcA=reg, ALUOp=01(sub), PCWriteCond, PCSource=01(ALUOut)
+        case 9: o[1]=1; o[7]=2; break;                   // jump complete: PCWrite, PCSource=10(jump target)
+      }
+      return o;
+    } };
 
   // Draws a little line between the pin and a component's body
   // Each input usually points left and output right, but pins can override this
@@ -1469,6 +1518,7 @@ function ClockPanel({ running, period, onToggle, onPeriodChange }) {
   }, []);
   const on = !!state.widgetState.globalClock.value;
   return <div className="clock-panel">
+    <span>Clock</span>
     <div className="clock-led" style={{background: on ? 'var(--high)' : 'var(--low)'}}/>
     <button className="btn ghost clock-playpause" onClick={onToggle} title={running?'Pause':'Run'}>
       {running ? '⏸' : '▶'}
