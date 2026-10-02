@@ -542,7 +542,33 @@ defineModule('gates', ['engine', 'state'], (engine, state) => {
   };
   GATE_DEFS.ALU = { kind:'ALU', label:'ALU', inputs:3, outputs:2, family:'red',
     inWidths:[32,32,3], outWidths:[32,1],
-    compute:()=>[0,0] }; // no functionality yet
+    // Op carries the real 2-bit ALUOp from CONTROL (00 add / 01 subtract /
+    // 10 "see funct"); funct itself never reaches this component as a real
+    // pin — read implicitly off state.widgetState (published by
+    // INSTRUCTION below) the same way CONTROL would read it for its own
+    // decoding, folding the textbook's separate "ALU control" block into
+    // the ALU itself rather than adding it as a new visible component.
+    compute:([a,b,op]) => {
+      a = a>>>0; b = b>>>0;
+      let result;
+      switch (op) {
+        case 0: result = a + b; break;              // add (lw/sw)
+        case 1: result = a - b; break;               // subtract (beq)
+        case 2: {                                    // R-type — consult funct
+          const funct = state.widgetState.currentFunct||0;
+          if (funct===0x20) result = a + b;           // add
+          else if (funct===0x22) result = a - b;       // sub
+          else if (funct===0x24) result = a & b;        // and
+          else if (funct===0x25) result = a | b;         // or
+          else if (funct===0x2A) result = (a|0) < (b|0) ? 1 : 0; // slt (signed compare)
+          else result = 0;
+          break;
+        }
+        default: result = 0;                          // Op===3+, unused
+      }
+      result = result>>>0;
+      return [result, result===0 ? 1 : 0];
+    } };
 
   VIS.REGISTERS = { w:160, h:200,
     inputs: [
@@ -619,9 +645,11 @@ defineModule('gates', ['engine', 'state'], (engine, state) => {
   // its old value, rather than re-splitting live, while IRWrite is low.
   GATE_DEFS.INSTRUCTION = { kind:'INSTRUCTION', label:'INSTRUCTION', inputs:2, outputs:4, family:'red',
     inWidths:[32,1], outWidths:[6,5,5,16],
-    compute:([instr,irWrite], state) => {
-      if (irWrite) state.instr = instr>>>0;
-      const v = state.instr||0;
+    compute:([instr,irWrite], s) => {
+      if (irWrite) s.instr = instr>>>0;
+      const v = s.instr||0;
+      // Published for ALU's compute() to read implicitly (see GATE_DEFS.ALU) — funct has no real pin/wire of its own anywhere.
+      state.widgetState.currentFunct = v & 0x3F;
       return [
         (v>>>26)&0x3F,  // bits 31-26
         (v>>>21)&0x1F,  // bits 25-21
