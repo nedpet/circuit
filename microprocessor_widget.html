@@ -12,6 +12,16 @@
   /* MIPS-instruction sidebar addition only — styles.css itself stays
      shared and unmodified with circuit_widget.html */
   .mips-submit-btn { width:100%; justify-content:center; margin-top:8px; }
+  /* .tb itself is shared/unmodified in styles.css — adding position:relative
+     here (scoped to this page only) just gives the toolbar's own centered
+     play/pause button something to anchor to. */
+  .tb { position:relative; }
+  .tb-playpause {
+    position:absolute; left:50%; top:100%; transform:translate(-50%,-50%); z-index:6;
+    height:40px; width:40px; padding:0; border-radius:50%;
+    display:flex; align-items:center; justify-content:center; font-size:16px; line-height:1;
+    box-shadow:var(--shadow);
+  }
   .mips-multiline { min-height:140px; resize:vertical; font-family:var(--mono); font-size:12px; line-height:1.5; }
   .registers-mode { width:auto; padding:4px 8px; font-size:11px; }
   /* Shrinks to exactly fit the register grid (plus the modal's own
@@ -42,16 +52,18 @@
     white-space:nowrap;
   }
   .reg-value { font-weight:600; }
-  /* Floating top-right indicator for the universal implicit clock —
-     same floating-pill treatment the old .fc gate/wire counter used. */
+  /* Floating top-right stack of small widget-level controls (clock, reset,
+     ...) — same floating-pill treatment the old .fc gate/wire counter
+     used, just stacked via a shared positioned wrapper instead of each
+     pill hardcoding its own top offset. */
+  .widget-controls { position:absolute; top:12px; right:12px; z-index:5; display:flex; flex-direction:column; gap:8px; align-items:flex-end; }
   .clock-panel {
-    position:absolute; top:12px; right:12px; z-index:5;
     display:flex; align-items:center; gap:8px;
     background:var(--bg); border:1px solid var(--border); border-radius:999px;
     padding:5px 12px; box-shadow:var(--shadow); font-size:11.5px; color:var(--ink-2);
   }
   .clock-led { width:10px; height:10px; border-radius:50%; border:1px solid var(--border-md); flex-shrink:0; transition:background 80ms linear; }
-  .clock-playpause { height:22px; width:22px; padding:0; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:10px; line-height:1; }
+  .clock-playpause, .reset-btn { height:22px; width:22px; padding:0; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:10px; line-height:1; }
   .clock-panel input[type=range] { width:70px; accent-color:var(--high); cursor:pointer; }
   .clock-period-val { font-family:var(--mono); font-size:11px; color:var(--ink); min-width:42px; text-align:right; }
 </style>
@@ -106,7 +118,15 @@ defineModule('gates', ['engine', 'state'], (engine, state) => {
   // visible pin/wire at all. App ticks .value based on .period/.paused —
   // see the ClockPanel/App code in the app module.
   state.widgetState.globalClock = state.widgetState.globalClock ||
-    { value:0, period:1000, lastTick:performance.now(), paused:true };
+    { value:0, period:100, lastTick:performance.now(), paused:true };
+  // "Frozen while paused" clock for render-time (not useEffect-gated) wire
+  // progress math — see Canvas's wireProgress and the master-pause comment
+  // on App's sim loop, which is the only thing that ever advances this.
+  state.widgetState.simNow = state.widgetState.simNow || performance.now();
+  // Real time minus accumulated paused duration — see App's pause-offset
+  // bookkeeping effect. Used by PendingBar instead of raw performance.now()
+  // so resuming doesn't make its in-progress bar leap forward.
+  const vnow = () => performance.now() - (state.widgetState.pauseOffset||0);
 
   // Named by color, not gate type, since several colors now group
   // components that aren't actually the same logic family (AND+OR share
@@ -118,9 +138,9 @@ defineModule('gates', ['engine', 'state'], (engine, state) => {
 
   // The bar showing the progress for a gate delay, filling in left-to-right
   function PendingBar({pendingStart, delay, value}) {
-    const [now, setNow] = React.useState(performance.now());
+    const [now, setNow] = React.useState(vnow());
     React.useEffect(()=>{
-      let r; const l=()=>{setNow(performance.now()); r=requestAnimationFrame(l);};
+      let r; const l=()=>{if(!state.widgetState.simPaused)setNow(vnow()); r=requestAnimationFrame(l);};
       r=requestAnimationFrame(l); return ()=>cancelAnimationFrame(r);
     }, []);
     const t = delay>0 ? Math.min(1,(now-(pendingStart||now))/delay) : 1;
@@ -1004,6 +1024,13 @@ const {
 // so it can travel through the same single selectedId/onSelect prop components already use without the two ever colliding
 const segSelId = (wireId, segIndex) => `${wireId}#seg${segIndex}`;
 
+// Real time minus accumulated paused duration — see App's pause-offset
+// bookkeeping effect. Used anywhere here that measures "time since a past
+// sim event" (InflightPulse, wireProgress's pendingT) rather than a
+// frame-to-frame delta (ParticleStream only needs the latter, so it
+// doesn't use this).
+const vnow = () => performance.now() - (state.widgetState.pauseOffset||0);
+
 const GRID = 20;
 
 function Canvas({ circuit, onSelect, selectedId, onOpenRegisters }) {
@@ -1110,7 +1137,13 @@ function Canvas({ circuit, onSelect, selectedId, onOpenRegisters }) {
       // the wrong (slower) rate and then jump the rest of the way instantly
       // the moment the wire actually commits underneath it.
       wireDelay = circuit.wireOwnDelay(w, wireDelayForLength(wireLen, state.widgetState.delayMs));
-      pendingT = Math.min(1, (performance.now()-(w.pendingStart||performance.now()))/wireDelay);
+      // state.widgetState.simNow, not a fresh performance.now() — Canvas
+      // re-renders every frame regardless of pause (its own tick loop
+      // isn't gated), so this has to read a clock that itself stops
+      // advancing while paused, or the segment fill keeps animating on an
+      // otherwise-frozen wire.
+      const simNow = state.widgetState.simNow;
+      pendingT = Math.min(1, (simNow-(w.pendingStart||simNow))/wireDelay);
     }
     wireProgress.set(w.id, {
       pending, pendingT, wireDelay, wireLen, distances,
@@ -1264,7 +1297,7 @@ function Canvas({ circuit, onSelect, selectedId, onOpenRegisters }) {
 // `range` (default [0,1]) confines the particles to whichever fraction of the wire is currently actually high
 function ParticleStream({a,b,pts=[],range}) {
   const [t,setT]=useState(0);
-  useEffect(()=>{let r,l=performance.now();const fn=(now)=>{setT(p=>(p+(now-l)*.0006)%1);l=now;r=requestAnimationFrame(fn);};r=requestAnimationFrame(fn);return()=>cancelAnimationFrame(r);},[]);
+  useEffect(()=>{let r,l=performance.now();const fn=(now)=>{if(!state.widgetState.simPaused)setT(p=>(p+(now-l)*.0006)%1);l=now;r=requestAnimationFrame(fn);};r=requestAnimationFrame(fn);return()=>cancelAnimationFrame(r);},[]);
   const N=state.widgetState.particleDensity??4; if(N===0)return null;
   const [t0,t1]=range||[0,1];
   return <g pointerEvents="none">{Array.from({length:N},(_,i)=>{
@@ -1273,8 +1306,8 @@ function ParticleStream({a,b,pts=[],range}) {
   })}</g>;
 }
 function InflightPulse({a,b,pts=[],pendingValue,pendingStart,delayMs}) {
-  const [now,setNow]=useState(performance.now());
-  useEffect(()=>{let r;const l=()=>{setNow(performance.now());r=requestAnimationFrame(l);};r=requestAnimationFrame(l);return()=>cancelAnimationFrame(r);},[]);
+  const [now,setNow]=useState(vnow());
+  useEffect(()=>{let r;const l=()=>{if(!state.widgetState.simPaused)setNow(vnow());r=requestAnimationFrame(l);};r=requestAnimationFrame(l);return()=>cancelAnimationFrame(r);},[]);
   const t=Math.min(1,(now-(pendingStart||now))/delayMs);
   const[x,y]=sampleWire(a.x,a.y,b.x,b.y,pts,t);
   const col=pendingValue>0?'var(--high)':'var(--low-p)';
@@ -1365,6 +1398,12 @@ defineModule('app', ['state', 'engine', 'canvas', 'mipsInput'], (state, engine, 
 'use strict';
 const{useState,useEffect,useCallback}=React;
 const{createCircuit}=engine;
+// Real time minus however long we've spent paused so far — see the
+// pause-offset bookkeeping effect inside App. Same helper is duplicated
+// (not shared via state.js, a file shared with circuit_widget.html) in
+// the canvas and gates modules, wherever something needs "time since a
+// past sim event" instead of raw wall-clock time.
+const vnow = () => performance.now() - (state.widgetState.pauseOffset||0);
 const{Canvas}=canvas;
 const{MipsInput}=mipsInput;
 
@@ -1385,7 +1424,7 @@ function App(){
   const [,tick] = useState(0);
   const refresh = useCallback(()=>tick(n=>n+1),[]);
   const [selectedId,setSelectedId] = useState(null);
-  const [delayMs,setDelayMs] = useState(600);
+  const [delayMs,setDelayMs] = useState(200);
   const [showSettings,setShowSettings] = useState(false);
   const [registersFor,setRegistersFor] = useState(null); // id of the REGISTERS component whose dialog is open, if any
   const [propagationMode,setPropagationMode] = useState("length");
@@ -1393,7 +1432,25 @@ function App(){
   // only light up once fully crossed
   const [propagationStyle,setPropagationStyle] = useState("continuous");
   const [clockRunning,setClockRunning] = useState(false);
-  const [clockPeriod,setClockPeriod] = useState(1000); // ms per full cycle
+  const [clockPeriod,setClockPeriod] = useState(100); // ms per full cycle
+  const [simPaused,setSimPaused] = useState(false); // master pause — freezes the clock AND all propagation
+
+  // Pause-offset bookkeeping: resuming shouldn't make everything leap
+  // forward by however long the pause lasted. Every sim-time timer in this
+  // file (a wire's pendingStart, the global clock's lastTick,
+  // InflightPulse's/PendingBar's own clocks) is anchored to real
+  // performance.now() — so instead of reading that directly, they all go
+  // through vnow() (defined per-module), which subtracts this accumulated
+  // paused duration, making time effectively stand still while paused and
+  // pick back up exactly where it left off on resume.
+  useEffect(()=>{
+    if (simPaused) {
+      state.widgetState.pauseStartedAt = performance.now();
+    } else if (state.widgetState.pauseStartedAt != null) {
+      state.widgetState.pauseOffset = (state.widgetState.pauseOffset||0) + (performance.now() - state.widgetState.pauseStartedAt);
+      state.widgetState.pauseStartedAt = null;
+    }
+  }, [simPaused]);
 
   state.widgetState.globalClock.paused = !clockRunning;
   state.widgetState.globalClock.period = clockPeriod;
@@ -1402,19 +1459,30 @@ function App(){
   state.widgetState.propagationMode = propagationMode;
   state.widgetState.propagationStyle = propagationStyle;
   state.widgetState.particleDensity = 4;
+  // Read by ParticleStream/InflightPulse (canvas module) and PendingBar
+  // (gates module) — each keeps its own wall-clock-driven animation timer,
+  // independent of circuit.step(), so the master pause has to tell them
+  // directly to stop advancing or they'd keep animating on frozen values.
+  state.widgetState.simPaused = simPaused;
 
   // Sim loop — also ticks the universal implicit clock (see gates module's
-  // GATE_DEFS.REG override) every frame, independent of delayMs
+  // GATE_DEFS.REG override) every frame, independent of delayMs.
+  // simPaused (the central toolbar play/pause) gates the whole body: while
+  // paused, neither the clock nor circuit.step() runs at all, so nothing
+  // propagates or recomputes — a full freeze, not just a clock pause.
   useEffect(()=>{
     let r;const l=()=>{
-      const now = performance.now();
-      const gc = state.widgetState.globalClock;
-      if (!gc.paused && now-gc.lastTick >= gc.period/2) { gc.value = gc.value?0:1; gc.lastTick = now; }
-      circuit.step(now,delayMs);
+      if (!simPaused) {
+        const now = vnow(); // not performance.now() — see pause-offset bookkeeping above
+        state.widgetState.simNow = now;
+        const gc = state.widgetState.globalClock;
+        if (!gc.paused && now-gc.lastTick >= gc.period/2) { gc.value = gc.value?0:1; gc.lastTick = now; }
+        circuit.step(now,delayMs);
+      }
       r=requestAnimationFrame(l);
     };
     r=requestAnimationFrame(l);return()=>cancelAnimationFrame(r);
-  },[delayMs]);
+  },[delayMs,simPaused]);
 
   // Beamer+ state persistence protocol — also how the real MIPS datapath
   // circuit can be delivered into this widget at runtime by its host
@@ -1439,6 +1507,20 @@ function App(){
     console.log('[microprocessor_widget] submitted instruction (not yet implemented):', instructionText);
   };
 
+  // Resets CPU state back to power-on — PC/ALUOut/MDR (every REG), the
+  // register file, the latched instruction, and CONTROL's own FSM step —
+  // without touching MEMORY, so the currently loaded program/data stays put.
+  const handleReset = () => {
+    const clk = state.widgetState.globalClock.value;
+    for (const c of circuit.components.values()) {
+      if (c.kind === 'REG') { c.state.q = 0; c.state.lastClk = clk; }
+      else if (c.kind === 'REGISTERS') { c.state.regs = new Array(32).fill(0); }
+      else if (c.kind === 'INSTRUCTION') { c.state.instr = 0; }
+      else if (c.kind === 'CONTROL') { c.state.step = 0; c.state.lastClk = clk; }
+    }
+    refresh();
+  };
+
   const n=circuit.components.size;
 
   return <div className="app">
@@ -1450,10 +1532,14 @@ function App(){
         if (r) setRegistersFor(r.id);
       }}>Registers</button>
       <button className="btn ghost" style={{height:26,fontSize:12}} onClick={()=>setShowSettings(true)}>Settings</button>
+      {/* Master play/pause — freezes the clock and all propagation when paused */}
+      <button className="btn ghost tb-playpause" onClick={()=>setSimPaused(p=>!p)} title={simPaused?'Resume':'Pause'}>
+        {simPaused ? '▶' : '⏸'}
+      </button>
       {/* Propagation delay */}
       <div className="tb-delay">
         <span>Propagation Delay</span>
-        <input type="range" min="0" max="2000" step="10" value={delayMs}
+        <input type="range" min="10" max="2000" step="10" value={delayMs}
                onChange={e=>setDelayMs(Number(e.target.value))}/>
         <span className="tb-delay-val">{delayMs}ms</span>
       </div>
@@ -1466,9 +1552,12 @@ function App(){
                 selectedId={selectedId}
                 onSelect={setSelectedId}
                 onOpenRegisters={setRegistersFor}/>
-        <ClockPanel running={clockRunning} period={clockPeriod}
-                    onToggle={()=>setClockRunning(r=>!r)}
-                    onPeriodChange={setClockPeriod}/>
+        <div className="widget-controls">
+          <ClockPanel running={clockRunning} period={clockPeriod}
+                      onToggle={()=>setClockRunning(r=>!r)}
+                      onPeriodChange={setClockPeriod}/>
+          <ResetPanel onReset={handleReset}/>
+        </div>
       </div>
     </div>
 
@@ -1526,6 +1615,17 @@ function ClockPanel({ running, period, onToggle, onPeriodChange }) {
     <input type="range" min="100" max="3000" step="50" value={period}
            onChange={e=>onPeriodChange(Number(e.target.value))}/>
     <span className="clock-period-val">{period}ms</span>
+  </div>;
+}
+
+// Same small floating-pill look as ClockPanel, just a label + one button —
+// resets CPU state (PC, ALUOut, MDR, the register file, the latched
+// instruction, and CONTROL's own FSM step) back to power-on, leaving
+// MEMORY's contents (the loaded program/data) untouched.
+function ResetPanel({ onReset }) {
+  return <div className="clock-panel">
+    <span>Reset</span>
+    <button className="btn ghost reset-btn" onClick={onReset} title="Reset">⟲</button>
   </div>;
 }
 
