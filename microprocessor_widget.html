@@ -42,6 +42,18 @@
     white-space:nowrap;
   }
   .reg-value { font-weight:600; }
+  /* Floating top-right indicator for the universal implicit clock —
+     same floating-pill treatment the old .fc gate/wire counter used. */
+  .clock-panel {
+    position:absolute; top:12px; right:12px; z-index:5;
+    display:flex; align-items:center; gap:8px;
+    background:var(--bg); border:1px solid var(--border); border-radius:999px;
+    padding:5px 12px; box-shadow:var(--shadow); font-size:11.5px; color:var(--ink-2);
+  }
+  .clock-led { width:10px; height:10px; border-radius:50%; border:1px solid var(--border-md); flex-shrink:0; transition:background 80ms linear; }
+  .clock-playpause { height:22px; width:22px; padding:0; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:10px; line-height:1; }
+  .clock-panel input[type=range] { width:70px; accent-color:var(--high); cursor:pointer; }
+  .clock-period-val { font-family:var(--mono); font-size:11px; color:var(--ink); min-width:42px; text-align:right; }
 </style>
 </head>
 <body>
@@ -80,14 +92,21 @@
    there needs to display here — see the block below VIS.EXTND. Keep the
    two copies in sync by hand; there's no shared file backing them (see
    circuit_widget.html's load-order comment for why). */
-defineModule('gates', ['engine'], (engine) => {
+defineModule('gates', ['engine', 'state'], (engine, state) => {
   'use strict';
   const {
     GATE_DEFS,
     muxGeometry, splitGeometry, bitsRowWidth, inputOutputGeometry, constGeometry,
     BIT_CELL_W, BIT_GAP, BIT_PAD,
-    rotationCenter,
+    rotationCenter, maskVal,
   } = engine;
+
+  // Universal implicit clock: lives here instead of as a wired CLOCK
+  // component, so REG (see the override below) can react to it with no
+  // visible pin/wire at all. App ticks .value based on .period/.paused —
+  // see the ClockPanel/App code in the app module.
+  state.widgetState.globalClock = state.widgetState.globalClock ||
+    { value:0, period:1000, lastTick:performance.now(), paused:true };
 
   const FAMILY_FILL = { and:'#fffae3', or:'#e8f5ee', not:'#ede8f7', xor:'#e4eef8', mux: '#fff1e3', seq:'#fce8ee', io:'#fefce8', misc:'#ede8f7' };
   const VIS = {};
@@ -407,7 +426,13 @@ defineModule('gates', ['engine'], (engine) => {
     return v.toString(2).padStart(bitWidth, '0');
   }
   const REG_CHAR_W=7, REG_VAL_PAD=6;
-  VIS.REG =  {w:80,h:80,  inputs:[{x:0,y:20},{x:0,y:40},{x:0,y:60},{x:40,y:84,dir:'down'}], outputs:[{x:80,y:40}],
+  // Diverges from circuit_widget.html's REG: D/EN only, no CLK/RESET pins —
+  // it's driven by the universal implicit clock instead (see
+  // GATE_DEFS.REG's compute below), so there's no wire for either. Pins
+  // repositioned to the standard 2-input spacing (y:20/60) now that there
+  // are only two; EN's existing wire (e.g. PC's write-enable logic) just
+  // follows pin index 1 to its new position automatically.
+  VIS.REG =  {w:80,h:80,  inputs:[{x:0,y:20},{x:0,y:60}], outputs:[{x:80,y:40}],
     body:(f,comp)=>{
       const bw=comp.bitWidth||1, text=regValueText(comp.state.q, bw, comp.displayMode||'bin');
       const valW=Math.max(12, text.length*REG_CHAR_W + REG_VAL_PAD*2);
@@ -415,15 +440,29 @@ defineModule('gates', ['engine'], (engine) => {
         {pendingBar(comp)}
         {ffRect(f,80)}
         {ffTxt(10,24,'D')}
-        {ffTxt(10,44,'EN')}
-        {ffTxt(10,64,'▷')}
-        {ffTxt(36,70,'R')}
+        {ffTxt(10,64,'EN')}
         {ffTxt(64,44,'Q')}
         <rect x={40-valW/2} y="-14" width={valW} height="16" rx="2" fill="var(--low)" opacity="0.75"/>
         <text x="40" y="-2" fontFamily="var(--mono)" fontSize="11" fontWeight="600" textAnchor="middle" fill="var(--ink)" opacity="0.45">{text}</text>
         <text x="40" y="44" fontFamily="var(--ui)" fontSize="9" textAnchor="middle" fill="var(--ink)" opacity="0.38">REG</text>
       </g>;
     }};
+  // GATE_DEFS.REG itself lives in the shared engine-core.js, so it can't be
+  // edited there without also changing circuit_widget.html's REG — instead
+  // this overwrites the entry on the live GATE_DEFS object (same trick
+  // ALU/REGISTERS/etc. below use), just for this page. D/EN only now;
+  // latches on the universal implicit clock's rising edge instead of a
+  // wired CLK, and alwaysRecompute:true is required for that — compute()
+  // otherwise only runs when inputVals change, so a clock edge landing
+  // while D/EN happen to be steady would otherwise go unnoticed.
+  GATE_DEFS.REG = { kind:'REG', label:'REGISTER', inputs:2, outputs:1, family:'misc', alwaysRecompute:true,
+    compute:([d,en],s,w)=>{
+      const clk = state.widgetState.globalClock.value;
+      const rising = clk && !s.lastClk;
+      s.lastClk = clk;
+      if (rising && en) s.q = maskVal(d||0, w||1);
+      return [s.q||0];
+    } };
 
   VIS.SHFT = {w:80,h:80,  inputs:[{x:0,y:20},{x:0,y:60}], outputs:[{x:80,y:40}],
       body:(f,comp)=>{
@@ -1230,7 +1269,7 @@ const{MipsInput}=mipsInput;
 // replace this whenever the datapath changes — see circuit_widget.html's
 // own gates module for the matching ALU/REGISTERS/INSTRUCTION/MEMORY/
 // CONTROL definitions, which must stay in sync with this file's copy.
-const MIPS_DATAPATH_DATA = {"components":[{"id":"c1","ioId":"","kind":"CONTROL","x":400,"y":60,"facing":"right","delay":0,"label":"@","state":{}},{"id":"c2","ioId":"","kind":"REGISTERS","x":580,"y":320,"facing":"right","delay":0,"label":"@","state":{}},{"id":"c3","ioId":"","kind":"INSTRUCTION","x":260,"y":260,"facing":"right","delay":0,"label":"@","state":{}},{"id":"c8","ioId":"","kind":"SPLIT","x":400,"y":240,"facing":"up","delay":0,"label":"@","bits":26,"space":1,"splitType":"merge","layout":"custom","pinBits":[16,5,5],"state":{}},{"id":"c12","ioId":"","kind":"MUX","x":480,"y":420,"facing":"right","delay":0,"label":"@","bitWidth":5,"muxInputs":2,"muxSelectLocation":"top","state":{}},{"id":"c15","ioId":"","kind":"SPLIT","x":420,"y":440,"facing":"right","delay":0,"label":"@","bits":16,"space":1,"splitType":"split","layout":"custom","pinBits":[11,5],"state":{}},{"id":"c21","ioId":"","kind":"MUX","x":480,"y":500,"facing":"right","delay":0,"label":"@","bitWidth":32,"muxInputs":2,"muxSelectLocation":"bottom","state":{}},{"id":"c23","ioId":"","kind":"MEMORY","x":40,"y":280,"facing":"right","delay":0,"label":"@","state":{}},{"id":"c25","ioId":"","kind":"REG","x":280,"y":520,"facing":"right","delay":0,"label":"@","bitWidth":32,"displayMode":"hex","state":{}},{"id":"c32","ioId":"","kind":"MUX","x":-60,"y":300,"facing":"right","delay":0,"label":"@","bitWidth":32,"muxInputs":2,"muxSelectLocation":"top","state":{}},{"id":"c35","ioId":"","kind":"REG","x":-180,"y":280,"facing":"right","delay":0,"label":"@","bitWidth":32,"displayMode":"hex","state":{}},{"id":"c38","ioId":"","kind":"MUX","x":820,"y":340,"facing":"right","delay":0,"label":"@","bitWidth":32,"muxInputs":2,"muxSelectLocation":"top","state":{}},{"id":"c39","ioId":"","kind":"MUX","x":820,"y":440,"facing":"right","delay":0,"label":"@","bitWidth":32,"muxInputs":4,"muxSelectLocation":"top","state":{}},{"id":"c44","ioId":"","kind":"CONST","x":800,"y":640,"facing":"left","delay":0,"label":"@","bitWidth":32,"displayMode":"hex","state":{"value":4}},{"id":"c46","ioId":"","kind":"EXTND","x":540,"y":580,"facing":"right","delay":0,"label":"@","bitWidthIn":16,"bitWidthOut":32,"state":{}},{"id":"c47","ioId":"","kind":"SHFT","x":680,"y":600,"facing":"right","delay":0,"label":"@","bitWidth":32,"shiftMode":"left","state":{}},{"id":"c52","ioId":"","kind":"CONST","x":620,"y":640,"facing":"right","delay":0,"label":"@","bitWidth":5,"displayMode":"hex","state":{"value":2}},{"id":"c60","ioId":"","kind":"ALU","x":920,"y":340,"facing":"right","delay":0,"label":"@","state":{}},{"id":"c69","ioId":"","kind":"MUX","x":1320,"y":160,"facing":"right","delay":0,"label":"@","bitWidth":32,"muxInputs":3,"muxSelectLocation":"top","state":{}},{"id":"c73","ioId":"","kind":"SHFT","x":1020,"y":240,"facing":"right","delay":0,"label":"@","bitWidth":26,"shiftMode":"left","state":{}},{"id":"c74","ioId":"","kind":"CONST","x":920,"y":280,"facing":"right","delay":0,"label":"@","bitWidth":5,"displayMode":"hex","state":{"value":2}},{"id":"c78","ioId":"","kind":"SPLIT","x":1260,"y":260,"facing":"right","delay":0,"label":"@","bits":32,"space":1,"splitType":"merge","layout":"custom","pinBits":[28,4],"state":{}},{"id":"c79","ioId":"","kind":"EXTND","x":1120,"y":240,"facing":"right","delay":0,"label":"@","bitWidthIn":26,"bitWidthOut":28,"state":{}},{"id":"c85","ioId":"","kind":"SPLIT","x":1120,"y":320,"facing":"right","delay":0,"label":"@","bits":32,"space":1,"splitType":"split","layout":"custom","pinBits":[28,4],"state":{}},{"id":"c95","ioId":"","kind":"OR","x":200,"y":40,"facing":"left","delay":0,"label":"@","bitWidth":1,"state":{}},{"id":"c98","ioId":"","kind":"AND","x":300,"y":20,"facing":"left","delay":0,"label":"@","bitWidth":1,"state":{}},{"id":"c110","ioId":"","kind":"SPLIT","x":960,"y":640,"facing":"right","delay":0,"label":"@","bits":16,"space":1,"splitType":"split","layout":"custom","pinBits":[6,10],"state":{}}],"wires":[{"id":"w5","from":{"compId":"c3","pin":1,"type":"out"},"to":{"compId":"c2","pin":0,"type":"in"},"points":[{"x":440,"y":360}]},{"id":"w6","from":{"compId":"c3","pin":2,"type":"out"},"to":{"compId":"c2","pin":1,"type":"in"},"points":[{"x":420,"y":400},{"x":480,"y":400}]},{"id":"w7","from":{"compId":"c3","pin":0,"type":"out"},"to":{"compId":"c1","pin":0,"type":"in"},"points":[{"x":500,"y":320}]},{"id":"w9","from":{"x":440,"y":360},"to":{"compId":"c8","pin":2,"type":"in"},"points":[]},{"id":"w10","from":{"x":420,"y":400},"to":{"compId":"c8","pin":1,"type":"in"},"points":[]},{"id":"w11","from":{"compId":"c3","pin":3,"type":"out"},"to":{"compId":"c8","pin":0,"type":"in"},"points":[{"x":400,"y":440}]},{"id":"w13","from":{"compId":"c12","pin":0,"type":"out"},"to":{"compId":"c2","pin":2,"type":"in"},"points":[{"x":560,"y":440}]},{"id":"w16","from":{"compId":"c15","pin":1,"type":"out"},"to":{"compId":"c12","pin":1,"type":"in"},"points":[]},{"id":"w17","from":{"x":400,"y":440},"to":{"compId":"c15","pin":0,"type":"in"},"points":[]},{"id":"w18","from":{"x":480,"y":400},"to":{"compId":"c12","pin":0,"type":"in"},"points":[]},{"id":"w19","from":{"compId":"c1","pin":12,"type":"out"},"to":{"compId":"c12","pin":2,"type":"in"},"points":[{"x":600,"y":320},{"x":520,"y":320}]},{"id":"w20","from":{"compId":"c1","pin":6,"type":"out"},"to":{"compId":"c3","pin":1,"type":"in"},"points":[{"x":320,"y":200},{"x":320,"y":260}]},{"id":"w22","from":{"compId":"c21","pin":0,"type":"out"},"to":{"compId":"c2","pin":3,"type":"in"},"points":[{"x":580,"y":540}]},{"id":"w24","from":{"compId":"c23","pin":0,"type":"out"},"to":{"compId":"c3","pin":0,"type":"in"},"points":[{"x":240,"y":380}]},{"id":"w26","from":{"x":240,"y":380},"to":{"compId":"c25","pin":0,"type":"in"},"points":[{"x":240,"y":540}]},{"id":"w27","from":{"compId":"c25","pin":0,"type":"out"},"to":{"compId":"c21","pin":1,"type":"in"},"points":[]},{"id":"w28","from":{"compId":"c1","pin":4,"type":"out"},"to":{"compId":"c23","pin":1,"type":"in"},"points":[{"x":160,"y":160}]},{"id":"w29","from":{"compId":"c1","pin":3,"type":"out"},"to":{"compId":"c23","pin":0,"type":"in"},"points":[{"x":80,"y":140}]},{"id":"w31","from":{"compId":"c1","pin":2,"type":"out"},"to":{"compId":"c32","pin":2,"type":"in"},"points":[{"x":-20,"y":120}]},{"id":"w33","from":{"compId":"c32","pin":0,"type":"out"},"to":{"compId":"c23","pin":2,"type":"in"},"points":[]},{"id":"w36","from":{"compId":"c35","pin":0,"type":"out"},"to":{"compId":"c32","pin":0,"type":"in"},"points":[{"x":-80,"y":320}]},{"id":"w37","from":{"compId":"c1","pin":11,"type":"out"},"to":{"compId":"c2","pin":4,"type":"in"},"points":[{"x":660,"y":160},{"x":660,"y":320}]},{"id":"w40","from":{"compId":"c1","pin":10,"type":"out"},"to":{"compId":"c38","pin":2,"type":"in"},"points":[{"x":860,"y":140},{"x":860,"y":340}]},{"id":"w41","from":{"compId":"c2","pin":0,"type":"out"},"to":{"compId":"c38","pin":1,"type":"in"},"points":[{"x":740,"y":400}]},{"id":"w42","from":{"compId":"c2","pin":1,"type":"out"},"to":{"compId":"c39","pin":0,"type":"in"},"points":[{"x":780,"y":460}]},{"id":"w43","from":{"compId":"c1","pin":9,"type":"out"},"to":{"compId":"c39","pin":4,"type":"in"},"points":[{"x":800,"y":120},{"x":800,"y":440}]},{"id":"w45","from":{"compId":"c44","pin":0,"type":"out"},"to":{"compId":"c39","pin":1,"type":"in"},"points":[{"x":800,"y":500}]},{"id":"w48","from":{"compId":"c46","pin":0,"type":"out"},"to":{"compId":"c47","pin":0,"type":"in"},"points":[{"x":640,"y":620}]},{"id":"w51","from":{"x":400,"y":440},"to":{"compId":"c46","pin":0,"type":"in"},"points":[{"x":400,"y":620}]},{"id":"w58","from":{"x":640,"y":620},"to":{"compId":"c39","pin":2,"type":"in"},"points":[{"x":640,"y":540}]},{"id":"w59","from":{"compId":"c47","pin":0,"type":"out"},"to":{"compId":"c39","pin":3,"type":"in"},"points":[{"x":760,"y":580}]},{"id":"w63","from":{"compId":"c38","pin":0,"type":"out"},"to":{"compId":"c60","pin":0,"type":"in"},"points":[]},{"id":"w65","from":{"x":400,"y":620},"to":{"compId":"c110","pin":0,"type":"in"},"points":[{"x":400,"y":680},{"x":940,"y":680},{"x":940,"y":640}]},{"id":"w66","from":{"compId":"c1","pin":8,"type":"out"},"to":{"compId":"c60","pin":2,"type":"in"},"points":[{"x":1220,"y":100},{"x":1220,"y":540},{"x":1000,"y":540},{"x":1000,"y":520}]},{"id":"w67","from":{"compId":"c52","pin":0,"type":"out"},"to":{"compId":"c47","pin":1,"type":"in"},"points":[]},{"id":"w68","from":{"x":780,"y":460},"to":{"compId":"c23","pin":3,"type":"in"},"points":[{"x":780,"y":700},{"x":40,"y":700}]},{"id":"w72","from":{"compId":"c8","pin":0,"type":"out"},"to":{"compId":"c73","pin":0,"type":"in"},"points":[]},{"id":"w75","from":{"compId":"c74","pin":0,"type":"out"},"to":{"compId":"c73","pin":1,"type":"in"},"points":[]},{"id":"w76","from":{"x":-80,"y":320},"to":{"compId":"c38","pin":0,"type":"in"},"points":[{"x":-80,"y":240},{"x":820,"y":240},{"x":820,"y":320}]},{"id":"w80","from":{"compId":"c73","pin":0,"type":"out"},"to":{"compId":"c79","pin":0,"type":"in"},"points":[]},{"id":"w81","from":{"compId":"c79","pin":0,"type":"out"},"to":{"compId":"c78","pin":0,"type":"in"},"points":[]},{"id":"w82","from":{"compId":"c78","pin":0,"type":"out"},"to":{"compId":"c69","pin":2,"type":"in"},"points":[]},{"id":"w87","from":{"compId":"c85","pin":1,"type":"out"},"to":{"compId":"c78","pin":1,"type":"in"},"points":[{"x":1260,"y":360}]},{"id":"w90","from":{"compId":"c1","pin":7,"type":"out"},"to":{"compId":"c69","pin":3,"type":"in"},"points":[{"x":1360,"y":80},{"x":1360,"y":160}]},{"id":"w96","from":{"compId":"c1","pin":1,"type":"out"},"to":{"compId":"c95","pin":1,"type":"in"},"points":[]},{"id":"w99","from":{"compId":"c1","pin":0,"type":"out"},"to":{"compId":"c98","pin":1,"type":"in"},"points":[]},{"id":"w100","from":{"compId":"c98","pin":0,"type":"out"},"to":{"compId":"c95","pin":0,"type":"in"},"points":[]},{"id":"w101","from":{"compId":"c60","pin":1,"type":"out"},"to":{"compId":"c98","pin":0,"type":"in"},"points":[{"x":1000,"y":360},{"x":1000,"y":40}]},{"id":"w105","from":{"compId":"c95","pin":0,"type":"out"},"to":{"compId":"c35","pin":1,"type":"in"},"points":[{"x":-200,"y":80},{"x":-200,"y":320}]},{"id":"w106","from":{"compId":"c69","pin":0,"type":"out"},"to":{"compId":"c35","pin":0,"type":"in"},"points":[{"x":1400,"y":220},{"x":1400,"y":20},{"x":-180,"y":20}]},{"id":"w107","from":{"compId":"c1","pin":5,"type":"out"},"to":{"compId":"c21","pin":2,"type":"in"},"points":[{"x":220,"y":180},{"x":220,"y":640},{"x":520,"y":640}]},{"id":"w111","from":{"compId":"c110","pin":0,"type":"out"},"to":{"x":1000,"y":660},"points":[]},{"id":"w112","from":{"compId":"c39","pin":0,"type":"out"},"to":{"compId":"c60","pin":1,"type":"in"},"points":[{"x":900,"y":500}]},{"id":"w116","from":{"compId":"c110","pin":0,"type":"out"},"to":{"compId":"c60","pin":2,"type":"in"},"points":[]},{"id":"w117","from":{"x":820,"y":320},"to":{"compId":"c85","pin":0,"type":"in"},"points":[]},{"id":"w120","from":{"compId":"c60","pin":0,"type":"out"},"to":{"compId":"c69","pin":0,"type":"in"},"points":[{"x":1240,"y":440},{"x":1240,"y":220},{"x":1240,"y":180}]},{"id":"w121","from":{"x":1240,"y":220},"to":{"compId":"c69","pin":1,"type":"in"},"points":[]},{"id":"w123","from":{"x":1240,"y":440},"to":{"compId":"c32","pin":1,"type":"in"},"points":[{"x":1240,"y":720},{"x":460,"y":720},{"x":-60,"y":720}]},{"id":"w124","from":{"x":460,"y":720},"to":{"compId":"c21","pin":0,"type":"in"},"points":[{"x":460,"y":520}]}],"junctions":[{"x":440,"y":360,"sourceWireId":"w5"},{"x":420,"y":400,"sourceWireId":"w6"},{"x":400,"y":440,"sourceWireId":"w11"},{"x":480,"y":400,"sourceWireId":"w6"},{"x":600,"y":320,"sourceWireId":"w19"},{"x":520,"y":320,"sourceWireId":"w19"},{"x":240,"y":380,"sourceWireId":"w24"},{"x":220,"y":120,"sourceWireId":"w31"},{"x":-20,"y":120,"sourceWireId":"w31"},{"x":640,"y":620,"sourceWireId":"w48"},{"x":400,"y":620,"sourceWireId":"w51"},{"x":1120,"y":700,"sourceWireId":"w65"},{"x":1220,"y":540,"sourceWireId":"w66"},{"x":780,"y":460,"sourceWireId":"w42"},{"x":-80,"y":320,"sourceWireId":"w36"},{"x":-200,"y":80,"sourceWireId":"w105"},{"x":-200,"y":320,"sourceWireId":"w105"},{"x":-180,"y":20,"sourceWireId":"w106"},{"x":220,"y":180,"sourceWireId":"w107"},{"x":220,"y":640,"sourceWireId":"w107"},{"x":520,"y":640,"sourceWireId":"w107"},{"x":1020,"y":700,"sourceWireId":"w65"},{"x":820,"y":240,"sourceWireId":"w76"},{"x":800,"y":440,"sourceWireId":"w43"},{"x":820,"y":320,"sourceWireId":"w76"},{"x":1240,"y":440,"sourceWireId":"w120"},{"x":1240,"y":180,"sourceWireId":"w120"},{"x":1240,"y":220,"sourceWireId":"w120"},{"x":1260,"y":360,"sourceWireId":"w87"},{"x":-60,"y":720,"sourceWireId":"w123"},{"x":460,"y":720,"sourceWireId":"w123"}],"nextId":125,"nextIoId":2};
+const MIPS_DATAPATH_DATA = {"components":[{"id":"c1","ioId":"","kind":"CONTROL","x":400,"y":60,"facing":"right","delay":0,"label":"@","state":{}},{"id":"c2","ioId":"","kind":"REGISTERS","x":580,"y":320,"facing":"right","delay":0,"label":"@","state":{}},{"id":"c3","ioId":"","kind":"INSTRUCTION","x":260,"y":260,"facing":"right","delay":0,"label":"@","state":{}},{"id":"c8","ioId":"","kind":"SPLIT","x":400,"y":240,"facing":"up","delay":0,"label":"@","bits":26,"space":1,"splitType":"merge","layout":"custom","pinBits":[16,5,5],"state":{}},{"id":"c12","ioId":"","kind":"MUX","x":480,"y":420,"facing":"right","delay":0,"label":"@","bitWidth":5,"muxInputs":2,"muxSelectLocation":"top","state":{}},{"id":"c15","ioId":"","kind":"SPLIT","x":420,"y":440,"facing":"right","delay":0,"label":"@","bits":16,"space":1,"splitType":"split","layout":"custom","pinBits":[11,5],"state":{}},{"id":"c21","ioId":"","kind":"MUX","x":480,"y":500,"facing":"right","delay":0,"label":"@","bitWidth":32,"muxInputs":2,"muxSelectLocation":"bottom","state":{}},{"id":"c23","ioId":"","kind":"MEMORY","x":40,"y":280,"facing":"right","delay":0,"label":"@","state":{}},{"id":"c25","ioId":"","kind":"REG","x":280,"y":520,"facing":"right","delay":0,"label":"@","bitWidth":32,"displayMode":"hex","state":{}},{"id":"c32","ioId":"","kind":"MUX","x":-60,"y":300,"facing":"right","delay":0,"label":"@","bitWidth":32,"muxInputs":2,"muxSelectLocation":"top","state":{}},{"id":"c35","ioId":"","kind":"REG","x":-180,"y":280,"facing":"right","delay":0,"label":"@","bitWidth":32,"displayMode":"hex","state":{}},{"id":"c38","ioId":"","kind":"MUX","x":820,"y":340,"facing":"right","delay":0,"label":"@","bitWidth":32,"muxInputs":2,"muxSelectLocation":"top","state":{}},{"id":"c39","ioId":"","kind":"MUX","x":820,"y":440,"facing":"right","delay":0,"label":"@","bitWidth":32,"muxInputs":4,"muxSelectLocation":"top","state":{}},{"id":"c44","ioId":"","kind":"CONST","x":800,"y":640,"facing":"left","delay":0,"label":"@","bitWidth":32,"displayMode":"hex","state":{"value":4}},{"id":"c46","ioId":"","kind":"EXTND","x":540,"y":580,"facing":"right","delay":0,"label":"@","bitWidthIn":16,"bitWidthOut":32,"state":{}},{"id":"c47","ioId":"","kind":"SHFT","x":680,"y":600,"facing":"right","delay":0,"label":"@","bitWidth":32,"shiftMode":"left","state":{}},{"id":"c52","ioId":"","kind":"CONST","x":620,"y":640,"facing":"right","delay":0,"label":"@","bitWidth":5,"displayMode":"hex","state":{"value":2}},{"id":"c60","ioId":"","kind":"ALU","x":920,"y":340,"facing":"right","delay":0,"label":"@","state":{}},{"id":"c69","ioId":"","kind":"MUX","x":1320,"y":160,"facing":"right","delay":0,"label":"@","bitWidth":32,"muxInputs":3,"muxSelectLocation":"top","state":{}},{"id":"c73","ioId":"","kind":"SHFT","x":1020,"y":240,"facing":"right","delay":0,"label":"@","bitWidth":26,"shiftMode":"left","state":{}},{"id":"c74","ioId":"","kind":"CONST","x":920,"y":280,"facing":"right","delay":0,"label":"@","bitWidth":5,"displayMode":"hex","state":{"value":2}},{"id":"c78","ioId":"","kind":"SPLIT","x":1260,"y":260,"facing":"right","delay":0,"label":"@","bits":32,"space":1,"splitType":"merge","layout":"custom","pinBits":[28,4],"state":{}},{"id":"c79","ioId":"","kind":"EXTND","x":1120,"y":240,"facing":"right","delay":0,"label":"@","bitWidthIn":26,"bitWidthOut":28,"state":{}},{"id":"c85","ioId":"","kind":"SPLIT","x":1120,"y":320,"facing":"right","delay":0,"label":"@","bits":32,"space":1,"splitType":"split","layout":"custom","pinBits":[28,4],"state":{}},{"id":"c95","ioId":"","kind":"OR","x":200,"y":40,"facing":"left","delay":0,"label":"@","bitWidth":1,"state":{}},{"id":"c98","ioId":"","kind":"AND","x":300,"y":20,"facing":"left","delay":0,"label":"@","bitWidth":1,"state":{}},{"id":"c110","ioId":"","kind":"SPLIT","x":960,"y":640,"facing":"right","delay":0,"label":"@","bits":16,"space":1,"splitType":"split","layout":"custom","pinBits":[6,10],"state":{}},{"id":"c125","ioId":"","kind":"CONST","x":240,"y":560,"facing":"right","delay":0,"label":"@","bitWidth":1,"displayMode":"bin","state":{"value":1}}],"wires":[{"id":"w5","from":{"compId":"c3","pin":1,"type":"out"},"to":{"compId":"c2","pin":0,"type":"in"},"points":[{"x":440,"y":360}]},{"id":"w6","from":{"compId":"c3","pin":2,"type":"out"},"to":{"compId":"c2","pin":1,"type":"in"},"points":[{"x":420,"y":400},{"x":480,"y":400}]},{"id":"w7","from":{"compId":"c3","pin":0,"type":"out"},"to":{"compId":"c1","pin":0,"type":"in"},"points":[{"x":500,"y":320}]},{"id":"w9","from":{"x":440,"y":360},"to":{"compId":"c8","pin":2,"type":"in"},"points":[]},{"id":"w10","from":{"x":420,"y":400},"to":{"compId":"c8","pin":1,"type":"in"},"points":[]},{"id":"w11","from":{"compId":"c3","pin":3,"type":"out"},"to":{"compId":"c8","pin":0,"type":"in"},"points":[{"x":400,"y":440}]},{"id":"w13","from":{"compId":"c12","pin":0,"type":"out"},"to":{"compId":"c2","pin":2,"type":"in"},"points":[{"x":560,"y":440}]},{"id":"w16","from":{"compId":"c15","pin":1,"type":"out"},"to":{"compId":"c12","pin":1,"type":"in"},"points":[]},{"id":"w17","from":{"x":400,"y":440},"to":{"compId":"c15","pin":0,"type":"in"},"points":[]},{"id":"w18","from":{"x":480,"y":400},"to":{"compId":"c12","pin":0,"type":"in"},"points":[]},{"id":"w19","from":{"compId":"c1","pin":12,"type":"out"},"to":{"compId":"c12","pin":2,"type":"in"},"points":[{"x":600,"y":320},{"x":520,"y":320}]},{"id":"w20","from":{"compId":"c1","pin":6,"type":"out"},"to":{"compId":"c3","pin":1,"type":"in"},"points":[{"x":320,"y":200},{"x":320,"y":260}]},{"id":"w22","from":{"compId":"c21","pin":0,"type":"out"},"to":{"compId":"c2","pin":3,"type":"in"},"points":[{"x":580,"y":540}]},{"id":"w24","from":{"compId":"c23","pin":0,"type":"out"},"to":{"compId":"c3","pin":0,"type":"in"},"points":[{"x":240,"y":380}]},{"id":"w26","from":{"x":240,"y":380},"to":{"compId":"c25","pin":0,"type":"in"},"points":[{"x":240,"y":540}]},{"id":"w27","from":{"compId":"c25","pin":0,"type":"out"},"to":{"compId":"c21","pin":1,"type":"in"},"points":[]},{"id":"w28","from":{"compId":"c1","pin":4,"type":"out"},"to":{"compId":"c23","pin":1,"type":"in"},"points":[{"x":160,"y":160}]},{"id":"w29","from":{"compId":"c1","pin":3,"type":"out"},"to":{"compId":"c23","pin":0,"type":"in"},"points":[{"x":80,"y":140}]},{"id":"w31","from":{"compId":"c1","pin":2,"type":"out"},"to":{"compId":"c32","pin":2,"type":"in"},"points":[{"x":-20,"y":120}]},{"id":"w33","from":{"compId":"c32","pin":0,"type":"out"},"to":{"compId":"c23","pin":2,"type":"in"},"points":[]},{"id":"w36","from":{"compId":"c35","pin":0,"type":"out"},"to":{"compId":"c32","pin":0,"type":"in"},"points":[{"x":-80,"y":320}]},{"id":"w37","from":{"compId":"c1","pin":11,"type":"out"},"to":{"compId":"c2","pin":4,"type":"in"},"points":[{"x":660,"y":160},{"x":660,"y":320}]},{"id":"w40","from":{"compId":"c1","pin":10,"type":"out"},"to":{"compId":"c38","pin":2,"type":"in"},"points":[{"x":860,"y":140},{"x":860,"y":340}]},{"id":"w41","from":{"compId":"c2","pin":0,"type":"out"},"to":{"compId":"c38","pin":1,"type":"in"},"points":[{"x":740,"y":400}]},{"id":"w42","from":{"compId":"c2","pin":1,"type":"out"},"to":{"compId":"c39","pin":0,"type":"in"},"points":[{"x":780,"y":460}]},{"id":"w43","from":{"compId":"c1","pin":9,"type":"out"},"to":{"compId":"c39","pin":4,"type":"in"},"points":[{"x":800,"y":120},{"x":800,"y":440}]},{"id":"w45","from":{"compId":"c44","pin":0,"type":"out"},"to":{"compId":"c39","pin":1,"type":"in"},"points":[{"x":800,"y":500}]},{"id":"w48","from":{"compId":"c46","pin":0,"type":"out"},"to":{"compId":"c47","pin":0,"type":"in"},"points":[{"x":640,"y":620}]},{"id":"w51","from":{"x":400,"y":440},"to":{"compId":"c46","pin":0,"type":"in"},"points":[{"x":400,"y":620}]},{"id":"w58","from":{"x":640,"y":620},"to":{"compId":"c39","pin":2,"type":"in"},"points":[{"x":640,"y":540}]},{"id":"w59","from":{"compId":"c47","pin":0,"type":"out"},"to":{"compId":"c39","pin":3,"type":"in"},"points":[{"x":760,"y":580}]},{"id":"w63","from":{"compId":"c38","pin":0,"type":"out"},"to":{"compId":"c60","pin":0,"type":"in"},"points":[]},{"id":"w65","from":{"x":400,"y":620},"to":{"compId":"c110","pin":0,"type":"in"},"points":[{"x":400,"y":680},{"x":940,"y":680},{"x":940,"y":640}]},{"id":"w66","from":{"compId":"c1","pin":8,"type":"out"},"to":{"compId":"c60","pin":2,"type":"in"},"points":[{"x":1220,"y":100},{"x":1220,"y":540},{"x":1000,"y":540},{"x":1000,"y":520}]},{"id":"w67","from":{"compId":"c52","pin":0,"type":"out"},"to":{"compId":"c47","pin":1,"type":"in"},"points":[]},{"id":"w68","from":{"x":780,"y":460},"to":{"compId":"c23","pin":3,"type":"in"},"points":[{"x":780,"y":700},{"x":40,"y":700}]},{"id":"w72","from":{"compId":"c8","pin":0,"type":"out"},"to":{"compId":"c73","pin":0,"type":"in"},"points":[]},{"id":"w75","from":{"compId":"c74","pin":0,"type":"out"},"to":{"compId":"c73","pin":1,"type":"in"},"points":[]},{"id":"w76","from":{"x":-80,"y":320},"to":{"compId":"c38","pin":0,"type":"in"},"points":[{"x":-80,"y":240},{"x":820,"y":240},{"x":820,"y":320}]},{"id":"w80","from":{"compId":"c73","pin":0,"type":"out"},"to":{"compId":"c79","pin":0,"type":"in"},"points":[]},{"id":"w81","from":{"compId":"c79","pin":0,"type":"out"},"to":{"compId":"c78","pin":0,"type":"in"},"points":[]},{"id":"w82","from":{"compId":"c78","pin":0,"type":"out"},"to":{"compId":"c69","pin":2,"type":"in"},"points":[]},{"id":"w87","from":{"compId":"c85","pin":1,"type":"out"},"to":{"compId":"c78","pin":1,"type":"in"},"points":[{"x":1260,"y":360}]},{"id":"w90","from":{"compId":"c1","pin":7,"type":"out"},"to":{"compId":"c69","pin":3,"type":"in"},"points":[{"x":1360,"y":80},{"x":1360,"y":160}]},{"id":"w96","from":{"compId":"c1","pin":1,"type":"out"},"to":{"compId":"c95","pin":1,"type":"in"},"points":[]},{"id":"w99","from":{"compId":"c1","pin":0,"type":"out"},"to":{"compId":"c98","pin":1,"type":"in"},"points":[]},{"id":"w100","from":{"compId":"c98","pin":0,"type":"out"},"to":{"compId":"c95","pin":0,"type":"in"},"points":[]},{"id":"w101","from":{"compId":"c60","pin":1,"type":"out"},"to":{"compId":"c98","pin":0,"type":"in"},"points":[{"x":1000,"y":360},{"x":1000,"y":40}]},{"id":"w105","from":{"compId":"c95","pin":0,"type":"out"},"to":{"compId":"c35","pin":1,"type":"in"},"points":[{"x":-200,"y":80},{"x":-200,"y":340}]},{"id":"w106","from":{"compId":"c69","pin":0,"type":"out"},"to":{"compId":"c35","pin":0,"type":"in"},"points":[{"x":1400,"y":220},{"x":1400,"y":20},{"x":-180,"y":20}]},{"id":"w107","from":{"compId":"c1","pin":5,"type":"out"},"to":{"compId":"c21","pin":2,"type":"in"},"points":[{"x":220,"y":180},{"x":220,"y":640},{"x":520,"y":640}]},{"id":"w111","from":{"compId":"c110","pin":0,"type":"out"},"to":{"x":1000,"y":660},"points":[]},{"id":"w112","from":{"compId":"c39","pin":0,"type":"out"},"to":{"compId":"c60","pin":1,"type":"in"},"points":[{"x":900,"y":500}]},{"id":"w116","from":{"compId":"c110","pin":0,"type":"out"},"to":{"compId":"c60","pin":2,"type":"in"},"points":[]},{"id":"w117","from":{"x":820,"y":320},"to":{"compId":"c85","pin":0,"type":"in"},"points":[]},{"id":"w120","from":{"compId":"c60","pin":0,"type":"out"},"to":{"compId":"c69","pin":0,"type":"in"},"points":[{"x":1240,"y":440},{"x":1240,"y":220},{"x":1240,"y":180}]},{"id":"w121","from":{"x":1240,"y":220},"to":{"compId":"c69","pin":1,"type":"in"},"points":[]},{"id":"w123","from":{"x":1240,"y":440},"to":{"compId":"c32","pin":1,"type":"in"},"points":[{"x":1240,"y":720},{"x":460,"y":720},{"x":-60,"y":720}]},{"id":"w124","from":{"x":460,"y":720},"to":{"compId":"c21","pin":0,"type":"in"},"points":[{"x":460,"y":520}]},{"id":"w126","from":{"compId":"c125","pin":0,"type":"out"},"to":{"compId":"c25","pin":1,"type":"in"},"points":[]}],"junctions":[{"x":440,"y":360,"sourceWireId":"w5"},{"x":420,"y":400,"sourceWireId":"w6"},{"x":400,"y":440,"sourceWireId":"w11"},{"x":480,"y":400,"sourceWireId":"w6"},{"x":600,"y":320,"sourceWireId":"w19"},{"x":520,"y":320,"sourceWireId":"w19"},{"x":240,"y":380,"sourceWireId":"w24"},{"x":220,"y":120,"sourceWireId":"w31"},{"x":-20,"y":120,"sourceWireId":"w31"},{"x":640,"y":620,"sourceWireId":"w48"},{"x":400,"y":620,"sourceWireId":"w51"},{"x":1120,"y":700,"sourceWireId":"w65"},{"x":1220,"y":540,"sourceWireId":"w66"},{"x":780,"y":460,"sourceWireId":"w42"},{"x":-80,"y":320,"sourceWireId":"w36"},{"x":-200,"y":80,"sourceWireId":"w105"},{"x":-200,"y":340,"sourceWireId":"w105"},{"x":-180,"y":20,"sourceWireId":"w106"},{"x":220,"y":180,"sourceWireId":"w107"},{"x":220,"y":640,"sourceWireId":"w107"},{"x":520,"y":640,"sourceWireId":"w107"},{"x":1020,"y":700,"sourceWireId":"w65"},{"x":820,"y":240,"sourceWireId":"w76"},{"x":800,"y":440,"sourceWireId":"w43"},{"x":820,"y":320,"sourceWireId":"w76"},{"x":1240,"y":440,"sourceWireId":"w120"},{"x":1240,"y":180,"sourceWireId":"w120"},{"x":1240,"y":220,"sourceWireId":"w120"},{"x":1260,"y":360,"sourceWireId":"w87"},{"x":-60,"y":720,"sourceWireId":"w123"},{"x":460,"y":720,"sourceWireId":"w123"}],"nextId":127,"nextIoId":2};
 
 function App(){
   const [circuit] = useState(() => {
@@ -1249,15 +1288,27 @@ function App(){
   // "continuous": wires light up as the pulse passes; "discrete": segments
   // only light up once fully crossed
   const [propagationStyle,setPropagationStyle] = useState("continuous");
+  const [clockRunning,setClockRunning] = useState(false);
+  const [clockPeriod,setClockPeriod] = useState(1000); // ms per full cycle
+
+  state.widgetState.globalClock.paused = !clockRunning;
+  state.widgetState.globalClock.period = clockPeriod;
 
   state.widgetState.delayMs = delayMs;
   state.widgetState.propagationMode = propagationMode;
   state.widgetState.propagationStyle = propagationStyle;
   state.widgetState.particleDensity = 4;
 
-  // Sim loop
+  // Sim loop — also ticks the universal implicit clock (see gates module's
+  // GATE_DEFS.REG override) every frame, independent of delayMs
   useEffect(()=>{
-    let r;const l=()=>{circuit.step(performance.now(),delayMs);r=requestAnimationFrame(l);};
+    let r;const l=()=>{
+      const now = performance.now();
+      const gc = state.widgetState.globalClock;
+      if (!gc.paused && now-gc.lastTick >= gc.period/2) { gc.value = gc.value?0:1; gc.lastTick = now; }
+      circuit.step(now,delayMs);
+      r=requestAnimationFrame(l);
+    };
     r=requestAnimationFrame(l);return()=>cancelAnimationFrame(r);
   },[delayMs]);
 
@@ -1311,6 +1362,9 @@ function App(){
                 selectedId={selectedId}
                 onSelect={setSelectedId}
                 onOpenRegisters={setRegistersFor}/>
+        <ClockPanel running={clockRunning} period={clockPeriod}
+                    onToggle={()=>setClockRunning(r=>!r)}
+                    onPeriodChange={setClockPeriod}/>
       </div>
     </div>
 
@@ -1342,6 +1396,31 @@ function App(){
 
     {registersFor && circuit.components.get(registersFor) &&
       <RegistersDialog comp={circuit.components.get(registersFor)} onClose={()=>setRegistersFor(null)}/>}
+  </div>;
+}
+
+// Floating top-right indicator for the universal implicit clock (see the
+// gates module's GATE_DEFS.REG override) — a blinking LED, play/pause, and
+// a period slider. Re-renders every frame itself (same pattern Canvas and
+// RegistersDialog use) purely so the LED visibly blinks; the clock itself
+// keeps ticking via App's sim-loop effect regardless of whether this is
+// even mounted.
+function ClockPanel({ running, period, onToggle, onPeriodChange }) {
+  const [, tick] = useState(0);
+  useEffect(()=>{
+    let r; const l=()=>{tick(n=>n+1); r=requestAnimationFrame(l);};
+    r=requestAnimationFrame(l);
+    return ()=>cancelAnimationFrame(r);
+  }, []);
+  const on = !!state.widgetState.globalClock.value;
+  return <div className="clock-panel">
+    <div className="clock-led" style={{background: on ? 'var(--high)' : 'var(--low)'}}/>
+    <button className="btn ghost clock-playpause" onClick={onToggle} title={running?'Pause':'Run'}>
+      {running ? '⏸' : '▶'}
+    </button>
+    <input type="range" min="100" max="3000" step="50" value={period}
+           onChange={e=>onPeriodChange(Number(e.target.value))}/>
+    <span className="clock-period-val">{period}ms</span>
   </div>;
 }
 
