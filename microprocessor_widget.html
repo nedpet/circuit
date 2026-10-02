@@ -24,16 +24,30 @@
   }
   .mips-multiline { min-height:140px; resize:vertical; font-family:var(--mono); font-size:12px; line-height:1.5; }
   .registers-mode { width:auto; padding:4px 8px; font-size:11px; }
-  /* Shrinks to exactly fit the register grid (plus the modal's own
-     padding) — .modal's own max-width:calc(100vw - 32px) still caps it on
-     a small screen, where .registers-scroll takes over with a scrollbar. */
-  .modal.registers-modal { width:fit-content; }
-  /* Lets the grid scroll horizontally instead of overflowing the modal
-     when the screen is too small to fit it, while still centering it
-     when it DOES fit — the same safe-centering trick styles.css's own
-     .split-layout-preview uses (flex + margin:auto on the child, which
-     only claims space it actually has, so it can never clip a too-wide
-     child down to unreachable). */
+  /* Bottom-docked panel over the canvas (toggled by the Registers button
+     / the component's own menu button) instead of a modal — ~1/4-1/3 of
+     the canvas's own height, anchored to .canvas-wrap (which is already
+     position:relative in the shared styles.css). */
+  .registers-panel {
+    position:absolute; left:0; right:0; bottom:0; height:30%; z-index:4;
+    background:var(--bg); border-top:1px solid var(--border); box-shadow:0 -6px 20px -8px rgba(26,26,24,.14);
+    padding:10px 16px; display:flex; flex-direction:column; gap:6px; overflow-y:auto;
+  }
+  .registers-panel-header { display:flex; align-items:center; gap:10px; }
+  .registers-panel-title { font-size:13px; font-weight:600; }
+  /* The close button sits at the panel's own top-right corner, independent
+     of the header row's flex flow (which is why the mode select, now the
+     only other thing in that row, reads as "the left side"). */
+  .registers-close {
+    position:absolute; top:8px; right:8px; height:22px; width:22px; padding:0;
+    border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:11px; line-height:1;
+  }
+  /* Lets the grid scroll horizontally instead of overflowing the panel
+     when there isn't room, while still centering it when it DOES fit —
+     the same safe-centering trick styles.css's own .split-layout-preview
+     uses (flex + margin:auto on the child, which only claims space it
+     actually has, so it can never clip a too-wide child down to
+     unreachable). */
   .registers-scroll { display:flex; overflow-x:auto; padding-bottom:2px; }
   /* 4 rows x 8 columns, filled top-to-bottom then left-to-right. Columns
      size to their widest entry (not an even 1fr split) so values still
@@ -612,7 +626,7 @@ defineModule('gates', ['engine', 'state'], (engine, state) => {
       {pinLabel(80,28,'RegWrite','middle')}
       {pinLabel(140,64,'ReadData1','end')}
       {pinLabel(140,144,'ReadData2','end')}
-      {/* Opens the live "Registers" dialog (see App/RegistersDialog) */}
+      {/* Opens the live "Registers" panel (see App/RegistersPanel) */}
       <g style={{cursor:'pointer'}}>
         <rect data-registers-menu="1" x="122" y="16" width="20" height="20" rx="4" fill="var(--bg)" stroke="var(--border-md)" strokeWidth="1"/>
         <g pointerEvents="none">
@@ -1529,7 +1543,7 @@ function App(){
       <div className="tb-sep"/>
       <button className="btn ghost" style={{height:26,fontSize:12}} onClick={()=>{
         const r=[...circuit.components.values()].find(c=>c.kind==='REGISTERS');
-        if (r) setRegistersFor(r.id);
+        if (r) setRegistersFor(prev=>prev===r.id?null:r.id);
       }}>Registers</button>
       <button className="btn ghost" style={{height:26,fontSize:12}} onClick={()=>setShowSettings(true)}>Settings</button>
       {/* Master play/pause — freezes the clock and all propagation when paused */}
@@ -1551,13 +1565,15 @@ function App(){
         <Canvas circuit={circuit}
                 selectedId={selectedId}
                 onSelect={setSelectedId}
-                onOpenRegisters={setRegistersFor}/>
+                onOpenRegisters={id=>setRegistersFor(prev=>prev===id?null:id)}/>
         <div className="widget-controls">
           <ClockPanel running={clockRunning} period={clockPeriod}
                       onToggle={()=>setClockRunning(r=>!r)}
                       onPeriodChange={setClockPeriod}/>
           <ResetPanel onReset={handleReset}/>
         </div>
+        {registersFor && circuit.components.get(registersFor) &&
+          <RegistersPanel comp={circuit.components.get(registersFor)} onClose={()=>setRegistersFor(null)}/>}
       </div>
     </div>
 
@@ -1587,15 +1603,13 @@ function App(){
       </div>
     </Dialog>}
 
-    {registersFor && circuit.components.get(registersFor) &&
-      <RegistersDialog comp={circuit.components.get(registersFor)} onClose={()=>setRegistersFor(null)}/>}
   </div>;
 }
 
 // Floating top-right indicator for the universal implicit clock (see the
 // gates module's GATE_DEFS.REG override) — a blinking LED, play/pause, and
 // a period slider. Re-renders every frame itself (same pattern Canvas and
-// RegistersDialog use) purely so the LED visibly blinks; the clock itself
+// RegistersPanel use) purely so the LED visibly blinks; the clock itself
 // keeps ticking via App's sim-loop effect regardless of whether this is
 // even mounted.
 function ClockPanel({ running, period, onToggle, onPeriodChange }) {
@@ -1649,7 +1663,7 @@ const REG_NAMES = ['zero','at','v0','v1','a0','a1','a2','a3','t0','t1','t2','t3'
 // the live, mutable component object from `circuit.components`, so this
 // re-renders every animation frame (same pattern Canvas itself uses) to
 // track the simulation as it runs rather than showing a frozen snapshot.
-function RegistersDialog({ comp, onClose }) {
+function RegistersPanel({ comp, onClose }) {
   const [mode, setMode] = useState('hex'); // 'hex' | 'bin'
   const [, tick] = useState(0);
   useEffect(()=>{
@@ -1658,12 +1672,15 @@ function RegistersDialog({ comp, onClose }) {
     return ()=>cancelAnimationFrame(r);
   }, []);
   const regs = (comp.state && comp.state.regs) || [];
-  return <Dialog title="Registers" onClose={onClose} className="registers-modal" headerExtra={
-    <select className="prop-input registers-mode" value={mode} onChange={e=>setMode(e.target.value)}>
-      <option value="hex">Hexadecimal</option>
-      <option value="bin">Binary</option>
-    </select>
-  }>
+  return <div className="registers-panel">
+    <button className="btn ghost registers-close" onClick={onClose} title="Close">✕</button>
+    <div className="registers-panel-header">
+      <span className="registers-panel-title">Registers</span>
+      <select className="prop-input registers-mode" value={mode} onChange={e=>setMode(e.target.value)}>
+        <option value="hex">Hexadecimal</option>
+        <option value="bin">Binary</option>
+      </select>
+    </div>
     <div className="registers-scroll">
       <div className="registers-grid">
         {REG_NAMES.map((name,i)=>{
@@ -1676,10 +1693,7 @@ function RegistersDialog({ comp, onClose }) {
         })}
       </div>
     </div>
-    <div className="dialog-actions">
-      <button className="btn ghost" onClick={onClose}>Exit</button>
-    </div>
-  </Dialog>;
+  </div>;
 }
 
 ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
