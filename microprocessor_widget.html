@@ -1270,13 +1270,34 @@ function Canvas({ circuit, onSelect, selectedId, onOpenRegisters }) {
     }
     return 1;
   };
-  // Same width formula buildConstVis (gates module) sizes a CONST's own
-  // rounded-rect readout with, so the probe bubble below matches it exactly.
+  // Hex matches buildConstVis's (gates module) own width formula exactly.
+  // Binary groups into bytes (spaces for clarity, per the Probe Mode
+  // setting) from the LSB end, so it needs the extra space characters
+  // counted too, not just the bit count.
   const CONST_CHAR_W = 9, CONST_PAD = 12;
-  const probeBubbleWidth = (bits) => {
-    const digits = Math.max(1, Math.ceil(bits/4));
-    const rawW = Math.max(40, digits*CONST_CHAR_W + CONST_PAD*2);
+  const probeCharCount = (bits, mode) =>
+    mode==='bin' ? bits + Math.floor((bits-1)/8) : Math.max(1, Math.ceil(bits/4));
+  const probeBubbleWidth = (bits, mode) => {
+    // CONST_CHAR_W (9) is buildConstVis's own estimate, kept exactly as-is
+    // for hex so the probe's width matches a real CONST pixel-for-pixel.
+    // The true rendered glyph width at this font/size is actually ~9.6px —
+    // close enough that hex's short strings (<=8 chars) absorb the ~5px
+    // total error in rounding, but binary's much longer strings (up to 35
+    // chars for a 32-bit value) would compound it to ~20px, eating almost
+    // all the padding. So binary measures its own width for real instead.
+    const charW = mode==='bin' ? 9.6 : CONST_CHAR_W;
+    const rawW = Math.max(40, probeCharCount(bits,mode)*charW + CONST_PAD*2);
     return Math.ceil(rawW/20)*20;
+  };
+  const formatProbeValue = (value, bits, mode) => {
+    const v = (value||0)>>>0;
+    if (mode === 'bin') {
+      const bin = v.toString(2).padStart(bits,'0');
+      const groups = [];
+      for (let i = bin.length; i > 0; i -= 8) groups.unshift(bin.slice(Math.max(0,i-8), i));
+      return groups.join(' ');
+    }
+    return v.toString(16).toUpperCase().padStart(Math.max(1,Math.ceil(bits/4)),'0');
   };
 
   const probedWireObj = probedWire && circuit.wires.get(probedWire.wireId);
@@ -1420,9 +1441,9 @@ function Canvas({ circuit, onSelect, selectedId, onOpenRegisters }) {
           it stays useful while the simulation keeps running. */}
       {probedWireObj && (() => {
         const bits = wireBitWidth(probedWireObj);
-        const digits = Math.max(1, Math.ceil(bits/4));
-        const text = ((probedWireObj.value||0)>>>0).toString(16).toUpperCase().padStart(digits,'0');
-        const w = probeBubbleWidth(bits);
+        const mode = state.widgetState.probeMode || 'hex';
+        const text = formatProbeValue(probedWireObj.value, bits, mode);
+        const w = probeBubbleWidth(bits, mode);
         const pt = probedWire.point;
         const anchor = {x: pt.x+GRID*0.5, y: pt.y-GRID*0.5}; // half a grid unit up and right — the rect's (unrounded) bottom-left corner
         const rectTop = anchor.y - 26;
@@ -1657,6 +1678,10 @@ function App(){
   // "continuous": wires light up as the pulse passes; "discrete": segments
   // only light up once fully crossed
   const [propagationStyle,setPropagationStyle] = useState("continuous");
+  // How the Canvas's click/hover wire-value probe formats its reading —
+  // see Canvas's formatProbeValue. "bin" groups into bytes (spaces every 8
+  // bits) for readability.
+  const [probeMode,setProbeMode] = useState("hex");
   const [clockRunning,setClockRunning] = useState(false);
   const [clockPeriod,setClockPeriod] = useState(100); // ms per full cycle
   const [simPaused,setSimPaused] = useState(false); // master pause — freezes the clock AND all propagation
@@ -1725,6 +1750,7 @@ function App(){
   state.widgetState.delayMs = delayMs;
   state.widgetState.propagationMode = propagationMode;
   state.widgetState.propagationStyle = propagationStyle;
+  state.widgetState.probeMode = probeMode;
   state.widgetState.particleDensity = 4;
   // Read by ParticleStream/InflightPulse (canvas module) and PendingBar
   // (gates module) — each keeps its own wall-clock-driven animation timer,
@@ -1888,6 +1914,15 @@ function App(){
               <option value="discrete">Discrete</option>
           </select>
         </div>
+        <div className="prop-option">
+          <span className="prop-label">Probe Mode</span>
+          <select className="prop-input"
+                    value={probeMode}
+                    onChange={e=>setProbeMode(e.target.value=="bin" ? "bin" : "hex")}>
+              <option value="hex">Hexadecimal</option>
+              <option value="bin">Binary</option>
+          </select>
+        </div>
       </div>
       <div className="dialog-actions">
         <button className="btn ghost" onClick={()=>setShowSettings(false)}>Exit</button>
@@ -1977,7 +2012,7 @@ function RegistersPanel({ comp, onClose }) {
       <div className="registers-grid">
         {REG_NAMES.map((name,i)=>{
           const v = regs[i]||0;
-          const text = mode==='hex' ? (v>>>0).toString(16).toUpperCase() : (v>>>0).toString(2);
+          const text = mode==='hex' ? '0x'+(v>>>0).toString(16).toUpperCase().padStart(8,'0') : (v>>>0).toString(2);
           return <div key={i} className="reg-entry">
             <span>{`$${name} ($${i}):`}</span>
             <span className="reg-value">{text}</span>
