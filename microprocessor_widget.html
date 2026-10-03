@@ -12,6 +12,10 @@
   /* MIPS-instruction sidebar addition only — styles.css itself stays
      shared and unmodified with circuit_widget.html */
   .mips-submit-btn { width:100%; justify-content:center; margin-top:8px; }
+  .mips-error {
+    display:block; margin-top:6px; font-size:11.5px; color:var(--err);
+    white-space:normal; overflow-wrap:break-word;
+  }
   /* .tb itself is shared/unmodified in styles.css — adding position:relative
      here (scoped to this page only) just gives the toolbar's own centered
      play/pause button something to anchor to. */
@@ -599,12 +603,16 @@ defineModule('gates', ['engine', 'state'], (engine, state) => {
   };
   GATE_DEFS.ALU = { kind:'ALU', label:'ALU', inputs:3, outputs:2, family:'red',
     inWidths:[32,32,3], outWidths:[32,1],
-    // Op carries the real 2-bit ALUOp from CONTROL (00 add / 01 subtract /
-    // 10 "see funct"); funct itself never reaches this component as a real
-    // pin — read implicitly off state.widgetState (published by
-    // INSTRUCTION below) the same way CONTROL would read it for its own
-    // decoding, folding the textbook's separate "ALU control" block into
-    // the ALU itself rather than adding it as a new visible component.
+    // Op carries the real ALUOp from CONTROL: 0 add, 1 subtract, 2 "see
+    // funct" (R-type), 3 lui, 4 slti (signed), 5 sltiu (unsigned). funct
+    // itself never reaches this component as a real pin — read implicitly
+    // off state.widgetState (published by INSTRUCTION below) the same way
+    // CONTROL would read it for its own decoding, folding the textbook's
+    // separate "ALU control" block into the ALU itself rather than adding
+    // it as a new visible component. 3/4/5 are purely this file's own
+    // encoding (not part of the textbook's 2-bit ALUOp) — safe to extend
+    // since the Op pin is already 3 bits wide (room for 0-7) and this is
+    // pure compute() logic, no new wiring.
     compute:([a,b,op]) => {
       a = a>>>0; b = b>>>0;
       let result;
@@ -618,10 +626,16 @@ defineModule('gates', ['engine', 'state'], (engine, state) => {
           else if (funct===0x24) result = a & b;        // and
           else if (funct===0x25) result = a | b;         // or
           else if (funct===0x2A) result = (a|0) < (b|0) ? 1 : 0; // slt (signed compare)
+          else if (funct===0x26) result = a ^ b;         // xor
+          else if (funct===0x27) result = ~(a | b);       // nor
+          else if (funct===0x2B) result = a < b ? 1 : 0;  // sltu (both already >>>0'd above)
           else result = 0;
           break;
         }
-        default: result = 0;                          // Op===3+, unused
+        case 3: result = (b & 0xFFFF) << 16; break;   // lui — only ever fed the (sign-extended, but masked back off here) immediate as B
+        case 4: result = (a|0) < (b|0) ? 1 : 0; break; // slti (signed) — its own ALUOp since an I-type has no real funct field to read
+        case 5: result = a < b ? 1 : 0; break;         // sltiu (unsigned)
+        default: result = 0;                          // Op===6+, unused
       }
       result = result>>>0;
       return [result, result===0 ? 1 : 0];
@@ -871,7 +885,8 @@ defineModule('gates', ['engine', 'state'], (engine, state) => {
           case 0: s.step = 1; break;                                     // fetch -> decode
           case 1:                                                        // decode -> dispatch by opcode
             if (opcode===0x00) s.step = 6;                                 // R-type
-            else if (opcode===0x23 || opcode===0x2B || opcode===0x08) s.step = 2; // lw / sw / addi
+            else if (opcode===0x23 || opcode===0x2B || opcode===0x08 ||
+                     opcode===0x0A || opcode===0x0B || opcode===0x0F) s.step = 2; // lw / sw / addi / slti / sltiu / lui
             else if (opcode===0x04) s.step = 8;                            // beq
             else if (opcode===0x02) s.step = 9;                            // j
             else s.step = 0;                                               // unrecognized -> refetch
@@ -890,7 +905,12 @@ defineModule('gates', ['engine', 'state'], (engine, state) => {
       switch (s.step) {
         case 0: o[3]=1; o[6]=1; o[9]=1; o[1]=1; break;   // fetch: MemRead, IRWrite, ALUSrcB=01(4), PCWrite
         case 1: o[9]=3; break;                           // decode: ALUSrcB=11(imm<<2) -> precompute branch target into ALUOut
-        case 2: o[10]=1; o[9]=2; break;                  // mem/imm address: ALUSrcA=reg, ALUSrcB=10(imm) -> ALUOut=rs+imm
+        case 2:                                           // mem/imm address: ALUSrcA=reg, ALUSrcB=10(imm) -> ALUOut=<ALU result below>
+          o[10]=1; o[9]=2;
+          if (opcode===0x0A) o[8]=4;        // slti: ALUOut = (rs < imm) signed
+          else if (opcode===0x0B) o[8]=5;   // sltiu: ALUOut = (rs < imm) unsigned
+          else if (opcode===0x0F) o[8]=3;   // lui: ALUOut = imm<<16 (ALUSrcA/rs value is ignored by that ALUOp)
+          break;                            // else (lw/sw/addi): ALUOp=0(add), default
         case 3: o[3]=1; o[2]=1; break;                   // mem read: MemRead, IorD=ALUOut
         case 4: o[5]=1; o[11]=1; break;                  // lw writeback: MemReg=MDR, RegWrite (RegDst=rt, default 0)
         case 5: o[4]=1; o[2]=1; break;                   // mem write: MemWrite, IorD=ALUOut
@@ -1567,14 +1587,20 @@ const { useState, useRef } = React;
 function MipsInput({ onSubmit }) {
   const [mode, setMode] = useState('single'); // 'single' | 'multi' | 'file'
   const [text, setText] = useState('');
+  const [error, setError] = useState(null);
   const fileInputRef = useRef(null);
 
-  const changeMode = (e) => { setMode(e.target.value); setText(''); };
+  const changeMode = (e) => { setMode(e.target.value); setText(''); setError(null); };
 
   const submit = () => {
     const block = text.trim();
     if (!block) return;
-    onSubmit(block); // TODO: once execution exists, split multi-line blocks on newlines and run them back to back
+    // onSubmit returns an error message (and leaves MEMORY untouched) on a
+    // syntax error, or null on success — the submit box only clears itself
+    // on success, so a bad line stays put, visible, for you to fix.
+    const err = onSubmit(block, mode);
+    if (err) { setError(err); return; }
+    setError(null);
     setText('');
   };
 
@@ -1583,7 +1609,10 @@ function MipsInput({ onSubmit }) {
     e.target.value = ''; // lets the same file be re-chosen later
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = () => onSubmit(String(reader.result||'')); // TODO: same back-to-back execution as multi-line, once implemented
+    reader.onload = () => {
+      const err = onSubmit(String(reader.result||''), 'file');
+      setError(err || null);
+    };
     reader.readAsText(file);
   };
 
@@ -1611,6 +1640,7 @@ function MipsInput({ onSubmit }) {
         <input ref={fileInputRef} type="file" accept=".s,.asm,.txt" style={{display:'none'}} onChange={onFileChosen}/>
         <button className="btn primary mips-submit-btn" onClick={()=>fileInputRef.current?.click()}>Choose File…</button>
       </>}
+      {error && <span className="mips-error" title={error}>⚠ {error}</span>}
     </div>
   </div>;
 }
@@ -1644,11 +1674,17 @@ const{MipsInput}=mipsInput;
 // own gates module for the matching ALU/REGISTERS/INSTRUCTION/MEMORY/
 // CONTROL definitions, which must stay in sync with this file's copy.
 // Minimal MIPS assembler covering the subset the datapath above actually
-// implements: R-type add/sub/and/or/slt (ALU funct codes in GATE_DEFS.ALU),
-// lw/sw, addi, beq, and j. No labels/symbols — beq/j take a literal numeric
-// offset/target, since there's nowhere else in this widget to resolve one.
-const MIPS_FUNCT = { add:0x20, sub:0x22, and:0x24, or:0x25, slt:0x2A };
-const MIPS_OPCODE = { lw:0x23, sw:0x2B, beq:0x04, j:0x02, addi:0x08 };
+// implements: R-type add/sub/and/or/slt/xor/nor/sltu (ALU funct codes in
+// GATE_DEFS.ALU), lw/sw, addi/slti/sltiu, lui, beq, and j. No labels/
+// symbols — beq/j take a literal numeric offset/target, since there's
+// nowhere else in this widget to resolve one. andi/ori/xori are
+// deliberately left out — they're defined to zero-extend their immediate,
+// but the only extender wired to ALUSrcB sign-extends, and it's shared
+// with addi/slti/lw/sw, so giving them correct semantics would need new
+// hardware (a second extender + a selector), not just an assembler/ALU
+// change like everything else here.
+const MIPS_FUNCT = { add:0x20, sub:0x22, and:0x24, or:0x25, slt:0x2A, xor:0x26, nor:0x27, sltu:0x2B };
+const MIPS_OPCODE = { lw:0x23, sw:0x2B, beq:0x04, j:0x02, addi:0x08, slti:0x0A, sltiu:0x0B, lui:0x0F };
 let _regNameToNum = null;
 function mipsRegNum(tok) {
   const m = tok.trim().match(/^\$(\w+)$/);
@@ -1689,12 +1725,19 @@ function assembleMipsLine(line) {
     const rs = mipsRegNum(m[2]);
     return ((MIPS_OPCODE[mnemonic]<<26)|(rs<<21)|(rt<<16)|(Number(m[1])&0xFFFF))>>>0;
   }
-  if (mnemonic === 'addi') {
-    if (parts.length !== 3) throw new Error(`addi: expected 3 operands, got ${parts.length}`);
+  if (mnemonic === 'addi' || mnemonic === 'slti' || mnemonic === 'sltiu') {
+    if (parts.length !== 3) throw new Error(`${mnemonic}: expected 3 operands, got ${parts.length}`);
     const rt = mipsRegNum(parts[0]), rs = mipsRegNum(parts[1]);
     const imm = Number(parts[2]);
-    if (Number.isNaN(imm)) throw new Error(`addi: bad immediate '${parts[2]}'`);
-    return ((MIPS_OPCODE.addi<<26)|(rs<<21)|(rt<<16)|(imm&0xFFFF))>>>0;
+    if (Number.isNaN(imm)) throw new Error(`${mnemonic}: bad immediate '${parts[2]}'`);
+    return ((MIPS_OPCODE[mnemonic]<<26)|(rs<<21)|(rt<<16)|(imm&0xFFFF))>>>0;
+  }
+  if (mnemonic === 'lui') {
+    if (parts.length !== 2) throw new Error(`lui: expected 2 operands, got ${parts.length}`);
+    const rt = mipsRegNum(parts[0]);
+    const imm = Number(parts[1]);
+    if (Number.isNaN(imm)) throw new Error(`lui: bad immediate '${parts[1]}'`);
+    return ((MIPS_OPCODE.lui<<26)|(rt<<16)|(imm&0xFFFF))>>>0;
   }
   if (mnemonic === 'beq') {
     if (parts.length !== 3) throw new Error(`beq: expected 3 operands, got ${parts.length}`);
@@ -1882,23 +1925,32 @@ function App(){
   // nextInstrAddr, persisted across submissions so successive submissions
   // build up one program rather than overwriting each other). Reset PC to
   // 0 (via the Reset panel) to (re)run the program from the top.
-  const handleMipsSubmit = (instructionText) => {
+  // Returns an error message string if the block doesn't assemble cleanly,
+  // or null on success. Assembles the WHOLE block first, writing nothing to
+  // memory until every line has checked out — a syntax error partway
+  // through used to still commit everything before it, silently loading a
+  // truncated program instead of rejecting the submission outright.
+  const handleMipsSubmit = (instructionText, mode) => {
+    const lines = instructionText.split('\n');
+    const words = [];
+    for (let i = 0; i < lines.length; i++) {
+      try {
+        const word = assembleMipsLine(lines[i]);
+        if (word != null) words.push(word);
+      } catch (err) {
+        return mode === 'single' ? err.message : `Line ${i+1}: ${err.message}`;
+      }
+    }
     const memComp = [...circuit.components.values()].find(c => c.kind === 'MEMORY');
-    if (!memComp) return;
+    if (!memComp) return 'No MEMORY component found in the datapath.';
     if (!memComp.state.mem) memComp.state.mem = new Map();
     if (state.widgetState.nextInstrAddr == null) state.widgetState.nextInstrAddr = 0;
-    try {
-      for (const line of instructionText.split('\n')) {
-        const word = assembleMipsLine(line);
-        if (word == null) continue;
-        memComp.state.mem.set(state.widgetState.nextInstrAddr, word);
-        state.widgetState.nextInstrAddr += 4;
-      }
-    } catch (err) {
-      console.error('[microprocessor_widget] assembly error:', err.message);
-      return;
+    for (const word of words) {
+      memComp.state.mem.set(state.widgetState.nextInstrAddr, word);
+      state.widgetState.nextInstrAddr += 4;
     }
     refresh();
+    return null;
   };
 
   // Resets CPU state back to power-on — PC/ALUOut/MDR (every REG), the
