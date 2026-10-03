@@ -1071,7 +1071,7 @@ const { GateBody, visForComp } = gates;
 const {
   terminalCoords, wireKnots, wirePath,
   sampleWire, splitWirePathAtSegment, splitWirePath, wireKnotDistances, findNearestWirePoint,
-  pinAbs, wireDelayForLength, rotationCenter,
+  pinAbs, wireDelayForLength, rotationCenter, pinBitWidthAt,
 } = engine;
 
 // A selected wire segment is identified by a composite string distinct from any component id
@@ -1091,6 +1091,12 @@ function Canvas({ circuit, onSelect, selectedId, onOpenRegisters }) {
   const svgRef = useRef(null);
   const [view, setView] = useState({x:0,y:0,zoom:1});
   const [isPanning, setIsPanning] = useState(false);
+  // The wire-value probe bubble — {wireId, point:{x,y}} in world coords,
+  // where `point` is the exact spot on the wire closest to the click (same
+  // nearest-point math onWireSelect already uses to pick a segment).
+  // Cleared on any click that lands off the wire (background or a
+  // component), not just on the wire going away.
+  const [probedWire, setProbedWire] = useState(null);
 
   const panRef  = useRef(null); // {sx,sy,vx,vy}
   const viewRef = useRef(view);
@@ -1141,7 +1147,7 @@ function Canvas({ circuit, onSelect, selectedId, onOpenRegisters }) {
     if(e.button!==0&&e.button!==1)return;
     if(e.target!==svgRef.current&&!e.target.classList?.contains('canvas-bg'))return;
     panRef.current={sx:e.clientX,sy:e.clientY,vx:view.x,vy:view.y};
-    setIsPanning(true); onSelect(null);
+    setIsPanning(true); onSelect(null); setProbedWire(null); cancelHoverProbe();
   };
 
   const onCompSelect=(e,comp)=>{
@@ -1150,17 +1156,51 @@ function Canvas({ circuit, onSelect, selectedId, onOpenRegisters }) {
       onOpenRegisters?.(comp.id);
       return;
     }
-    onSelect(comp.id);
+    onSelect(comp.id); setProbedWire(null); cancelHoverProbe();
   };
   // Selects whichever segment of the wire the click landed nearest to —
   // same segSelId scheme circuit_widget.html's onWireEdgeDown uses, minus
-  // everything about starting a branch/segment drag.
+  // everything about starting a branch/segment drag. Also drops a value
+  // probe at that same nearest point (see probedWire state above).
   const onWireSelect=(e,wire)=>{
     if (e.button!==0) return;
     e.stopPropagation();
+    cancelHoverProbe();
     const w=screenToWorld(e.clientX,e.clientY);
     const nearest=findNearestWirePoint(wire,w.x,w.y,circuit);
     onSelect(segSelId(wire.id, nearest.index));
+    setProbedWire({wireId: wire.id, point: nearest.point, source:'click'});
+  };
+
+  // Hovering a wire for >0.5s shows the same probe, anchored to wherever the
+  // cursor last was on it when the delay elapsed; moving off (mouseleave)
+  // clears it immediately. A click-triggered probe is left alone by any of
+  // this — only a hover-sourced one gets cleared on mouseleave, so it
+  // doesn't fight with the "stays until you click elsewhere" behavior above.
+  const hoverTimerRef = useRef(null);
+  const hoverPosRef = useRef(null); // {wireId, x, y} in world coords, kept fresh by onWireHoverMove
+  const cancelHoverProbe = () => {
+    if (hoverTimerRef.current) { clearTimeout(hoverTimerRef.current); hoverTimerRef.current=null; }
+  };
+  const onWireHoverStart=(e,wire)=>{
+    cancelHoverProbe();
+    const w=screenToWorld(e.clientX,e.clientY);
+    hoverPosRef.current = {wireId: wire.id, x:w.x, y:w.y};
+    hoverTimerRef.current = setTimeout(()=>{
+      const pos = hoverPosRef.current;
+      if (!pos || pos.wireId!==wire.id) return;
+      const nearest=findNearestWirePoint(wire,pos.x,pos.y,circuit);
+      setProbedWire({wireId: wire.id, point: nearest.point, source:'hover'});
+    }, 500);
+  };
+  const onWireHoverMove=(e,wire)=>{
+    if (!hoverTimerRef.current) return; // already fired (or never started) — entry position stands
+    const w=screenToWorld(e.clientX,e.clientY);
+    hoverPosRef.current = {wireId: wire.id, x:w.x, y:w.y};
+  };
+  const onWireHoverEnd=(wire)=>{
+    cancelHoverProbe();
+    setProbedWire(p => (p && p.wireId===wire.id && p.source==='hover') ? null : p);
   };
 
   const components=[...circuit.components.values()];
@@ -1214,6 +1254,32 @@ function Canvas({ circuit, onSelect, selectedId, onOpenRegisters }) {
   const isWireHighAt = (progress, dist) =>
     progress.pending ? (dist<=progress.reachedDist ? progress.pendingValue>0 : progress.value>0)
                       : progress.value>0;
+
+  // A wire itself has no declared width — borrow whichever end is a real
+  // pin (prefer `to`, since every wire in this fixed circuit terminates at
+  // one; `from` covers the rest for generality) via the same pinBitWidthAt
+  // every other width check in the engine uses.
+  const wireBitWidth = (w) => {
+    if (w.to && w.to.compId) {
+      const c = circuit.components.get(w.to.compId);
+      if (c) return pinBitWidthAt(c, 'in', w.to.pin);
+    }
+    if (w.from && w.from.compId) {
+      const c = circuit.components.get(w.from.compId);
+      if (c) return pinBitWidthAt(c, 'out', w.from.pin);
+    }
+    return 1;
+  };
+  // Same width formula buildConstVis (gates module) sizes a CONST's own
+  // rounded-rect readout with, so the probe bubble below matches it exactly.
+  const CONST_CHAR_W = 9, CONST_PAD = 12;
+  const probeBubbleWidth = (bits) => {
+    const digits = Math.max(1, Math.ceil(bits/4));
+    const rawW = Math.max(40, digits*CONST_CHAR_W + CONST_PAD*2);
+    return Math.ceil(rawW/20)*20;
+  };
+
+  const probedWireObj = probedWire && circuit.wires.get(probedWire.wireId);
 
   return <svg ref={svgRef} className="canvas"
        style={{width:'100%',height:'100%',cursor:isPanning?'grabbing':'default',background:'transparent'}}
@@ -1275,10 +1341,13 @@ function Canvas({ circuit, onSelect, selectedId, onOpenRegisters }) {
                     strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round"
                     strokeDasharray={mismatch?'5 4':undefined}
                     style={{transition:'stroke 100ms ease'}}/>}
-          {/* Fat hit target — click to select the nearest segment */}
+          {/* Fat hit target — click to select the nearest segment, hover >1s to probe it */}
           <path d={path} fill="none" stroke="transparent" strokeWidth="16"
                 style={{cursor:'pointer'}}
-                onMouseDown={e=>onWireSelect(e,w)}/>
+                onMouseDown={e=>onWireSelect(e,w)}
+                onMouseEnter={e=>onWireHoverStart(e,w)}
+                onMouseMove={e=>onWireHoverMove(e,w)}
+                onMouseLeave={()=>onWireHoverEnd(w)}/>
           {/* Particles, confined to whichever part of the wire is actually high*/}
           {pending
             ? (w.pendingValue>0
@@ -1344,6 +1413,36 @@ function Canvas({ circuit, onSelect, selectedId, onOpenRegisters }) {
           })}
         </g>;
       })}
+
+      {/* Wire value probe: dropped by onWireSelect, cleared by clicking
+          anything else (background or a component). Reads the wire's
+          value live each frame rather than freezing it at click time, so
+          it stays useful while the simulation keeps running. */}
+      {probedWireObj && (() => {
+        const bits = wireBitWidth(probedWireObj);
+        const digits = Math.max(1, Math.ceil(bits/4));
+        const text = ((probedWireObj.value||0)>>>0).toString(16).toUpperCase().padStart(digits,'0');
+        const w = probeBubbleWidth(bits);
+        const pt = probedWire.point;
+        const anchor = {x: pt.x+GRID*0.5, y: pt.y-GRID*0.5}; // half a grid unit up and right — the rect's (unrounded) bottom-left corner
+        const rectTop = anchor.y - 26;
+        const rectRx = 10;
+        // The line comes in along the same bottom-left-to-top-right diagonal
+        // the rounded corner itself sweeps through, so its far end needs to
+        // land on that arc (at 45° from the corner's own center) rather than
+        // the sharp, invisible corner point the rounding cuts away.
+        const cornerCenter = {x: anchor.x+rectRx, y: anchor.y-rectRx};
+        const cornerCut = rectRx*(1-Math.SQRT1_2);
+        const lineEnd = {x: anchor.x+cornerCut, y: anchor.y-cornerCut};
+        return <g pointerEvents="none">
+          <line x1={pt.x} y1={pt.y} x2={lineEnd.x} y2={lineEnd.y}
+                stroke="var(--ink)" strokeWidth="1.5" opacity="0.45"/>
+          <rect x={anchor.x} y={rectTop} width={w} height="26" rx={rectRx}
+                fill="#f3f3f1" stroke="var(--ink)" strokeWidth="2"/>
+          <text x={anchor.x+w/2} y={rectTop+19} fontFamily="var(--mono)" fontSize="16"
+                fontWeight="600" textAnchor="middle" fill="var(--ink)" opacity="0.8">{text}</text>
+        </g>;
+      })()}
     </g>
   </svg>;
 }
