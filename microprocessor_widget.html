@@ -29,7 +29,7 @@
      the canvas's own height, anchored to .canvas-wrap (which is already
      position:relative in the shared styles.css). */
   .registers-panel {
-    position:absolute; left:0; right:0; bottom:0; height:35%; z-index:4;
+    position:absolute; left:0; right:0; bottom:0; height:40%; z-index:4;
     background:var(--bg); border-top:1px solid var(--border); box-shadow:0 -6px 20px -8px rgba(26,26,24,.14);
     padding:10px 16px; display:flex; flex-direction:column; gap:6px; overflow-y:auto;
   }
@@ -55,7 +55,7 @@
   .registers-grid {
     display:grid; grid-template-columns:repeat(8,max-content); grid-template-rows:repeat(4,auto);
     grid-auto-flow:column; gap:8px 14px; margin:8px auto 0; flex-shrink:0;
-    font-family:var(--mono); font-size:12px;
+    font-family:var(--mono); font-size:12px; letter-spacing:0.05em;
   }
   /* Each register gets its own outlined chip — separates them clearly at a
      glance — with the value pinned to the right edge of the chip so every
@@ -66,6 +66,29 @@
     white-space:nowrap;
   }
   .reg-value { font-weight:600; }
+  .memory-addr-label { font-size:11.5px; color:var(--ink-2); }
+  /* "0x" rendered as a fixed, non-editable part of the field itself (not
+     just a placeholder) — the input holds only the hex digits typed after
+     it, flush against the "0x" span with no visible seam between them. */
+  .memory-addr-field {
+    display:flex; align-items:center; border:1px solid var(--border-md); border-radius:6px;
+    background:var(--bg); padding:4px 8px; font-family:var(--mono); font-size:12px; color:var(--ink-2);
+  }
+  .memory-addr-field input {
+    border:none; outline:none; background:transparent; width:80px; padding:0 0 0 1px;
+    font-family:var(--mono); font-size:12px; text-transform:uppercase; color:var(--ink);
+  }
+  .memory-page-btn {
+    height:26px; width:26px; padding:0; border-radius:6px;
+    display:flex; align-items:center; justify-content:center; font-size:12px; line-height:1;
+  }
+  .memory-page-btn:disabled { opacity:0.35; cursor:default; }
+  .memory-table { border-collapse:collapse; margin:8px auto 0; font-family:var(--mono); font-size:12px; flex-shrink:0; letter-spacing:0.05em; }
+  .memory-table th, .memory-table td { padding:5px 10px; border:1px solid var(--border); white-space:nowrap; }
+  .memory-table th:first-child, .memory-table td:first-child { text-align:right; }
+  .memory-table th:not(:first-child), .memory-table td:not(:first-child) { text-align:left; }
+  .memory-table thead th { background:var(--panel); font-weight:600; }
+  .memory-table tbody th { background:var(--panel); font-weight:600; }
   /* Floating top-right stack of small widget-level controls (clock, reset,
      ...) — same floating-pill treatment the old .fc gate/wire counter
      used, just stacked via a shared positioned wrapper instead of each
@@ -730,6 +753,15 @@ defineModule('gates', ['engine', 'state'], (engine, state) => {
       {pinLabel(20,64,'Address')}
       {pinLabel(20,144,'WriteData')}
       {pinLabel(140,104,'MemData','end')}
+      {/* Opens the live "Memory" panel (see App/MemoryPanel) — bottom-right, mirroring REGISTERS' top-right menu */}
+      <g style={{cursor:'pointer'}}>
+        <rect data-memory-menu="1" x="122" y="164" width="20" height="20" rx="4" fill="var(--bg)" stroke="var(--border-md)" strokeWidth="1"/>
+        <g pointerEvents="none">
+          <circle cx="132" cy="169" r="1.3" fill="var(--ink)" opacity="0.7"/>
+          <circle cx="132" cy="174" r="1.3" fill="var(--ink)" opacity="0.7"/>
+          <circle cx="132" cy="179" r="1.3" fill="var(--ink)" opacity="0.7"/>
+        </g>
+      </g>
     </g>,
   };
   GATE_DEFS.MEMORY = { kind:'MEMORY', label:'MEMORY', inputs:4, outputs:1, family:'blue', alwaysRecompute:true,
@@ -1087,7 +1119,7 @@ const vnow = () => performance.now() - (state.widgetState.pauseOffset||0);
 
 const GRID = 20;
 
-function Canvas({ circuit, onSelect, selectedId, onOpenRegisters }) {
+function Canvas({ circuit, onSelect, selectedId, onOpenRegisters, onOpenMemory }) {
   const svgRef = useRef(null);
   const [view, setView] = useState({x:0,y:0,zoom:1});
   const [isPanning, setIsPanning] = useState(false);
@@ -1154,6 +1186,10 @@ function Canvas({ circuit, onSelect, selectedId, onOpenRegisters }) {
     e.stopPropagation(); if(e.button!==0)return;
     if (e.target.dataset && e.target.dataset.registersMenu!==undefined) {
       onOpenRegisters?.(comp.id);
+      return;
+    }
+    if (e.target.dataset && e.target.dataset.memoryMenu!==undefined) {
+      onOpenMemory?.(comp.id);
       return;
     }
     onSelect(comp.id); setProbedWire(null); cancelHoverProbe();
@@ -1691,6 +1727,13 @@ function App(){
   const [delayMs,setDelayMs] = useState(200);
   const [showSettings,setShowSettings] = useState(false);
   const [registersFor,setRegistersFor] = useState(null); // id of the REGISTERS component whose dialog is open, if any
+  const [memoryFor,setMemoryFor] = useState(null); // id of the MEMORY component whose panel is open, if any
+  const [memoryBaseAddr,setMemoryBaseAddr] = useState(0); // address of the first word shown in the Memory panel's table
+  // Mutually exclusive: opening either panel closes the other, so at most
+  // one is ever up at a time. Both the toolbar buttons and each
+  // component's own 3-dot menu go through these.
+  const toggleRegisters = (id) => { setRegistersFor(prev=>prev===id?null:id); setMemoryFor(null); };
+  const toggleMemory = (id) => { setMemoryFor(prev=>prev===id?null:id); setRegistersFor(null); };
   // Defaults to "component" (flat delay per wire) rather than circuit_widget.html's
   // "length" default — this datapath's wires span up to ~1000px purely as a layout
   // artifact, so length-based delay would make the longest control/data wires take
@@ -1879,8 +1922,12 @@ function App(){
       <span className="tb-title">MIPS Microprocessor Simulator</span>
       <div className="tb-sep"/>
       <button className="btn ghost" style={{height:26,fontSize:12}} onClick={()=>{
+        const m=[...circuit.components.values()].find(c=>c.kind==='MEMORY');
+        if (m) toggleMemory(m.id);
+      }}>Memory</button>
+      <button className="btn ghost" style={{height:26,fontSize:12}} onClick={()=>{
         const r=[...circuit.components.values()].find(c=>c.kind==='REGISTERS');
-        if (r) setRegistersFor(prev=>prev===r.id?null:r.id);
+        if (r) toggleRegisters(r.id);
       }}>Registers</button>
       <button className="btn ghost" style={{height:26,fontSize:12}} onClick={()=>setShowSettings(true)}>Settings</button>
       {/* Master play/pause — freezes the clock and all propagation when paused */}
@@ -1902,7 +1949,8 @@ function App(){
         <Canvas circuit={circuit}
                 selectedId={selectedId}
                 onSelect={setSelectedId}
-                onOpenRegisters={id=>setRegistersFor(prev=>prev===id?null:id)}/>
+                onOpenRegisters={toggleRegisters}
+                onOpenMemory={toggleMemory}/>
         <div className="widget-controls">
           <ClockPanel running={clockRunning} period={clockPeriod}
                       minPeriod={minClockPeriod} maxPeriod={maxClockPeriod}
@@ -1912,6 +1960,9 @@ function App(){
         </div>
         {registersFor && circuit.components.get(registersFor) &&
           <RegistersPanel comp={circuit.components.get(registersFor)} onClose={()=>setRegistersFor(null)}/>}
+        {memoryFor && circuit.components.get(memoryFor) &&
+          <MemoryPanel comp={circuit.components.get(memoryFor)} onClose={()=>setMemoryFor(null)}
+                       baseAddr={memoryBaseAddr} onBaseAddrChange={setMemoryBaseAddr}/>}
       </div>
     </div>
 
@@ -2040,6 +2091,80 @@ function RegistersPanel({ comp, onClose }) {
           </div>;
         })}
       </div>
+    </div>
+  </div>;
+}
+
+// Live view into one MEMORY component's sparse address->word Map — same
+// "re-render every frame off the live mutable component" pattern as
+// RegistersPanel above. Shows a fixed 4-row x 8-column window of 32 words
+// starting at baseAddr (lifted into App so it survives closing/reopening
+// the panel), editable via the address field next to the title.
+function MemoryPanel({ comp, onClose, baseAddr, onBaseAddrChange }) {
+  const [, tick] = useState(0);
+  useEffect(()=>{
+    let r; const l=()=>{tick(n=>n+1); r=requestAnimationFrame(l);};
+    r=requestAnimationFrame(l);
+    return ()=>cancelAnimationFrame(r);
+  }, []);
+  // A separate draft string so typing a new address doesn't jump the table
+  // around mid-keystroke — only committed on Enter/blur.
+  const [addrText, setAddrText] = useState((baseAddr>>>0).toString(16).toUpperCase());
+  const commitAddr = () => {
+    const parsed = parseInt(addrText.replace(/^0x/i,''), 16);
+    const v = (Number.isNaN(parsed) ? 0 : parsed) >>> 0;
+    onBaseAddrChange(v);
+    setAddrText(v.toString(16).toUpperCase());
+  };
+  const mem = (comp.state && comp.state.mem) || new Map();
+  const ROWS = 8, COLS = 8, WORD = 4;
+  const PAGE_BYTES = ROWS*COLS*WORD; // 64 words per page
+  const stepPage = (dir) => {
+    const next = Math.max(0, Math.min(0xFFFFFFFF, baseAddr + dir*PAGE_BYTES)) >>> 0;
+    onBaseAddrChange(next);
+    setAddrText(next.toString(16).toUpperCase());
+  };
+  return <div className="registers-panel">
+    <button className="btn ghost registers-close" onClick={onClose} title="Close">✕</button>
+    <div className="registers-panel-header">
+      <span className="registers-panel-title">Memory</span>
+      <span className="memory-addr-label">Address:</span>
+      <div className="memory-addr-field">
+        <span>0x</span>
+        <input value={addrText}
+               onChange={e=>setAddrText(e.target.value.replace(/^0x/i,''))}
+               onBlur={commitAddr}
+               onKeyDown={e=>e.key==='Enter'&&commitAddr()}
+               placeholder="0"/>
+      </div>
+      <button className="btn ghost memory-page-btn" onClick={()=>stepPage(-1)}
+              disabled={baseAddr===0} title="Previous 64 words">↑</button>
+      <button className="btn ghost memory-page-btn" onClick={()=>stepPage(1)}
+              title="Next 64 words">↓</button>
+    </div>
+    <div className="registers-scroll">
+      <table className="memory-table">
+        <thead>
+          <tr>
+            <th>Address</th>
+            {Array.from({length:COLS},(_,c)=>
+              <th key={c}>{`+0x${(c*WORD).toString(16).toUpperCase()}`}</th>)}
+          </tr>
+        </thead>
+        <tbody>
+          {Array.from({length:ROWS},(_,r)=>{
+            const rowAddr = (baseAddr + r*COLS*WORD) >>> 0;
+            return <tr key={r}>
+              <th>{'0x'+rowAddr.toString(16).toUpperCase().padStart(8,'0')}</th>
+              {Array.from({length:COLS},(_,c)=>{
+                const addr = (rowAddr + c*WORD) >>> 0;
+                const v = mem.get(addr) || 0;
+                return <td key={c}>{'0x'+(v>>>0).toString(16).toUpperCase().padStart(8,'0')}</td>;
+              })}
+            </tr>;
+          })}
+        </tbody>
+      </table>
     </div>
   </div>;
 }
