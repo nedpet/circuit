@@ -1169,7 +1169,7 @@ function Canvas({ circuit, onSelect, selectedId, onOpenRegisters }) {
     const w=screenToWorld(e.clientX,e.clientY);
     const nearest=findNearestWirePoint(wire,w.x,w.y,circuit);
     onSelect(segSelId(wire.id, nearest.index));
-    setProbedWire({wireId: wire.id, point: nearest.point, source:'click'});
+    setProbedWire({wireId: wire.id, point: nearest.point, segIndex: nearest.index, source:'click'});
   };
 
   // Hovering a wire for >0.5s shows the same probe, anchored to wherever the
@@ -1190,13 +1190,21 @@ function Canvas({ circuit, onSelect, selectedId, onOpenRegisters }) {
       const pos = hoverPosRef.current;
       if (!pos || pos.wireId!==wire.id) return;
       const nearest=findNearestWirePoint(wire,pos.x,pos.y,circuit);
-      setProbedWire({wireId: wire.id, point: nearest.point, source:'hover'});
+      setProbedWire({wireId: wire.id, point: nearest.point, segIndex: nearest.index, source:'hover'});
     }, 500);
   };
   const onWireHoverMove=(e,wire)=>{
-    if (!hoverTimerRef.current) return; // already fired (or never started) — entry position stands
     const w=screenToWorld(e.clientX,e.clientY);
     hoverPosRef.current = {wireId: wire.id, x:w.x, y:w.y};
+    // A probe already showing for THIS wire — whether it got there by
+    // click or by hover — follows the cursor live, so moving to a
+    // different part of the same wire immediately reflects whatever value
+    // is at the new spot instead of freezing at wherever it first appeared.
+    setProbedWire(p => {
+      if (!p || p.wireId!==wire.id) return p;
+      const nearest=findNearestWirePoint(wire,w.x,w.y,circuit);
+      return {...p, point: nearest.point, segIndex: nearest.index};
+    });
   };
   const onWireHoverEnd=(wire)=>{
     cancelHoverProbe();
@@ -1438,11 +1446,24 @@ function Canvas({ circuit, onSelect, selectedId, onOpenRegisters }) {
       {/* Wire value probe: dropped by onWireSelect, cleared by clicking
           anything else (background or a component). Reads the wire's
           value live each frame rather than freezing it at click time, so
-          it stays useful while the simulation keeps running. */}
+          it stays useful while the simulation keeps running. While a
+          signal is still in flight, the wire itself visibly shows the OLD
+          value behind the moving point and the NEW one ahead of it (same
+          split this component's main wire-rendering pass above colors) —
+          so the probe has to match whichever side of that point it was
+          dropped on, not just report the wire's final settled value. */}
       {probedWireObj && (() => {
         const bits = wireBitWidth(probedWireObj);
         const mode = state.widgetState.probeMode || 'hex';
-        const text = formatProbeValue(probedWireObj.value, bits, mode);
+        const progress = wireProgress.get(probedWire.wireId);
+        const a = terminalCoords(probedWireObj.from,circuit), b = terminalCoords(probedWireObj.to,circuit);
+        const knots = wireKnots(a.x,a.y,b.x,b.y,probedWireObj.points||[]);
+        const knotA = knots[probedWire.segIndex] || knots[0];
+        const pointDist = progress.distances[probedWire.segIndex] + Math.hypot(probedWire.point.x-knotA.x, probedWire.point.y-knotA.y);
+        const valueAtPoint = progress.pending
+          ? (pointDist<=progress.reachedDist ? progress.pendingValue : progress.value)
+          : progress.value;
+        const text = formatProbeValue(valueAtPoint, bits, mode);
         const w = probeBubbleWidth(bits, mode);
         const pt = probedWire.point;
         const anchor = {x: pt.x+GRID*0.5, y: pt.y-GRID*0.5}; // half a grid unit up and right — the rect's (unrounded) bottom-left corner
