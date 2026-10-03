@@ -1646,6 +1646,25 @@ function App(){
         const gc = state.widgetState.globalClock;
         if (!gc.paused && now-gc.lastTick >= gc.period/2) { gc.value = gc.value?0:1; gc.lastTick = now; }
         circuit.step(now,delayMs);
+        // Auto-pause the clock once CONTROL is back at fetch (step 0) with
+        // PC pointing past the end of whatever's been loaded into MEMORY —
+        // past that point it's just fetching zeroed, never-written words,
+        // which decode as harmless R-type $zero <- $zero no-ops rather than
+        // anything meaningful, so running on is never useful. Gating on
+        // CONTROL's OWN step (not just PC) matters: PC already reaches the
+        // boundary the instant the last real instruction's fetch computes
+        // PC+4, several states before that instruction's own decode/
+        // execute/writeback actually finish — pausing on PC alone would cut
+        // the last instruction off mid-execution. nextInstrAddr is only set
+        // once something's been submitted (see handleMipsSubmit), so this
+        // is a no-op before that.
+        if (!gc.paused && state.widgetState.nextInstrAddr) {
+          const ctrlComp = [...circuit.components.values()].find(c => c.kind === 'CONTROL');
+          const pcComp = [...circuit.components.values()].find(c => c.label === 'PC');
+          if (ctrlComp && ctrlComp.state.step === 0 && pcComp && (pcComp.state.q>>>0) >= state.widgetState.nextInstrAddr) {
+            setClockRunning(false);
+          }
+        }
       }
       r=requestAnimationFrame(l);
     };
