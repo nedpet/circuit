@@ -29,7 +29,7 @@
      the canvas's own height, anchored to .canvas-wrap (which is already
      position:relative in the shared styles.css). */
   .registers-panel {
-    position:absolute; left:0; right:0; bottom:0; height:30%; z-index:4;
+    position:absolute; left:0; right:0; bottom:0; height:35%; z-index:4;
     background:var(--bg); border-top:1px solid var(--border); box-shadow:0 -6px 20px -8px rgba(26,26,24,.14);
     padding:10px 16px; display:flex; flex-direction:column; gap:6px; overflow-y:auto;
   }
@@ -61,7 +61,7 @@
      glance — with the value pinned to the right edge of the chip so every
      value in a column lines up regardless of the name/number's width. */
   .reg-entry {
-    display:flex; justify-content:space-between; align-items:baseline; gap:12px;
+    display:flex; flex-direction:column; gap:2px;
     padding:5px 10px; border-radius:6px; background:var(--panel); border:1px solid var(--border);
     white-space:nowrap;
   }
@@ -637,18 +637,30 @@ defineModule('gates', ['engine', 'state'], (engine, state) => {
       </g>
     </g>,
   };
-  GATE_DEFS.REGISTERS = { kind:'REGISTERS', label:'REGISTERS', inputs:5, outputs:2, family:'blue',
+  GATE_DEFS.REGISTERS = { kind:'REGISTERS', label:'REGISTERS', inputs:5, outputs:2, family:'blue', alwaysRecompute:true,
     inWidths:[5,5,5,32,1], outWidths:[32,32],
-    // No CLK pin in this design, so this is level-sensitive: it writes
-    // whenever compute() runs (an input changed) with RegWrite high,
-    // rather than on a clock edge like REG/DFF elsewhere in this file.
+    // Edge-triggered (same implicit-clock pattern as REG/CONTROL below), NOT
+    // level-sensitive — writes exactly once per rising edge, using whatever
+    // WriteReg/WriteData/RegWrite have had the whole preceding period to
+    // settle to. A level-sensitive version (writing on every tick RegWrite
+    // is high) has a real hazard here: RegWrite is 1 wire-hop from CONTROL
+    // so it arrives well before WriteReg (3 hops, through the RegDst mux)
+    // finishes settling after an R-type instruction's step6->7 transition
+    // (RegDst going 0->1 at that same edge) — so for several ticks,
+    // RegWrite=1 while WriteReg still shows the stale rt selection, and that
+    // transient gets latched into the WRONG register permanently (unlike a
+    // single-destination register, a bad address here corrupts a register
+    // the rest of the program never touches again, so it never self-heals).
     // $0 is hardwired to 0, as in real MIPS.
-    compute:([readReg1,readReg2,writeReg,writeData,regWrite], state) => {
-      if (!state.regs) state.regs = new Array(32).fill(0);
+    compute:([readReg1,readReg2,writeReg,writeData,regWrite], s) => {
+      const clk = state.widgetState.globalClock.value;
+      const rising = clk && !s.lastClk;
+      s.lastClk = clk;
+      if (!s.regs) s.regs = new Array(32).fill(0);
       const w = writeReg & 31;
-      if (regWrite && w !== 0) state.regs[w] = writeData >>> 0;
-      const r1 = (readReg1 & 31) === 0 ? 0 : (state.regs[readReg1 & 31]||0);
-      const r2 = (readReg2 & 31) === 0 ? 0 : (state.regs[readReg2 & 31]||0);
+      if (rising && regWrite && w !== 0) s.regs[w] = writeData >>> 0;
+      const r1 = (readReg1 & 31) === 0 ? 0 : (s.regs[readReg1 & 31]||0);
+      const r2 = (readReg2 & 31) === 0 ? 0 : (s.regs[readReg2 & 31]||0);
       return [r1, r2];
     } };
 
@@ -673,14 +685,22 @@ defineModule('gates', ['engine', 'state'], (engine, state) => {
       {pinLabel(100,184,'0-15','end')}
     </g>,
   };
-  // Latches Instruction into its own state whenever IRWrite is high (same
-  // no-CLK-pin, level-sensitive simplification as REGISTERS), then splits
-  // whatever's currently latched into its MIPS field ranges — so it holds
-  // its old value, rather than re-splitting live, while IRWrite is low.
-  GATE_DEFS.INSTRUCTION = { kind:'INSTRUCTION', label:'INSTRUCTION', inputs:2, outputs:4, family:'red',
+  // Edge-triggered (see REGISTERS/MEMORY above) — latches Instruction once
+  // per rising edge while IRWrite is high, using the fully-settled memory
+  // output from the end of state 0, then splits whatever's currently
+  // latched into its MIPS field ranges — so it holds its old value, rather
+  // than re-splitting live, the rest of the time. (Unlike REGISTERS/MEMORY
+  // this one was never actually unsafe level-sensitive — s.instr is a single
+  // fixed destination, so an early transient write just gets overwritten by
+  // a later, correct one before IRWrite goes low again — but edge-triggered
+  // is the more honest model and matches every other stateful kind here.)
+  GATE_DEFS.INSTRUCTION = { kind:'INSTRUCTION', label:'INSTRUCTION', inputs:2, outputs:4, family:'red', alwaysRecompute:true,
     inWidths:[32,1], outWidths:[6,5,5,16],
     compute:([instr,irWrite], s) => {
-      if (irWrite) s.instr = instr>>>0;
+      const clk = state.widgetState.globalClock.value;
+      const rising = clk && !s.lastClk;
+      s.lastClk = clk;
+      if (rising && irWrite) s.instr = instr>>>0;
       const v = s.instr||0;
       // Published for ALU's compute() to read implicitly (see GATE_DEFS.ALU) — funct has no real pin/wire of its own anywhere.
       state.widgetState.currentFunct = v & 0x3F;
@@ -712,14 +732,23 @@ defineModule('gates', ['engine', 'state'], (engine, state) => {
       {pinLabel(140,104,'MemData','end')}
     </g>,
   };
-  GATE_DEFS.MEMORY = { kind:'MEMORY', label:'MEMORY', inputs:4, outputs:1, family:'blue',
+  GATE_DEFS.MEMORY = { kind:'MEMORY', label:'MEMORY', inputs:4, outputs:1, family:'blue', alwaysRecompute:true,
     inWidths:[1,1,32,32], outWidths:[32],
+    // Edge-triggered writes, for the same reason as REGISTERS above: sw's
+    // MemWrite (1 hop) settles before Address (routed through the IorD mux,
+    // which ALSO flips from PC to ALUOut at this same step2->5 transition)
+    // finishes settling — a level-sensitive write would briefly target the
+    // stale (PC) address with garbage data. Reads stay combinational/
+    // continuous (fetch needs MemData live throughout all of state 0).
     // Sparse map keyed by address — reads of an address never written
     // default to 0. MemData reads 0 whenever MemRead is off.
-    compute:([memRead,memWrite,address,writeData], state) => {
-      if (!state.mem) state.mem = new Map();
-      if (memWrite) state.mem.set(address>>>0, writeData>>>0);
-      return [memRead ? (state.mem.get(address>>>0)||0) : 0];
+    compute:([memRead,memWrite,address,writeData], s) => {
+      const clk = state.widgetState.globalClock.value;
+      const rising = clk && !s.lastClk;
+      s.lastClk = clk;
+      if (!s.mem) s.mem = new Map();
+      if (rising && memWrite) s.mem.set(address>>>0, writeData>>>0);
+      return [memRead ? (s.mem.get(address>>>0)||0) : 0];
     } };
 
   VIS.CONTROL = { w:200, h:160,
@@ -792,7 +821,13 @@ defineModule('gates', ['engine', 'state'], (engine, state) => {
   // Output order: PCWriteCond,PCWrite,IorD,MemRead,MemWrite,MemReg,
   // IRWrite, PCSource,ALUOp,ALUSrcB,ALUSrcA,RegWrite,RegDst — indices
   // 0-12, matching VIS.CONTROL's outputs array exactly.
-  GATE_DEFS.CONTROL = { kind:'CONTROL', label:'CONTROL', inputs:1, outputs:13, family:'green',
+  GATE_DEFS.CONTROL = { kind:'CONTROL', label:'CONTROL', inputs:1, outputs:13, family:'green', alwaysRecompute:true,
+    // Without alwaysRecompute, step()'s dirty-check skips compute() whenever
+    // Opcode hasn't changed since the last tick — which is most of the time,
+    // since Opcode is only ever latched once per instruction (at fetch) and
+    // stays constant through all its other states. That silently stopped
+    // the rising-edge check (and s.step) from ever running again after the
+    // first tick, freezing the whole FSM in whatever state it first reached.
     inWidths:[6], outWidths:[1,1,1,1,1,1,1, 2,3,2,1,1,1],
     compute:([opcode], s) => {
       const clk = state.widgetState.globalClock.value;
@@ -804,22 +839,26 @@ defineModule('gates', ['engine', 'state'], (engine, state) => {
           case 0: s.step = 1; break;                                     // fetch -> decode
           case 1:                                                        // decode -> dispatch by opcode
             if (opcode===0x00) s.step = 6;                                 // R-type
-            else if (opcode===0x23 || opcode===0x2B) s.step = 2;           // lw / sw
+            else if (opcode===0x23 || opcode===0x2B || opcode===0x08) s.step = 2; // lw / sw / addi
             else if (opcode===0x04) s.step = 8;                            // beq
             else if (opcode===0x02) s.step = 9;                            // j
             else s.step = 0;                                               // unrecognized -> refetch
             break;
-          case 2: s.step = (opcode===0x23) ? 3 : 5; break;                // mem address -> lw read or sw write
+          case 2:                                                        // mem/imm address -> lw read, sw write, or addi writeback
+            if (opcode===0x23) s.step = 3;
+            else if (opcode===0x2B) s.step = 5;
+            else s.step = 10;
+            break;
           case 3: s.step = 4; break;                                      // mem read -> lw writeback
           case 6: s.step = 7; break;                                      // R-type execute -> writeback
-          default: s.step = 0;                                           // 4,5,7,8,9 all return to fetch
+          default: s.step = 0;                                           // 4,5,7,8,9,10 all return to fetch
         }
       }
       const o = [0,0,0,0,0,0,0, 0,0,0,0,0,0];
       switch (s.step) {
         case 0: o[3]=1; o[6]=1; o[9]=1; o[1]=1; break;   // fetch: MemRead, IRWrite, ALUSrcB=01(4), PCWrite
         case 1: o[9]=3; break;                           // decode: ALUSrcB=11(imm<<2) -> precompute branch target into ALUOut
-        case 2: o[10]=1; o[9]=2; break;                  // mem address: ALUSrcA=reg, ALUSrcB=10(imm) -> ALUOut=rs+imm
+        case 2: o[10]=1; o[9]=2; break;                  // mem/imm address: ALUSrcA=reg, ALUSrcB=10(imm) -> ALUOut=rs+imm
         case 3: o[3]=1; o[2]=1; break;                   // mem read: MemRead, IorD=ALUOut
         case 4: o[5]=1; o[11]=1; break;                  // lw writeback: MemReg=MDR, RegWrite (RegDst=rt, default 0)
         case 5: o[4]=1; o[2]=1; break;                   // mem write: MemWrite, IorD=ALUOut
@@ -827,6 +866,7 @@ defineModule('gates', ['engine', 'state'], (engine, state) => {
         case 7: o[11]=1; o[12]=1; break;                 // R-type writeback: RegWrite, RegDst=rd (MemReg=ALUOut, default 0)
         case 8: o[10]=1; o[8]=1; o[0]=1; o[7]=1; break;  // branch complete: ALUSrcA=reg, ALUOp=01(sub), PCWriteCond, PCSource=01(ALUOut)
         case 9: o[1]=1; o[7]=2; break;                   // jump complete: PCWrite, PCSource=10(jump target)
+        case 10: o[11]=1; break;                         // addi writeback: RegWrite (RegDst=rt, MemReg=ALUOut, both default 0)
       }
       return o;
     } };
@@ -1426,6 +1466,75 @@ const{MipsInput}=mipsInput;
 // replace this whenever the datapath changes — see circuit_widget.html's
 // own gates module for the matching ALU/REGISTERS/INSTRUCTION/MEMORY/
 // CONTROL definitions, which must stay in sync with this file's copy.
+// Minimal MIPS assembler covering the subset the datapath above actually
+// implements: R-type add/sub/and/or/slt (ALU funct codes in GATE_DEFS.ALU),
+// lw/sw, addi, beq, and j. No labels/symbols — beq/j take a literal numeric
+// offset/target, since there's nowhere else in this widget to resolve one.
+const MIPS_FUNCT = { add:0x20, sub:0x22, and:0x24, or:0x25, slt:0x2A };
+const MIPS_OPCODE = { lw:0x23, sw:0x2B, beq:0x04, j:0x02, addi:0x08 };
+let _regNameToNum = null;
+function mipsRegNum(tok) {
+  const m = tok.trim().match(/^\$(\w+)$/);
+  if (!m) throw new Error(`bad register '${tok}'`);
+  if (/^\d+$/.test(m[1])) {
+    const n = Number(m[1]);
+    if (n < 0 || n > 31) throw new Error(`register out of range '${tok}'`);
+    return n;
+  }
+  if (!_regNameToNum) {
+    _regNameToNum = {};
+    REG_NAMES.forEach((name, i) => { _regNameToNum[name] = i; });
+  }
+  if (!(m[1] in _regNameToNum)) throw new Error(`unknown register '${tok}'`);
+  return _regNameToNum[m[1]];
+}
+// Assembles one line of MIPS assembly into a 32-bit instruction word, or
+// returns null for a blank/comment-only line. Throws Error with a message
+// describing the problem on anything it can't parse.
+function assembleMipsLine(line) {
+  const clean = line.split('#')[0].trim();
+  if (!clean) return null;
+  const spaceIdx = clean.search(/\s/);
+  const mnemonic = (spaceIdx === -1 ? clean : clean.slice(0, spaceIdx)).toLowerCase();
+  const parts = (spaceIdx === -1 ? '' : clean.slice(spaceIdx + 1))
+    .split(',').map(s => s.trim()).filter(Boolean);
+
+  if (mnemonic in MIPS_FUNCT) {
+    if (parts.length !== 3) throw new Error(`${mnemonic}: expected 3 operands, got ${parts.length}`);
+    const rd = mipsRegNum(parts[0]), rs = mipsRegNum(parts[1]), rt = mipsRegNum(parts[2]);
+    return ((rs<<21)|(rt<<16)|(rd<<11)|MIPS_FUNCT[mnemonic])>>>0;
+  }
+  if (mnemonic === 'lw' || mnemonic === 'sw') {
+    if (parts.length !== 2) throw new Error(`${mnemonic}: expected 2 operands, got ${parts.length}`);
+    const rt = mipsRegNum(parts[0]);
+    const m = parts[1].match(/^(-?\d+)\(\s*(\$\w+)\s*\)$/);
+    if (!m) throw new Error(`${mnemonic}: expected 'offset($reg)', got '${parts[1]}'`);
+    const rs = mipsRegNum(m[2]);
+    return ((MIPS_OPCODE[mnemonic]<<26)|(rs<<21)|(rt<<16)|(Number(m[1])&0xFFFF))>>>0;
+  }
+  if (mnemonic === 'addi') {
+    if (parts.length !== 3) throw new Error(`addi: expected 3 operands, got ${parts.length}`);
+    const rt = mipsRegNum(parts[0]), rs = mipsRegNum(parts[1]);
+    const imm = Number(parts[2]);
+    if (Number.isNaN(imm)) throw new Error(`addi: bad immediate '${parts[2]}'`);
+    return ((MIPS_OPCODE.addi<<26)|(rs<<21)|(rt<<16)|(imm&0xFFFF))>>>0;
+  }
+  if (mnemonic === 'beq') {
+    if (parts.length !== 3) throw new Error(`beq: expected 3 operands, got ${parts.length}`);
+    const rs = mipsRegNum(parts[0]), rt = mipsRegNum(parts[1]);
+    const offset = Number(parts[2]);
+    if (Number.isNaN(offset)) throw new Error(`beq: bad offset '${parts[2]}'`);
+    return ((MIPS_OPCODE.beq<<26)|(rs<<21)|(rt<<16)|(offset&0xFFFF))>>>0;
+  }
+  if (mnemonic === 'j') {
+    if (parts.length !== 1) throw new Error(`j: expected 1 operand, got ${parts.length}`);
+    const target = Number(parts[0]);
+    if (Number.isNaN(target)) throw new Error(`j: bad target '${parts[0]}'`);
+    return ((MIPS_OPCODE.j<<26)|((target>>>2)&0x3FFFFFF))>>>0;
+  }
+  throw new Error(`unknown instruction '${mnemonic}'`);
+}
+
 const MIPS_DATAPATH_DATA = {"components":[{"id":"c1","ioId":"","kind":"CONTROL","x":400,"y":60,"facing":"right","delay":0,"label":"@","state":{}},{"id":"c2","ioId":"","kind":"REGISTERS","x":580,"y":320,"facing":"right","delay":0,"label":"@","state":{}},{"id":"c3","ioId":"","kind":"INSTRUCTION","x":260,"y":260,"facing":"right","delay":0,"label":"@","state":{}},{"id":"c8","ioId":"","kind":"SPLIT","x":400,"y":240,"facing":"up","delay":0,"label":"@","bits":26,"space":1,"splitType":"merge","layout":"custom","pinBits":[16,5,5],"state":{}},{"id":"c12","ioId":"","kind":"MUX","x":480,"y":420,"facing":"right","delay":0,"label":"@","bitWidth":5,"muxInputs":2,"muxSelectLocation":"top","state":{}},{"id":"c15","ioId":"","kind":"SPLIT","x":420,"y":440,"facing":"right","delay":0,"label":"@","bits":16,"space":1,"splitType":"split","layout":"custom","pinBits":[11,5],"state":{}},{"id":"c21","ioId":"","kind":"MUX","x":480,"y":500,"facing":"right","delay":0,"label":"@","bitWidth":32,"muxInputs":2,"muxSelectLocation":"bottom","state":{}},{"id":"c23","ioId":"","kind":"MEMORY","x":40,"y":280,"facing":"right","delay":0,"label":"@","state":{}},{"id":"c25","ioId":"","kind":"REG","x":280,"y":520,"facing":"right","delay":0,"label":"Memory Data","bitWidth":32,"displayMode":"hex","state":{}},{"id":"c32","ioId":"","kind":"MUX","x":-60,"y":300,"facing":"right","delay":0,"label":"@","bitWidth":32,"muxInputs":2,"muxSelectLocation":"top","state":{}},{"id":"c35","ioId":"","kind":"REG","x":-180,"y":280,"facing":"right","delay":0,"label":"PC","bitWidth":32,"displayMode":"hex","state":{}},{"id":"c38","ioId":"","kind":"MUX","x":820,"y":340,"facing":"right","delay":0,"label":"@","bitWidth":32,"muxInputs":2,"muxSelectLocation":"top","state":{}},{"id":"c39","ioId":"","kind":"MUX","x":820,"y":440,"facing":"right","delay":0,"label":"@","bitWidth":32,"muxInputs":4,"muxSelectLocation":"top","state":{}},{"id":"c44","ioId":"","kind":"CONST","x":800,"y":640,"facing":"left","delay":0,"label":"@","bitWidth":32,"displayMode":"hex","state":{"value":4}},{"id":"c46","ioId":"","kind":"EXTND","x":540,"y":580,"facing":"right","delay":0,"label":"@","bitWidthIn":16,"bitWidthOut":32,"state":{}},{"id":"c47","ioId":"","kind":"SHFT","x":680,"y":600,"facing":"right","delay":0,"label":"@","bitWidth":32,"shiftMode":"left","state":{}},{"id":"c52","ioId":"","kind":"CONST","x":620,"y":640,"facing":"right","delay":0,"label":"@","bitWidth":5,"displayMode":"hex","state":{"value":2}},{"id":"c60","ioId":"","kind":"ALU","x":920,"y":340,"facing":"right","delay":0,"label":"@","state":{}},{"id":"c69","ioId":"","kind":"MUX","x":1260,"y":160,"facing":"right","delay":0,"label":"@","bitWidth":32,"muxInputs":3,"muxSelectLocation":"top","state":{}},{"id":"c73","ioId":"","kind":"SHFT","x":900,"y":240,"facing":"right","delay":0,"label":"@","bitWidth":26,"shiftMode":"left","state":{}},{"id":"c74","ioId":"","kind":"CONST","x":720,"y":280,"facing":"right","delay":0,"label":"@","bitWidth":5,"displayMode":"hex","state":{"value":2}},{"id":"c78","ioId":"","kind":"SPLIT","x":1120,"y":260,"facing":"right","delay":0,"label":"@","bits":32,"space":1,"splitType":"merge","layout":"custom","pinBits":[28,4],"state":{}},{"id":"c79","ioId":"","kind":"EXTND","x":1020,"y":240,"facing":"right","delay":0,"label":"@","bitWidthIn":26,"bitWidthOut":28,"state":{}},{"id":"c85","ioId":"","kind":"SPLIT","x":1020,"y":320,"facing":"right","delay":0,"label":"@","bits":32,"space":1,"splitType":"split","layout":"custom","pinBits":[28,4],"state":{}},{"id":"c95","ioId":"","kind":"OR","x":200,"y":40,"facing":"left","delay":0,"label":"@","bitWidth":1,"state":{}},{"id":"c98","ioId":"","kind":"AND","x":300,"y":20,"facing":"left","delay":0,"label":"@","bitWidth":1,"state":{}},{"id":"c125","ioId":"","kind":"CONST","x":240,"y":560,"facing":"right","delay":0,"label":"@","bitWidth":1,"displayMode":"bin","state":{"value":1}},{"id":"c127","ioId":"","kind":"REG","x":1120,"y":420,"facing":"right","delay":0,"label":"ALUOut","bitWidth":32,"displayMode":"hex","state":{}},{"id":"c128","ioId":"","kind":"CONST","x":1080,"y":460,"facing":"right","delay":0,"label":"@","bitWidth":1,"displayMode":"bin","state":{"value":1}}],"wires":[{"id":"w5","from":{"compId":"c3","pin":1,"type":"out"},"to":{"compId":"c2","pin":0,"type":"in"},"points":[{"x":440,"y":360}]},{"id":"w6","from":{"compId":"c3","pin":2,"type":"out"},"to":{"compId":"c2","pin":1,"type":"in"},"points":[{"x":420,"y":400},{"x":480,"y":400}]},{"id":"w7","from":{"compId":"c3","pin":0,"type":"out"},"to":{"compId":"c1","pin":0,"type":"in"},"points":[{"x":500,"y":320}]},{"id":"w9","from":{"x":440,"y":360},"to":{"compId":"c8","pin":2,"type":"in"},"points":[]},{"id":"w10","from":{"x":420,"y":400},"to":{"compId":"c8","pin":1,"type":"in"},"points":[]},{"id":"w11","from":{"compId":"c3","pin":3,"type":"out"},"to":{"compId":"c8","pin":0,"type":"in"},"points":[{"x":400,"y":440}]},{"id":"w13","from":{"compId":"c12","pin":0,"type":"out"},"to":{"compId":"c2","pin":2,"type":"in"},"points":[{"x":560,"y":440}]},{"id":"w16","from":{"compId":"c15","pin":1,"type":"out"},"to":{"compId":"c12","pin":1,"type":"in"},"points":[]},{"id":"w17","from":{"x":400,"y":440},"to":{"compId":"c15","pin":0,"type":"in"},"points":[]},{"id":"w18","from":{"x":480,"y":400},"to":{"compId":"c12","pin":0,"type":"in"},"points":[]},{"id":"w19","from":{"compId":"c1","pin":12,"type":"out"},"to":{"compId":"c12","pin":2,"type":"in"},"points":[{"x":600,"y":320},{"x":520,"y":320}]},{"id":"w20","from":{"compId":"c1","pin":6,"type":"out"},"to":{"compId":"c3","pin":1,"type":"in"},"points":[{"x":320,"y":200},{"x":320,"y":260}]},{"id":"w22","from":{"compId":"c21","pin":0,"type":"out"},"to":{"compId":"c2","pin":3,"type":"in"},"points":[{"x":580,"y":540}]},{"id":"w24","from":{"compId":"c23","pin":0,"type":"out"},"to":{"compId":"c3","pin":0,"type":"in"},"points":[{"x":240,"y":380}]},{"id":"w26","from":{"x":240,"y":380},"to":{"compId":"c25","pin":0,"type":"in"},"points":[{"x":240,"y":540}]},{"id":"w27","from":{"compId":"c25","pin":0,"type":"out"},"to":{"compId":"c21","pin":1,"type":"in"},"points":[]},{"id":"w28","from":{"compId":"c1","pin":4,"type":"out"},"to":{"compId":"c23","pin":1,"type":"in"},"points":[{"x":160,"y":160}]},{"id":"w29","from":{"compId":"c1","pin":3,"type":"out"},"to":{"compId":"c23","pin":0,"type":"in"},"points":[{"x":80,"y":140}]},{"id":"w31","from":{"compId":"c1","pin":2,"type":"out"},"to":{"compId":"c32","pin":2,"type":"in"},"points":[{"x":-20,"y":120}]},{"id":"w33","from":{"compId":"c32","pin":0,"type":"out"},"to":{"compId":"c23","pin":2,"type":"in"},"points":[]},{"id":"w36","from":{"compId":"c35","pin":0,"type":"out"},"to":{"compId":"c32","pin":0,"type":"in"},"points":[{"x":-80,"y":320}]},{"id":"w37","from":{"compId":"c1","pin":11,"type":"out"},"to":{"compId":"c2","pin":4,"type":"in"},"points":[{"x":660,"y":160},{"x":660,"y":320}]},{"id":"w40","from":{"compId":"c1","pin":10,"type":"out"},"to":{"compId":"c38","pin":2,"type":"in"},"points":[{"x":860,"y":140},{"x":860,"y":340}]},{"id":"w41","from":{"compId":"c2","pin":0,"type":"out"},"to":{"compId":"c38","pin":1,"type":"in"},"points":[{"x":740,"y":400}]},{"id":"w42","from":{"compId":"c2","pin":1,"type":"out"},"to":{"compId":"c39","pin":0,"type":"in"},"points":[{"x":780,"y":460}]},{"id":"w43","from":{"compId":"c1","pin":9,"type":"out"},"to":{"compId":"c39","pin":4,"type":"in"},"points":[{"x":800,"y":120},{"x":800,"y":440}]},{"id":"w45","from":{"compId":"c44","pin":0,"type":"out"},"to":{"compId":"c39","pin":1,"type":"in"},"points":[{"x":800,"y":500}]},{"id":"w48","from":{"compId":"c46","pin":0,"type":"out"},"to":{"compId":"c47","pin":0,"type":"in"},"points":[{"x":640,"y":620}]},{"id":"w51","from":{"x":400,"y":440},"to":{"compId":"c46","pin":0,"type":"in"},"points":[{"x":400,"y":620}]},{"id":"w58","from":{"x":640,"y":620},"to":{"compId":"c39","pin":2,"type":"in"},"points":[{"x":640,"y":540}]},{"id":"w59","from":{"compId":"c47","pin":0,"type":"out"},"to":{"compId":"c39","pin":3,"type":"in"},"points":[{"x":760,"y":580}]},{"id":"w63","from":{"compId":"c38","pin":0,"type":"out"},"to":{"compId":"c60","pin":0,"type":"in"},"points":[]},{"id":"w66","from":{"compId":"c1","pin":8,"type":"out"},"to":{"compId":"c60","pin":2,"type":"in"},"points":[{"x":1220,"y":100},{"x":1220,"y":540},{"x":1000,"y":540},{"x":1000,"y":520}]},{"id":"w67","from":{"compId":"c52","pin":0,"type":"out"},"to":{"compId":"c47","pin":1,"type":"in"},"points":[]},{"id":"w68","from":{"x":780,"y":460},"to":{"compId":"c23","pin":3,"type":"in"},"points":[{"x":780,"y":700},{"x":40,"y":700}]},{"id":"w72","from":{"compId":"c8","pin":0,"type":"out"},"to":{"compId":"c73","pin":0,"type":"in"},"points":[]},{"id":"w75","from":{"compId":"c74","pin":0,"type":"out"},"to":{"compId":"c73","pin":1,"type":"in"},"points":[]},{"id":"w76","from":{"x":-80,"y":320},"to":{"compId":"c38","pin":0,"type":"in"},"points":[{"x":-80,"y":240},{"x":820,"y":240},{"x":820,"y":320}]},{"id":"w80","from":{"compId":"c73","pin":0,"type":"out"},"to":{"compId":"c79","pin":0,"type":"in"},"points":[]},{"id":"w81","from":{"compId":"c79","pin":0,"type":"out"},"to":{"compId":"c78","pin":0,"type":"in"},"points":[]},{"id":"w82","from":{"compId":"c78","pin":0,"type":"out"},"to":{"compId":"c69","pin":2,"type":"in"},"points":[]},{"id":"w87","from":{"compId":"c85","pin":1,"type":"out"},"to":{"compId":"c78","pin":1,"type":"in"},"points":[{"x":1120,"y":360}]},{"id":"w90","from":{"compId":"c1","pin":7,"type":"out"},"to":{"compId":"c69","pin":3,"type":"in"},"points":[{"x":1300,"y":80}]},{"id":"w96","from":{"compId":"c1","pin":1,"type":"out"},"to":{"compId":"c95","pin":1,"type":"in"},"points":[]},{"id":"w99","from":{"compId":"c1","pin":0,"type":"out"},"to":{"compId":"c98","pin":1,"type":"in"},"points":[]},{"id":"w100","from":{"compId":"c98","pin":0,"type":"out"},"to":{"compId":"c95","pin":0,"type":"in"},"points":[]},{"id":"w101","from":{"compId":"c60","pin":1,"type":"out"},"to":{"compId":"c98","pin":0,"type":"in"},"points":[{"x":1000,"y":360},{"x":1000,"y":40}]},{"id":"w105","from":{"compId":"c95","pin":0,"type":"out"},"to":{"compId":"c35","pin":1,"type":"in"},"points":[{"x":-200,"y":80},{"x":-200,"y":340}]},{"id":"w106","from":{"compId":"c69","pin":0,"type":"out"},"to":{"compId":"c35","pin":0,"type":"in"},"points":[{"x":1340,"y":20},{"x":-180,"y":20}]},{"id":"w107","from":{"compId":"c1","pin":5,"type":"out"},"to":{"compId":"c21","pin":2,"type":"in"},"points":[{"x":220,"y":180},{"x":220,"y":640},{"x":520,"y":640}]},{"id":"w112","from":{"compId":"c39","pin":0,"type":"out"},"to":{"compId":"c60","pin":1,"type":"in"},"points":[{"x":900,"y":500}]},{"id":"w117","from":{"x":820,"y":320},"to":{"compId":"c85","pin":0,"type":"in"},"points":[]},{"id":"w120","from":{"x":1100,"y":440},"to":{"compId":"c69","pin":0,"type":"in"},"points":[{"x":1100,"y":380},{"x":1200,"y":380},{"x":1200,"y":180}]},{"id":"w131","from":{"compId":"c127","pin":0,"type":"out"},"to":{"compId":"c69","pin":1,"type":"in"},"points":[{"x":1240,"y":460},{"x":1240,"y":220}]},{"id":"w123","from":{"x":1240,"y":460},"to":{"compId":"c32","pin":1,"type":"in"},"points":[{"x":1240,"y":720},{"x":460,"y":720},{"x":-60,"y":720}]},{"id":"w124","from":{"x":460,"y":720},"to":{"compId":"c21","pin":0,"type":"in"},"points":[{"x":460,"y":520}]},{"id":"w126","from":{"compId":"c125","pin":0,"type":"out"},"to":{"compId":"c25","pin":1,"type":"in"},"points":[]},{"id":"w129","from":{"compId":"c60","pin":0,"type":"out"},"to":{"compId":"c127","pin":0,"type":"in"},"points":[{"x":1100,"y":440}]},{"id":"w130","from":{"compId":"c128","pin":0,"type":"out"},"to":{"compId":"c127","pin":1,"type":"in"},"points":[]}],"junctions":[{"x":440,"y":360,"sourceWireId":"w5"},{"x":420,"y":400,"sourceWireId":"w6"},{"x":400,"y":440,"sourceWireId":"w11"},{"x":480,"y":400,"sourceWireId":"w6"},{"x":600,"y":320,"sourceWireId":"w19"},{"x":520,"y":320,"sourceWireId":"w19"},{"x":240,"y":380,"sourceWireId":"w24"},{"x":220,"y":120,"sourceWireId":"w31"},{"x":-20,"y":120,"sourceWireId":"w31"},{"x":640,"y":620,"sourceWireId":"w48"},{"x":1220,"y":540,"sourceWireId":"w66"},{"x":780,"y":460,"sourceWireId":"w42"},{"x":-80,"y":320,"sourceWireId":"w36"},{"x":-200,"y":80,"sourceWireId":"w105"},{"x":-200,"y":340,"sourceWireId":"w105"},{"x":-180,"y":20,"sourceWireId":"w106"},{"x":220,"y":180,"sourceWireId":"w107"},{"x":220,"y":640,"sourceWireId":"w107"},{"x":520,"y":640,"sourceWireId":"w107"},{"x":820,"y":240,"sourceWireId":"w76"},{"x":800,"y":440,"sourceWireId":"w43"},{"x":820,"y":320,"sourceWireId":"w76"},{"x":1100,"y":440,"sourceWireId":"w129"},{"x":1240,"y":460,"sourceWireId":"w131"},{"x":1260,"y":360,"sourceWireId":"w87"},{"x":-60,"y":720,"sourceWireId":"w123"},{"x":460,"y":720,"sourceWireId":"w123"}],"nextId":132,"nextIoId":2};
 
 function App(){
@@ -1441,13 +1550,58 @@ function App(){
   const [delayMs,setDelayMs] = useState(200);
   const [showSettings,setShowSettings] = useState(false);
   const [registersFor,setRegistersFor] = useState(null); // id of the REGISTERS component whose dialog is open, if any
-  const [propagationMode,setPropagationMode] = useState("length");
+  // Defaults to "component" (flat delay per wire) rather than circuit_widget.html's
+  // "length" default — this datapath's wires span up to ~1000px purely as a layout
+  // artifact, so length-based delay would make the longest control/data wires take
+  // far longer to settle than one clock half-period, breaking the FSM.
+  const [propagationMode,setPropagationMode] = useState("component");
   // "continuous": wires light up as the pulse passes; "discrete": segments
   // only light up once fully crossed
   const [propagationStyle,setPropagationStyle] = useState("continuous");
   const [clockRunning,setClockRunning] = useState(false);
   const [clockPeriod,setClockPeriod] = useState(100); // ms per full cycle
   const [simPaused,setSimPaused] = useState(false); // master pause — freezes the clock AND all propagation
+
+  // The longest combinational chain in this datapath, from any settled
+  // source (a REG/CONTROL/REGISTERS/INSTRUCTION/MEMORY output, or a CONST)
+  // to the farthest sink input that must be settled before a clock edge (a
+  // REG's D/EN, CONTROL's Opcode, or a write port) — conservative: a mux's
+  // output is assumed to depend on every input, not just whichever one a
+  // given state actually selects, since the analysis doesn't track
+  // per-state control signals (a safe over-estimate, never an
+  // under-estimate). Computed once offline by walking circuit.wires/
+  // junctions with per-kind pin-dependency rules (see
+  // scratchpad/critical_path.py from the chat that added this); re-run that
+  // if the datapath wiring ever changes.
+  //
+  // Two different numbers, because the two propagation modes cost hops
+  // differently:
+  // - Component mode: every wire-hop costs exactly one flat `delayMs`,
+  //   regardless of that wire's length, so what matters is the HOP COUNT.
+  //   Worst case is 7 hops, into PC.EN: INSTRUCTION's imm field -> EXTND ->
+  //   SHFT -> the ALUSrcB mux -> ALU.Zero -> AND -> OR -> PC.EN.
+  // - Length mode: each wire's own delay scales with its pixel length
+  //   (delayMs per 80px — see engine-geometry.js's WIRE_REF_LEN), and
+  //   branches DON'T share a budget the way they do in component mode
+  //   (engine-circuit.js's wireOwnDelay returns the full nominal delay for
+  //   every wire when not in component mode) — so what matters is the
+  //   worst case's TOTAL PIXEL LENGTH, not its hop count. Worst case is
+  //   ~4062px, into PC.D (the jump-target/PC+4 path, which includes some
+  //   very long routing runs, e.g. w106 alone spans 1520px).
+  const MAX_COMBINATIONAL_HOPS = 7;
+  const MAX_CRITICAL_PATH_PIXELS = 4062;
+  const WIRE_REF_LEN = 80; // must match engine-geometry.js's own WIRE_REF_LEN
+  const PERIOD_SAFETY_FACTOR = 1.5; // margin over the bare minimum, for requestAnimationFrame timing jitter
+  const PERIOD_STEP = 50;
+  const minClockPeriod = Math.max(PERIOD_STEP, propagationMode === 'length'
+    ? Math.ceil((MAX_CRITICAL_PATH_PIXELS / WIRE_REF_LEN) * PERIOD_SAFETY_FACTOR * delayMs / PERIOD_STEP) * PERIOD_STEP
+    : Math.ceil(MAX_COMBINATIONAL_HOPS * PERIOD_SAFETY_FACTOR * delayMs / PERIOD_STEP) * PERIOD_STEP);
+  const maxClockPeriod = Math.max(3000, minClockPeriod);
+  // If a faster propagation delay makes the current period unsafe, bump it
+  // up rather than silently letting signals get clocked in before settling.
+  useEffect(() => {
+    if (clockPeriod < minClockPeriod) setClockPeriod(minClockPeriod);
+  }, [minClockPeriod, clockPeriod]);
 
   // Pause-offset bookkeeping: resuming shouldn't make everything leap
   // forward by however long the pause lasted. Every sim-time timer in this
@@ -1515,10 +1669,28 @@ function App(){
     return()=>window.removeEventListener('message',handler);
   },[]);
 
-  // TODO: parse and execute the submitted MIPS assembly instruction once
-  // the real datapath circuit (see the createCircuit() comment above) exists.
+  // Assembles every line in the submitted block and appends the resulting
+  // words to MEMORY starting at the next free address (state.widgetState.
+  // nextInstrAddr, persisted across submissions so successive submissions
+  // build up one program rather than overwriting each other). Reset PC to
+  // 0 (via the Reset panel) to (re)run the program from the top.
   const handleMipsSubmit = (instructionText) => {
-    console.log('[microprocessor_widget] submitted instruction (not yet implemented):', instructionText);
+    const memComp = [...circuit.components.values()].find(c => c.kind === 'MEMORY');
+    if (!memComp) return;
+    if (!memComp.state.mem) memComp.state.mem = new Map();
+    if (state.widgetState.nextInstrAddr == null) state.widgetState.nextInstrAddr = 0;
+    try {
+      for (const line of instructionText.split('\n')) {
+        const word = assembleMipsLine(line);
+        if (word == null) continue;
+        memComp.state.mem.set(state.widgetState.nextInstrAddr, word);
+        state.widgetState.nextInstrAddr += 4;
+      }
+    } catch (err) {
+      console.error('[microprocessor_widget] assembly error:', err.message);
+      return;
+    }
+    refresh();
   };
 
   // Resets CPU state back to power-on — PC/ALUOut/MDR (every REG), the
@@ -1528,8 +1700,8 @@ function App(){
     const clk = state.widgetState.globalClock.value;
     for (const c of circuit.components.values()) {
       if (c.kind === 'REG') { c.state.q = 0; c.state.lastClk = clk; }
-      else if (c.kind === 'REGISTERS') { c.state.regs = new Array(32).fill(0); }
-      else if (c.kind === 'INSTRUCTION') { c.state.instr = 0; }
+      else if (c.kind === 'REGISTERS') { c.state.regs = new Array(32).fill(0); c.state.lastClk = clk; }
+      else if (c.kind === 'INSTRUCTION') { c.state.instr = 0; c.state.lastClk = clk; }
       else if (c.kind === 'CONTROL') { c.state.step = 0; c.state.lastClk = clk; }
     }
     refresh();
@@ -1568,6 +1740,7 @@ function App(){
                 onOpenRegisters={id=>setRegistersFor(prev=>prev===id?null:id)}/>
         <div className="widget-controls">
           <ClockPanel running={clockRunning} period={clockPeriod}
+                      minPeriod={minClockPeriod} maxPeriod={maxClockPeriod}
                       onToggle={()=>setClockRunning(r=>!r)}
                       onPeriodChange={setClockPeriod}/>
           <ResetPanel onReset={handleReset}/>
@@ -1612,7 +1785,7 @@ function App(){
 // RegistersPanel use) purely so the LED visibly blinks; the clock itself
 // keeps ticking via App's sim-loop effect regardless of whether this is
 // even mounted.
-function ClockPanel({ running, period, onToggle, onPeriodChange }) {
+function ClockPanel({ running, period, minPeriod, maxPeriod, onToggle, onPeriodChange }) {
   const [, tick] = useState(0);
   useEffect(()=>{
     let r; const l=()=>{tick(n=>n+1); r=requestAnimationFrame(l);};
@@ -1626,7 +1799,8 @@ function ClockPanel({ running, period, onToggle, onPeriodChange }) {
     <button className="btn ghost clock-playpause" onClick={onToggle} title={running?'Pause':'Run'}>
       {running ? '⏸' : '▶'}
     </button>
-    <input type="range" min="100" max="3000" step="50" value={period}
+    <input type="range" min={minPeriod} max={maxPeriod} step="50" value={period}
+           title={`Minimum ${minPeriod}ms — any faster and control/data signals won't settle before the next clock edge at the current Propagation Delay`}
            onChange={e=>onPeriodChange(Number(e.target.value))}/>
     <span className="clock-period-val">{period}ms</span>
   </div>;
