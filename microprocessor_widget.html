@@ -27,6 +27,18 @@
     box-shadow:var(--shadow);
   }
   .mips-multiline { min-height:140px; resize:vertical; font-family:var(--mono); font-size:12px; line-height:1.5; }
+  /* Autocomplete dropdown for the instruction/register entry boxes. Needs
+     its own position:relative anchor since neither .palette nor .pal-group
+     (both in shared styles.css) establish one. */
+  .mips-input-wrap { position:relative; }
+  .mips-suggest {
+    position:absolute; z-index:30; min-width:100%;
+    background:var(--bg); border:1px solid var(--border); border-radius:var(--r);
+    box-shadow:var(--shadow); max-height:160px; overflow-y:auto;
+    font-family:var(--mono); font-size:12px;
+  }
+  .mips-suggest-item { padding:5px 10px; cursor:pointer; white-space:nowrap; }
+  .mips-suggest-item.selected, .mips-suggest-item:hover { background:var(--panel-2); }
   .registers-mode { width:auto; padding:4px 8px; font-size:11px; }
   /* Bottom-docked panel over the canvas (toggled by the Registers button
      / the component's own menu button) instead of a modal — ~1/4-1/3 of
@@ -1582,15 +1594,154 @@ return { Canvas };
    that's designed. */
 defineModule('mipsInput', [], () => {
 'use strict';
-const { useState, useRef } = React;
+const { useState, useRef, useLayoutEffect } = React;
 
-function MipsInput({ onSubmit }) {
+// Given a mnemonic (lowercased) and everything already typed on the line
+// between the end of that mnemonic token and the start of the token the
+// caret currently occupies, determines which operand slot that token
+// occupies and what type it must be ('reg' | 'imm'), per `grammar` (see
+// MIPS_GRAMMAR, defined next to assembleMipsLine — the ground truth this
+// must track). Returns null when the mnemonic is unknown, or every operand
+// the grammar expects has already been typed.
+function getArgSlotType(mnemonic, textAfterMnemonic, grammar) {
+  const shape = grammar[mnemonic];
+  if (!shape) return null;
+  let slotIndex = 0, depth = 0;
+  for (const ch of textAfterMnemonic) {
+    if (ch === '(') depth++;
+    else if (ch === ')') depth = Math.max(0, depth - 1); // tolerate a stray unmatched ')'
+    else if (ch === ',' && depth === 0) slotIndex++;
+  }
+  if (slotIndex >= shape.length) return null; // past the last expected operand
+  const slot = shape[slotIndex];
+  if (slot !== 'offset-reg') return slot;
+  return depth > 0 ? 'reg' : 'imm'; // inside offset(...)'s parens -> register; before '(' -> the offset immediate
+}
+
+// Finds the "word" the caret is sitting at the end of and classifies it:
+// - the first token on its line (no $ prefix)  -> mnemonic context
+// - a token starting with '$' at an operand position where the line's
+//   mnemonic's grammar says a register is valid there -> register context
+// - anything else (mid-word, blank, a $ where a register isn't valid per
+//   the mnemonic's grammar, a $ as the line's own first token, an operand
+//   position without $, inside a comment) -> none
+// Only triggers when the caret sits exactly at the END of an in-progress
+// word (not mid-word) — avoids ambiguous mid-word-insertion cases.
+function getSuggestionContext(text, caretIndex, mnemonics, regNames, grammar) {
+  const lineStart = text.lastIndexOf('\n', caretIndex-1) + 1;
+  let tokenStart = caretIndex;
+  // Token delimiters: whitespace, comma, AND parens — without the parens,
+  // a '$' typed right after '(' (lw/sw's base register) would get lumped
+  // into one non-$-starting token like "4($" and never be recognized as
+  // the start of a fresh register token at all.
+  while (tokenStart > lineStart && !/[\s,()]/.test(text[tokenStart-1])) tokenStart--;
+  if (tokenStart === caretIndex) return null; // empty token (caret right after a delimiter)
+  const token = text.slice(tokenStart, caretIndex);
+  const lineBeforeToken = text.slice(lineStart, tokenStart);
+  const atLineStart = /^\s*$/.test(lineBeforeToken);
+  let kind, candidates;
+  if (token[0] === '$') {
+    if (atLineStart) return null; // a register is never valid as the mnemonic position
+    // Past the mnemonic -> only offer registers where that mnemonic's
+    // grammar actually allows a register at this operand position. No
+    // dropdown inside a comment, or when the slot is an immediate/offset/
+    // unknown -- a '$' there is already syntactically wrong, so there's
+    // nothing correct left to suggest.
+    if (lineBeforeToken.indexOf('#') !== -1) return null;
+    const mnemMatch = /^\s*(\S+)/.exec(lineBeforeToken);
+    const mnemonic = mnemMatch[1].toLowerCase();
+    const textAfterMnemonic = lineBeforeToken.slice(mnemMatch.index + mnemMatch[0].length);
+    if (getArgSlotType(mnemonic, textAfterMnemonic, grammar) !== 'reg') return null;
+    const needle = token.slice(1).toLowerCase();
+    kind = 'register';
+    candidates = regNames.filter(n => n.toLowerCase().startsWith(needle))
+                          .sort((a,b) => a.localeCompare(b))
+                          .map(n => '$'+n);
+  } else if (atLineStart) {
+    // Nothing but whitespace precedes this token on its line (tolerates
+    // indentation) -> it's the line's first token, i.e. a mnemonic.
+    const needle = token.toLowerCase();
+    kind = 'mnemonic';
+    candidates = mnemonics.filter(m => m.toLowerCase().startsWith(needle)).sort();
+  } else {
+    return null; // non-$ token at an operand position — nothing to suggest
+  }
+  if (candidates.length === 0) return null;
+  return { tokenStart, tokenEnd: caretIndex, kind, candidates };
+}
+
+// Mirror-div technique: builds a hidden element replicating every
+// text-layout-affecting computed style of `el` (read fresh via
+// getComputedStyle on every call, never cached, so a manually
+// resize:vertical-dragged textarea's new width is picked up automatically
+// on the very next call), inserts the text up to the caret plus a marker
+// span, measures the marker, tears the mirror down. Returns {top, left} in
+// px relative to el's own box — meant for an absolutely-positioned child
+// of a position:relative wrapper around el. Only meaningful for a
+// multi-line <textarea>; single-line anchoring needs no per-line math.
+function getCaretCoords(el, caretIndex) {
+  const mirror = document.createElement('div');
+  const cs = getComputedStyle(el);
+  ['boxSizing','width','paddingTop','paddingRight','paddingBottom','paddingLeft',
+   'borderTopWidth','borderRightWidth','borderBottomWidth','borderLeftWidth',
+   'fontFamily','fontSize','fontWeight','fontStyle','letterSpacing',
+   'lineHeight','textTransform','wordSpacing','tabSize'].forEach(p => { mirror.style[p] = cs[p]; });
+  mirror.style.whiteSpace = 'pre-wrap';
+  mirror.style.wordWrap = 'break-word';
+  mirror.style.overflowWrap = 'break-word';
+  mirror.style.position = 'absolute';
+  mirror.style.visibility = 'hidden'; // NOT display:none — must still lay out to measure
+  mirror.style.top = '0';
+  mirror.style.left = '-9999px';      // off-screen, not display:none
+  mirror.style.height = 'auto';
+  mirror.style.overflow = 'hidden';
+
+  const marker = document.createElement('span');
+  marker.textContent = '​';
+  mirror.appendChild(document.createTextNode(el.value.slice(0, caretIndex)));
+  mirror.appendChild(marker);
+  mirror.appendChild(document.createTextNode(el.value.slice(caretIndex) || '.'));
+
+  document.body.appendChild(mirror);
+  const top = marker.offsetTop - el.scrollTop;
+  const left = marker.offsetLeft - el.scrollLeft;
+  const lineHeight = parseFloat(cs.lineHeight) || parseFloat(cs.fontSize)*1.2;
+  document.body.removeChild(mirror);
+
+  return { top: top + lineHeight, left }; // +lineHeight -> below the caret's own line
+}
+
+function SuggestionList({ items, selectedIndex, style, onPick }) {
+  return <div className="mips-suggest" style={style}>
+    {items.map((item, i) =>
+      // onMouseDown (not onClick) + preventDefault so a mouse pick is
+      // handled BEFORE the input's blur fires and tears the dropdown down.
+      <div key={item} className={"mips-suggest-item"+(i===selectedIndex?" selected":"")}
+           onMouseDown={(e)=>{e.preventDefault(); onPick(item);}}>
+        {item}
+      </div>)}
+  </div>;
+}
+
+function MipsInput({ onSubmit, mnemonics, regNames, grammar }) {
   const [mode, setMode] = useState('single'); // 'single' | 'multi' | 'file'
   const [text, setText] = useState('');
   const [error, setError] = useState(null);
+  // null, or { tokenStart, tokenEnd, kind, candidates, selectedIndex, coords }
+  // — one atomic object rather than separate candidates/selectedIndex state,
+  // so they can never go stale relative to each other.
+  const [suggest, setSuggest] = useState(null);
   const fileInputRef = useRef(null);
+  const inputElRef = useRef(null);      // the active <input> OR <textarea> — mutually exclusive by mode, so one ref covers both
+  const pendingCaretRef = useRef(null); // caret offset to restore after a programmatic text splice (see useLayoutEffect below)
+  // Set by handleKeyDown whenever it fully handles a key itself (Arrow/Tab/
+  // Escape while a dropdown is showing) — the matching keyup for that same
+  // keypress still fires right after, and onKeyUp's recompute would
+  // otherwise immediately stomp the just-applied selectedIndex/accept/close
+  // back to a fresh (index-0) recompute. Only suppresses that one keyup.
+  const suppressKeyUpRef = useRef(false);
 
-  const changeMode = (e) => { setMode(e.target.value); setText(''); setError(null); };
+  const changeMode = (e) => { setMode(e.target.value); setText(''); setError(null); setSuggest(null); };
 
   const submit = () => {
     const block = text.trim();
@@ -1616,6 +1767,74 @@ function MipsInput({ onSubmit }) {
     reader.readAsText(file);
   };
 
+  // Re-evaluates what, if anything, to suggest for el's CURRENT value/caret
+  // — called on every text change and on every caret move (click or arrow
+  // keys), so the dropdown always reflects exactly where the cursor is now.
+  const recomputeSuggest = (el) => {
+    const ctx = getSuggestionContext(el.value, el.selectionStart, mnemonics, regNames, grammar);
+    if (!ctx) { setSuggest(null); return; }
+    const coords = el.tagName === 'TEXTAREA' ? getCaretCoords(el, el.selectionStart) : null;
+    setSuggest({ ...ctx, selectedIndex: 0, coords });
+  };
+
+  const acceptSuggestion = (full) => {
+    const newText = text.slice(0, suggest.tokenStart) + full + text.slice(suggest.tokenEnd);
+    pendingCaretRef.current = suggest.tokenStart + full.length;
+    setText(newText);
+    setSuggest(null);
+  };
+
+  // Restores the caret synchronously after a programmatic splice (Tab- or
+  // click-accept), before paint — useLayoutEffect rather than useEffect so
+  // there's no visible one-frame flash of the caret sitting at the wrong spot.
+  useLayoutEffect(() => {
+    if (pendingCaretRef.current == null) return;
+    const el = inputElRef.current;
+    if (el) el.setSelectionRange(pendingCaretRef.current, pendingCaretRef.current);
+    pendingCaretRef.current = null;
+  }, [text]);
+
+  const handleKeyDown = (e) => {
+    if (suggest) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        suppressKeyUpRef.current = true;
+        setSuggest(s => ({ ...s, selectedIndex: (s.selectedIndex+1) % s.candidates.length }));
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        suppressKeyUpRef.current = true;
+        setSuggest(s => ({ ...s, selectedIndex: (s.selectedIndex-1+s.candidates.length) % s.candidates.length }));
+        return;
+      }
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        suppressKeyUpRef.current = true;
+        acceptSuggestion(suggest.candidates[suggest.selectedIndex]);
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        suppressKeyUpRef.current = true;
+        setSuggest(null);
+        return;
+      }
+      // Enter deliberately falls through to the submit-on-Enter check below
+      // even while a dropdown is showing — only Tab accepts a suggestion.
+    }
+    if (e.key === 'Enter' && mode === 'single') submit();
+  };
+
+  // onKeyUp also drives recomputeSuggest (so arrow-key-driven caret moves
+  // re-evaluate suggestions for the new position) — but when handleKeyDown
+  // just fully handled this exact keypress itself (suppressKeyUpRef), the
+  // matching keyup must NOT immediately recompute and stomp that over.
+  const handleKeyUp = (e) => {
+    if (suppressKeyUpRef.current) { suppressKeyUpRef.current = false; return; }
+    recomputeSuggest(e.target);
+  };
+
   return <div className="palette">
     <div className="pal-group">
       <select className="prop-input" value={mode} onChange={changeMode}>
@@ -1624,16 +1843,33 @@ function MipsInput({ onSubmit }) {
         <option value="file">File Upload</option>
       </select>
       {mode==='single' && <>
-        <input className="text-input" placeholder="e.g. add $t0, $t1, $t2"
-               value={text}
-               onChange={e=>setText(e.target.value)}
-               onKeyDown={e=>e.key==='Enter'&&submit()}/>
+        <div className="mips-input-wrap">
+          <input ref={inputElRef} className="text-input" placeholder="e.g. add $t0, $t1, $t2"
+                 value={text}
+                 onChange={e=>{ setText(e.target.value); recomputeSuggest(e.target); }}
+                 onClick={e=>recomputeSuggest(e.target)}
+                 onKeyUp={handleKeyUp}
+                 onKeyDown={handleKeyDown}
+                 onBlur={()=>setSuggest(null)}/>
+          {suggest && <SuggestionList items={suggest.candidates} selectedIndex={suggest.selectedIndex}
+                                      style={{position:'absolute', top:'100%', left:0}}
+                                      onPick={acceptSuggestion}/>}
+        </div>
         <button className="btn primary mips-submit-btn" onClick={submit}>Submit</button>
       </>}
       {mode==='multi' && <>
-        <textarea className="text-input mips-multiline" placeholder={"e.g.\nadd $t0, $t1, $t2\nsub $t1, $t2, $t3"}
-                  value={text}
-                  onChange={e=>setText(e.target.value)}/>
+        <div className="mips-input-wrap">
+          <textarea ref={inputElRef} className="text-input mips-multiline" placeholder={"e.g.\nadd $t0, $t1, $t2\nsub $t1, $t2, $t3"}
+                    value={text}
+                    onChange={e=>{ setText(e.target.value); recomputeSuggest(e.target); }}
+                    onClick={e=>recomputeSuggest(e.target)}
+                    onKeyUp={handleKeyUp}
+                    onKeyDown={handleKeyDown}
+                    onBlur={()=>setSuggest(null)}/>
+          {suggest && <SuggestionList items={suggest.candidates} selectedIndex={suggest.selectedIndex}
+                                      style={{position:'absolute', top:suggest.coords.top, left:suggest.coords.left}}
+                                      onPick={acceptSuggestion}/>}
+        </div>
         <button className="btn primary mips-submit-btn" onClick={submit}>Submit</button>
       </>}
       {mode==='file' && <>
@@ -1685,6 +1921,10 @@ const{MipsInput}=mipsInput;
 // change like everything else here.
 const MIPS_FUNCT = { add:0x20, sub:0x22, and:0x24, or:0x25, slt:0x2A, xor:0x26, nor:0x27, sltu:0x2B };
 const MIPS_OPCODE = { lw:0x23, sw:0x2B, beq:0x04, j:0x02, addi:0x08, slti:0x0A, sltiu:0x0B, lui:0x0F };
+// Single source of truth for MipsInput's autocomplete — every supported
+// mnemonic, derived rather than hand-listed so it can never drift out of
+// sync with what assembleMipsLine actually accepts.
+const MIPS_MNEMONICS = [...Object.keys(MIPS_FUNCT), ...Object.keys(MIPS_OPCODE)];
 let _regNameToNum = null;
 function mipsRegNum(tok) {
   const m = tok.trim().match(/^\$(\w+)$/);
@@ -1701,6 +1941,24 @@ function mipsRegNum(tok) {
   if (!(m[1] in _regNameToNum)) throw new Error(`unknown register '${tok}'`);
   return _regNameToNum[m[1]];
 }
+// Per-mnemonic operand grammar for MipsInput's autocomplete gating (see
+// mipsInput module's getArgSlotType). Must track assembleMipsLine below:
+// 'reg' operands are parsed with mipsRegNum, 'imm' operands with Number(...),
+// and 'offset-reg' is lw/sw's single comma-slot composite 'offset($reg)' —
+// the offset (before '(') is an immediate, the base (inside the parens) is
+// a register. If you add a mnemonic to MIPS_FUNCT/MIPS_OPCODE and to
+// assembleMipsLine below, add its operand shape here too, or its
+// autocomplete will silently fall back to "no suggestions ever".
+const MIPS_GRAMMAR = {
+  add:['reg','reg','reg'], sub:['reg','reg','reg'], and:['reg','reg','reg'],
+  or:['reg','reg','reg'], slt:['reg','reg','reg'], xor:['reg','reg','reg'],
+  nor:['reg','reg','reg'], sltu:['reg','reg','reg'],
+  lw:['reg','offset-reg'], sw:['reg','offset-reg'],
+  addi:['reg','reg','imm'], slti:['reg','reg','imm'], sltiu:['reg','reg','imm'],
+  lui:['reg','imm'],
+  beq:['reg','reg','imm'],
+  j:['imm'],
+};
 // Assembles one line of MIPS assembly into a 32-bit instruction word, or
 // returns null for a blank/comment-only line. Throws Error with a message
 // describing the problem on anything it can't parse.
@@ -1996,7 +2254,7 @@ function App(){
     </div>
 
     <div className="main">
-      <MipsInput onSubmit={handleMipsSubmit}/>
+      <MipsInput onSubmit={handleMipsSubmit} mnemonics={MIPS_MNEMONICS} regNames={REG_NAMES} grammar={MIPS_GRAMMAR}/>
       <div className="canvas-wrap">
         <Canvas circuit={circuit}
                 selectedId={selectedId}
